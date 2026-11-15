@@ -1,0 +1,167 @@
+"""Rules of the wallet that need a server which misbehaves in ways the stand-in does not play: one that lists
+a coin which is not the wallet's, one that forgets a payment it was handed, and a journal that cannot be read.
+Against a small model of a wallet server, without a node."""
+import json
+import os
+import struct
+import sys
+import tempfile
+import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from polarka_agent import keys, tx
+from polarka_agent.server import Server, ServerError
+from polarka_agent.wallet import Refused, Wallet
+from tests.fake import BLOCK, Fake, index
+
+N = keys.UNIT
+WORDS = "abandon " * 11 + "about"
+
+
+def parsed(raw):
+    """(id, the outputs it spends) of a transaction in hex, as a server would read it."""
+    b, pos = bytes.fromhex(raw), 6
+    count = b[pos]
+    pos += 1
+    spends, start = [], pos
+    for _ in range(count):
+        spends.append((b[pos:pos + 32][::-1].hex(), struct.unpack("<I", b[pos + 32:pos + 36])[0]))
+        pos += 41
+    outs = b[pos]
+    end = pos + 1
+    for _ in range(outs):
+        end += 8 + 1 + b[end + 8]
+    plain = b[:4] + bytes([count]) + b[start:pos] + b[pos:end] + b[-4:]
+    return keys.sha(keys.sha(plain))[::-1].hex(), spends
+
+
+class Model:
+    """A wallet server out of a few lists. What it says is what the test put there."""
+
+    def __init__(self):
+        self.fake, self.height, self.coins, self.waiting, self.used, self.handed = Fake(), 300, [], {}, set(), []
+        a = self.fake.answers
+        a["/v1/addresses/activity"] = lambda body: (200, {"used_addresses": [x for x in body["addresses"] if x in self.used], "index": index(self.height)})
+        a["/v1/utxos"] = lambda body: (200, {"utxos": [self.shown(c) for c in self.coins if c["address"] in body["addresses"] and not self.spent(c)],
+                                             "index": index(self.height)})
+        a["/v1/transactions"] = lambda body: (200, {"transactions": [self.line(t) for t in self.waiting], "next_cursor": None, "index": index(self.height)})
+        a["/v1/transactions/validate"] = lambda body: (200, {"allowed": True, "rejection_reason": None})
+        a["/v1/transactions/broadcast"] = self.broadcast
+        a["/v1/transactions/status"] = lambda body: (200, {"known": body["transaction_id"] in self.waiting})
+
+    def coin(self, address, amount, txid, height=100, script=None):
+        self.used.add(address)
+        self.coins.append({"address": address, "txid": txid, "amount": amount, "height": height, "script": script or keys.script_for_address("regtest", address).hex()})
+
+    def shown(self, c):
+        return {"transaction_id": c["txid"], "output_index": 0, "amount": c["amount"], "script_pubkey": c["script"], "block_height": c["height"],
+                "confirmations": self.height - c["height"] + 1, "coinbase": False}
+
+    def spent(self, c):
+        return any((c["txid"], 0) in spends for spends in self.waiting.values())
+
+    def line(self, txid):
+        return {"transaction_id": txid, "received_at": None, "sent_to": None, "received_amount": 0, "sent_amount": 1, "fee": 1,
+                "block_height": None, "confirmations": 0, "timestamp": None}
+
+    def broadcast(self, body):
+        txid, spends = parsed(body["transaction_hex"])
+        self.waiting[txid] = spends
+        self.handed.append(txid)
+        return 200, {"transaction_id": txid}
+
+
+class RulesTest(unittest.TestCase):
+    def setUp(self):
+        self.m = Model()
+        self.now = [1_800_000_000]
+        self.folder = os.path.join(tempfile.mkdtemp(prefix="polarka-agent-rules-"), "w")
+        Wallet.create(self.folder, "regtest", self.m.fake.url, WORDS)
+        with open(os.path.join(self.folder, "limits.json"), "w") as f:
+            json.dump({"per_payment_north": "5", "per_day_north": "50"}, f)
+        self.w = Wallet(self.folder, clock=lambda: self.now[0])
+        self.to = keys.Account.from_words(keys.new_words(12), "regtest").address(0, 0)
+
+    def tearDown(self):
+        self.w.server.close()
+        self.m.fake.stop()
+
+    def test_a_coin_that_does_not_pay_to_the_wallet_is_not_taken(self):
+        self.m.coin(self.w.account.address(0, 0), 10 * N, "aa" * 32)
+        self.assertEqual(self.w.balance()["spendable"], 10 * N)
+        self.m.coin(self.w.account.address(0, 1), 10 * N, "bb" * 32, script=keys.script_for_address("regtest", self.to).hex())
+        for look in (self.w.balance, lambda: self.w.pay([(self.to, N)])):
+            with self.assertRaises(ServerError) as e:
+                look()
+            self.assertIn("does not pay to this wallet", str(e.exception))
+        self.assertFalse(os.path.exists(os.path.join(self.folder, "journal.jsonl")))
+
+    def test_a_coin_above_the_tip_or_of_nothing(self):
+        self.m.coin(self.w.account.address(0, 0), 0, "aa" * 32)
+        with self.assertRaises(ServerError):
+            self.w.balance()
+
+    def test_a_payment_that_the_server_was_handed_and_forgot(self):
+        self.m.coin(self.w.account.address(0, 0), 10 * N, "aa" * 32)
+        self.m.coin(self.w.account.address(0, 1), 10 * N, "bb" * 32)
+        first = self.w.pay([(self.to, 2 * N)])
+        self.assertEqual(first["state"], "handed")
+        b = self.w.balance()
+        self.assertEqual((b["spendable"], b["open_payments"][0]["waits_long"]), (10 * N, False))
+        self.now[0] += 3601
+        self.assertTrue(self.w.balance()["open_payments"][0]["waits_long"])            # an hour, and still no block
+        self.m.waiting.clear()                                                         # the server lost it: its coin is listed again
+        self.now[0] -= 3601 - 30
+        self.assertEqual(self.w.payments()[0]["state"], "handed")                      # not within the first minute
+        self.now[0] += 60
+        self.assertEqual(self.w.payments()[0]["state"], "unknown")
+        second = self.w.pay([(self.to, 3 * N)])
+        self.assertEqual((second["state"], second["stands_against"]), ("handed", [first["id"]]))
+        self.assertIn(("aa" * 32, 0), self.m.waiting[second["id"]])                    # built on the coin of the first
+
+    def test_a_journal_that_cannot_be_read_stops_everything(self):
+        self.m.coin(self.w.account.address(0, 0), 10 * N, "aa" * 32)
+        self.assertEqual(self.w.pay([(self.to, N)])["state"], "handed")
+        with open(os.path.join(self.folder, "journal.jsonl"), "a") as f:
+            f.write("{half a line\n")
+        for act in (self.w.balance, self.w.payments, lambda: self.w.pay([(self.to, N)])):
+            with self.assertRaises(Refused) as e:
+                act()
+            self.assertEqual(e.exception.kind, "JOURNAL")
+
+    def test_the_journal_is_written_before_the_server_sees_anything(self):
+        self.m.coin(self.w.account.address(0, 0), 10 * N, "aa" * 32)
+        seen = []
+
+        def validate(body):
+            with open(os.path.join(self.folder, "journal.jsonl")) as f:
+                seen.append(body["transaction_hex"] in f.read())
+            return 200, {"allowed": True, "rejection_reason": None}
+        self.m.fake.answers["/v1/transactions/validate"] = validate
+        self.w.pay([(self.to, N)])
+        self.assertEqual(seen, [True])
+
+    def test_an_answer_with_another_transactions_id_is_not_believed(self):
+        self.m.coin(self.w.account.address(0, 0), 10 * N, "aa" * 32)
+        self.m.fake.answers["/v1/transactions/broadcast"] = lambda body: (200, {"transaction_id": "cc" * 32})
+        self.assertEqual(self.w.pay([(self.to, N)])["state"], "unknown")
+
+    def test_the_day_is_counted_from_the_journal(self):
+        for i in range(12):
+            self.m.coin(self.w.account.address(0, i), 10 * N, "%02x" % (i + 1) * 32)
+        for i in range(10):
+            self.assertEqual(self.w.pay([(self.to, units_of("4.9"))])["state"], "handed", i)
+        with self.assertRaises(Refused) as e:
+            self.w.pay([(self.to, units_of("4.9"))])
+        self.assertEqual(e.exception.kind, "OVER_DAY")
+        self.now[0] += 24 * 3600 + 1
+        self.assertEqual(self.w.pay([(self.to, units_of("4.9"))])["state"], "handed")
+
+
+def units_of(text):
+    from polarka_agent.wallet import units
+    return units(text)
+
+
+if __name__ == "__main__":
+    unittest.main()
