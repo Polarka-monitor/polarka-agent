@@ -119,6 +119,29 @@ class RulesTest(unittest.TestCase):
         self.assertEqual((second["state"], second["stands_against"]), ("handed", [first["id"]]))
         self.assertIn(("aa" * 32, 0), self.m.waiting[second["id"]])                    # built on the coin of the first
 
+    def test_a_fee_rate_out_of_bounds_in_the_limits_stops_the_wallet(self):
+        self.m.coin(self.w.account.address(0, 0), 10 * N, "aa" * 32)
+        for rate in (0, tx.MAX_FEE_RATE + 1, "2", 2.5, True):
+            with open(os.path.join(self.folder, "limits.json"), "w") as f:
+                json.dump({"per_payment_north": "5", "per_day_north": "50", "fee_rate": rate}, f)
+            for ask in (self.w.limits, lambda: self.w.pay([(self.to, N)])):
+                with self.assertRaises(Refused) as e:
+                    ask()
+                self.assertEqual(e.exception.kind, "LIMITS", rate)
+        self.assertFalse(os.path.exists(os.path.join(self.folder, "journal.jsonl")))
+        with open(os.path.join(self.folder, "limits.json"), "w") as f:
+            json.dump({"per_payment_north": "5", "per_day_north": "50", "fee_rate": tx.MAX_FEE_RATE}, f)
+        self.assertEqual(self.w.limits()["fee_rate"], tx.MAX_FEE_RATE)
+
+    def test_a_note_longer_than_two_hundred_characters_is_refused(self):
+        self.m.coin(self.w.account.address(0, 0), 10 * N, "aa" * 32)
+        for memo in ("x" * 201, 7, ["a"]):
+            with self.assertRaises(Refused) as e:
+                self.w.pay([(self.to, N)], memo=memo)
+            self.assertEqual(e.exception.kind, "MEMO")
+        self.assertFalse(os.path.exists(os.path.join(self.folder, "journal.jsonl")))
+        self.assertEqual(self.w.pay([(self.to, N)], memo="x" * 200)["state"], "handed")
+
     def test_a_journal_that_cannot_be_read_stops_everything(self):
         self.m.coin(self.w.account.address(0, 0), 10 * N, "aa" * 32)
         self.assertEqual(self.w.pay([(self.to, N)])["state"], "handed")

@@ -75,13 +75,18 @@ signature hash and signing; they come from the cold address tool
 
     TN_BIN=/path/to/bin python3 -B -m unittest discover -s tests -t .
 
-59 tests. Those in `test_wallet.py` and `test_cli_mcp.py` run against the official `truenorthd` on regtest
+61 tests. Those in `test_wallet.py` and `test_cli_mcp.py` run against the official `truenorthd` on regtest
 and a stand-in for a Northbound server (`tests/standin`, copied from the Polarka Wallet's repository); they
 are skipped without the node programs. No test touches a real network.
 
+`tests/faults.py` is a test of the tests: it puts one deliberate fault at a time into a copy of the code
+(a limit that is not applied, a day that does not count the payment being made, and so on) and expects the
+tests to fail. Seven faults in the owner's rules, all seven caught. It covers those rules only, not the keys,
+the signing or the client of the server.
+
 ## What is missing
 
-- A review by anybody but its author, and deliberate faults to show that the tests catch them.
+- A review by anybody but its author.
 - Any payment on the real network.
 - A way to replace a payment that was handed over and waits for a block without end.
 - A node of one's own in place of a wallet server.
