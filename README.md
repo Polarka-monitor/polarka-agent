@@ -4,10 +4,11 @@ A wallet for TrueNorth (NORTH) that a program can use: a command line, a Python 
 agents that speak the Model Context Protocol (MCP). The keys stay on the machine it runs on. What its
 addresses hold it asks a wallet server with the Northbound API (github.com/nova9/northbound).
 
-**State: 0.1.0.dev0. An early build that has only ever paid on a test network (regtest).** It was written
-with an AI model under its author's direction. Its author's tests are the only check it has had: nobody
-independent has looked at it, and it has not made a payment on the real network. Do not put into it what
-you cannot lose. It is an independent community project, not a product of the TrueNorth developers or of
+**State: 0.1.0, an early version.** It was written with an AI model under its author's direction. An
+independent AI reviewer read it and found faults, the serious ones of which are mended (`REVIEW.md`); no
+human security expert has read it. On 17 November 2026 it made its first payments on the real network: two
+small payments went into blocks, and its owner's limits refused what they should (`NO_LIMITS`, `OVER_LIMIT`,
+`OVER_DAY`). That is all the real use it has had. Do not put into it what you cannot lose. It is an independent community project, not a product of the TrueNorth developers or of
 the Northbound project.
 
 ## What it is for
@@ -119,7 +120,7 @@ in the owner's rules. It covers those rules only, not the keys, the signing or t
   `REVIEW.md` with what was done about each.
 - More than two hundred addresses of a kind: beyond that the wallet hands out no new address and reuses
   its last change key.
-- Any payment on the real network.
+- More than a first try on the real network.
 - A way to replace a payment that was handed over and waits for a block without end.
 - A node of one's own in place of a wallet server.
 - A history that is exact for a wallet with more than a hundred addresses.
