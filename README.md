@@ -4,7 +4,7 @@ A wallet for TrueNorth (NORTH) that a program can use: a command line, a Python 
 agents that speak the Model Context Protocol (MCP). The keys stay on the machine it runs on. What its
 addresses hold it asks a wallet server with the Northbound API (github.com/nova9/northbound).
 
-**State: 0.1.0, an early version.** It was written with an AI model under its author's direction. An
+**State: 0.1.1, an early version.** It was written with an AI model under its author's direction. An
 independent AI reviewer read it and found faults, the serious ones of which are mended (`REVIEW.md`); no
 human security expert has read it. On 17 November 2026 it made its first payments on the real network: two
 small payments went into blocks, and its owner's limits refused what they should (`NO_LIMITS`, `OVER_LIMIT`,
@@ -54,6 +54,14 @@ coins. A program is not shown the server's own words: why a node refused a payme
 fixed words (`FEE_TOO_LOW`, `INPUTS_GONE`, `OTHER`, ...), an error as its HTTP status, and a receiver in the
 history only if it has the shape of an address. The words themselves appear at the command line alone,
 under `server_said_untrusted`, for the owner.
+
+## Installing
+
+    pip install polarka-agent
+
+That gives the command `polarka-agent`, which is the same as `python3 -m polarka_agent`. It needs Python 3.9
+or later on Linux or macOS and nothing besides; it does not run on Windows. The package on PyPI is built from
+this repository at the tag of its version.
 
 ## Commands
 

@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "polarka-agent"
+dynamic = ["version"]
+description = "A wallet for TrueNorth (NORTH) that a program can use: command line, Python library and MCP server."
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Severka" }]
+keywords = ["truenorth", "north", "wallet", "mcp", "agent", "cryptocurrency"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Office/Business :: Financial",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://polarka.org"
+Source = "https://github.com/severka-monitor/polarka-agent"
+Issues = "https://github.com/severka-monitor/polarka-agent/issues"
+
+[project.scripts]
+polarka-agent = "polarka_agent.cli:main"
+
+[tool.hatch.version]
+path = "polarka_agent/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["polarka_agent"]
+core-metadata-version = "2.4"
+
+[tool.hatch.build.targets.sdist]
+core-metadata-version = "2.4"
+include = [
+    "/polarka_agent",
+    "/tests",
+    "/review",
+    "/README.md",
+    "/REVIEW.md",
+    "/LICENSE",
+    "/pyproject.toml",
+]
