@@ -1,0 +1,56 @@
+# Builds the package and uploads it to PyPI when a tag v* is pushed.
+# PyPI trusts this workflow in this repository (a trusted publisher); there is no token.
+# The upload waits for the approval that the environment "pypi" asks for.
+# Started by hand it only builds and shows the SHA-256 of the files.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+      - name: The tag must be the version in the code
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          v="$(python -c 'import polarka_agent; print(polarka_agent.__version__)')"
+          test "v$v" = "$GITHUB_REF_NAME"
+      - name: Build
+        run: |
+          python -m pip install build==1.6.1
+          export SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)"
+          python -m build --sdist --wheel --outdir dist .
+          sha256sum dist/*
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/polarka-agent/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3

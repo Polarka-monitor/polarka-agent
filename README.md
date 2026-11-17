@@ -61,7 +61,8 @@ under `server_said_untrusted`, for the owner.
 
 That gives the command `polarka-agent`, which is the same as `python3 -m polarka_agent`. It needs Python 3.9
 or later on Linux or macOS and nothing besides; it does not run on Windows. The package on PyPI is built from
-this repository at the tag of its version.
+this repository at the tag of its version; after 0.1.1 the workflow in `.github/workflows/release.yml` builds
+and uploads it, and prints the SHA-256 of the files it made.
 
 ## Commands
 
