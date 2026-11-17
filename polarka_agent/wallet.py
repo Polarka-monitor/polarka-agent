@@ -239,7 +239,9 @@ class Wallet:
                 if where is None:
                     # the server is trusted for what exists, never for what is ours
                     raise ServerError(200, "the server listed a coin that does not pay to this wallet")
-                if c["amount"] <= 0 or c["height"] < 1:
+                if c["amount"] == 0:
+                    continue    # an output of nothing can be in a block; it is no coin, and anybody can make one
+                if c["amount"] < 0 or c["height"] < 1:
                     raise ServerError(200, "the server listed a coin that cannot exist")
                 coins.append(tx.Coin(c["txid"], c["vout"], c["amount"], bytes.fromhex(c["script"]), c["height"], c["coinbase"], where[0], where[1]))
             if window != state.get("window"):
@@ -254,6 +256,9 @@ class Wallet:
             seen = self.look()
             state = self._state()
             index = max(seen["last"][0] + 1, int(state.get("handed", 0)))
+            if index >= seen["window"]:
+                raise Refused("TOO_MANY_ADDRESSES", "this wallet has used %d receiving addresses, as many as this program looks at; "
+                                                    "a coin paid to a further one would not be seen. Use an address handed out before." % seen["window"])
             if index - (seen["last"][0] + 1) >= GAP:
                 raise Refused("TOO_MANY_OPEN", "%d addresses in a row were handed out and none was paid to; a wallet brought back "
                                                "from its words would not find coins beyond them. Use one of them first." % GAP)
@@ -405,7 +410,9 @@ class Wallet:
                     must.append(held[0])
             aside = {(t, n) for p in payments.values() if p["state"] == "handed" for t, n, _ in p["inputs"]}
             free = [c for c in seen["coins"] if tx.spendable(c, seen["tip"]) and (c.txid, c.vout) not in aside]
-            change_index = seen["last"][1] + 1
+            # change goes to the next unused key, but never to one this program does not look at: at the end of
+            # its window the last key is used again
+            change_index = min(seen["last"][1] + 1, seen["window"] - 1)
             try:
                 the_plan = tx.plan(free, [(s, v) for s, v, _ in outputs], limits["fee_rate"], self.account.script(1, change_index), must)
             except tx.PlanError as e:
@@ -424,7 +431,9 @@ class Wallet:
                                             [(v, s) for s, v in the_plan.outputs], tx.LOCKTIME))
             if again is not None and again["state"] not in OPEN:
                 raise Refused("ALREADY", "this very transaction was made before and is %s" % again["state"])
-            spent = sum(p["out"] for p in payments.values() if now - p["t"] < DAY and p["state"] not in ("overtaken", "forgotten") and p is not again)
+            # A payment counts for its day whatever became of it. "overtaken" rests on the server's word that
+            # another payment is in a block, and a server must not be the one to free the owner's limit.
+            spent = sum(p["out"] for p in payments.values() if now - p["t"] < DAY and p["state"] != "forgotten" and p is not again)
             if spent + out > limits["per_day"]:
                 raise Refused("OVER_DAY", "with this payment the wallet would pay %s NORTH within a day; the owner's limit is %s" % (north(spent + out), north(limits["per_day"])))
             shown = {"sent": north(sent), "fee": north(the_plan.fee), "change": north(the_plan.change), "coins": len(the_plan.coins),

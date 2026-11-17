@@ -96,10 +96,72 @@ class RulesTest(unittest.TestCase):
             self.assertIn("does not pay to this wallet", str(e.exception))
         self.assertFalse(os.path.exists(os.path.join(self.folder, "journal.jsonl")))
 
-    def test_a_coin_above_the_tip_or_of_nothing(self):
+    def test_an_output_of_nothing_is_no_coin_and_stops_nothing(self):
         self.m.coin(self.w.account.address(0, 0), 0, "aa" * 32)
+        self.assertEqual((self.w.balance()["spendable"], self.w.balance()["coins"]), (0, 0))
+        self.m.coin(self.w.account.address(0, 1), 10 * N, "bb" * 32)
+        self.assertEqual(self.w.balance()["spendable"], 10 * N)
+        self.assertEqual(self.w.pay([(self.to, N)])["state"], "handed")
+
+    def test_a_coin_of_less_than_nothing_is_refused(self):
+        self.m.coin(self.w.account.address(0, 0), -1, "aa" * 32)
         with self.assertRaises(ServerError):
             self.w.balance()
+
+    def test_a_server_that_lies_about_a_block_does_not_free_the_day(self):
+        with open(os.path.join(self.folder, "limits.json"), "w") as f:
+            json.dump({"per_payment_north": "5", "per_day_north": "10"}, f)
+        for i in range(12):
+            self.m.coin(self.w.account.address(0, i), 10 * N, "%02x" % (i + 1) * 32)
+        allow, lied = [False], set()
+        self.m.fake.answers["/v1/transactions/validate"] = lambda body: (200, {"allowed": allow[0], "rejection_reason": None if allow[0] else "try again"})
+
+        def line(t):
+            shown = self.m.line(t)
+            if t in lied:
+                shown.update(block_height=self.m.height, confirmations=1)
+            return shown
+        self.m.fake.answers["/v1/transactions"] = lambda body: (200, {"transactions": [line(t) for t in self.m.waiting], "next_cursor": None,
+                                                                    "index": index(self.m.height)})
+        big, refused = [], 0
+        for _ in range(6):
+            allow[0] = False
+            try:
+                kept = self.w.pay([(self.to, 49 * N // 10)])       # refused by the server, which now holds it, signed
+            except Refused as e:
+                self.assertEqual(e.kind, "OVER_DAY")
+                refused += 1
+                continue
+            big.append(kept["id"])
+            allow[0] = True
+            try:
+                small = self.w.pay([(self.to, 1000)])              # stands on the first one's coin; the server calls it mined
+            except Refused as e:
+                self.assertEqual(e.kind, "OVER_DAY")
+                continue
+            lied.add(small["id"])
+        journal = self.w._journal()
+        self.assertLessEqual(sum(journal[t]["out"] for t in journal), 10 * N)       # all that was ever signed within the day
+        self.assertEqual(len(big), 2)
+        self.assertEqual(refused, 4)
+
+    def test_change_never_goes_to_a_key_that_is_not_looked_at(self):
+        for i in range(200):
+            self.m.used.add(self.w.account.address(1, i))
+        self.m.coin(self.w.account.address(0, 0), 10 * N, "aa" * 32)
+        paid = self.w.pay([(self.to, N)])
+        change_script = self.w._journal()[paid["id"]]["outputs"][-1][0]
+        seen = self.w.look()
+        self.assertEqual(seen["window"], 200)
+        self.assertEqual(change_script, self.w.account.script(1, 199).hex())
+        self.assertIn(self.w.account.address(1, 199), seen["addresses"])
+
+    def test_no_address_is_handed_out_that_is_not_looked_at(self):
+        for i in range(200):
+            self.m.used.add(self.w.account.address(0, i))
+        with self.assertRaises(Refused) as e:
+            self.w.fresh_address()
+        self.assertEqual(e.exception.kind, "TOO_MANY_ADDRESSES")
 
     def test_a_payment_that_the_server_was_handed_and_forgot(self):
         self.m.coin(self.w.account.address(0, 0), 10 * N, "aa" * 32)

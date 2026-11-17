@@ -156,6 +156,8 @@ def run(argv=None, out=sys.stdout):
         return show({"error": "SERVER", "status": e.status, "kind": e.kind, "message": str(e)}, 3)
     except OSError as e:
         return show({"error": "FILE", "message": "%s: %s" % (type(e).__name__, e.strerror or e)}, 2)
+    except Exception as e:      # whatever else: one JSON object, never a traceback with what it may hold
+        return show({"error": "INTERNAL", "message": type(e).__name__}, 4)
     return 1
 
 

@@ -14,7 +14,7 @@ the Northbound project.
 
 A program that has a processor and no bank account can earn NORTH by mining and can be paid in it. This
 wallet lets such a program hold coins and pay small amounts by itself, within bounds that a person sets and
-that the program cannot change.
+that the tools given to the program cannot change.
 
 ## How a program is kept within bounds
 
@@ -23,6 +23,11 @@ that the program cannot change.
   `"fee_rate"`. No command and no tool of the MCP server writes or changes it.
 - Every transaction is written into `journal.jsonl` before anything leaves the machine. Lines are only added.
 - The MCP server has no tool that shows the recovery words, changes the limits or forgets a payment.
+- These bounds hold against a program that reaches the wallet through the MCP server only. A program that
+  can run commands or write files as the same user can change `limits.json`, move the journal away or read
+  the words; against that the wallet does nothing. Give an agent the MCP server, not a shell in that account.
+- A payment counts into its day whatever became of it; only the owner's `forget` takes one out. A payment
+  that another one replaced therefore counts twice for a day.
 - What a wallet server says in words is cut short and stripped to plain characters before it is passed on,
   and the server's instructions to the agent say that such words are data.
 
@@ -42,7 +47,10 @@ server shows none of the coins of such a payment, the wallet pays nothing at all
 at the wallet through another server or a node and forgets the payment by hand (`forget`).
 
 A wallet server sees the wallet's addresses together and the machine's internet address. It can show a false
-balance or hold a payment back. It cannot take coins.
+balance or hold a payment back. It can stop the wallet until its owner acts (by refusing a payment and then
+hiding its coins), and it can keep one command waiting for a long time by answering slowly. It cannot take
+coins. What a server says in words (why it refused, an error) is passed on cut short and in plain
+characters, but it is still the server's text: an agent that reads it can be talked to by the server.
 
 ## Commands
 
@@ -75,18 +83,23 @@ signature hash and signing; they come from the cold address tool
 
     TN_BIN=/path/to/bin python3 -B -m unittest discover -s tests -t .
 
-61 tests. Those in `test_wallet.py` and `test_cli_mcp.py` run against the official `truenorthd` on regtest
+66 tests. Those in `test_wallet.py` and `test_cli_mcp.py` run against the official `truenorthd` on regtest
 and a stand-in for a Northbound server (`tests/standin`, copied from the Polarka Wallet's repository); they
 are skipped without the node programs. No test touches a real network.
 
 `tests/faults.py` is a test of the tests: it puts one deliberate fault at a time into a copy of the code
 (a limit that is not applied, a day that does not count the payment being made, and so on) and expects the
-tests to fail. Seven faults in the owner's rules, all seven caught. It covers those rules only, not the keys,
-the signing or the client of the server.
+tests to fail. It first runs the copy as it stands, and counts a fault as caught only when tests ran and failed. Ten faults
+in the owner's rules. It covers those rules only, not the keys, the signing or the client of the server.
 
 ## What is missing
 
-- A review by anybody but its author.
+- A review by a person. An independent AI reviewer read version 0.1.0.dev0 and found two serious faults (a
+  server that lies about a block could lift the day's limit; after two hundred addresses the wallet sent
+  change where it did not look). Both are mended here, with tests. Its other findings are listed in
+  `REVIEW.md` with what was done about each.
+- More than two hundred addresses of a kind: beyond that the wallet hands out no new address and reuses
+  its last change key.
 - Any payment on the real network.
 - A way to replace a payment that was handed over and waits for a block without end.
 - A node of one's own in place of a wallet server.
