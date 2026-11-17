@@ -9,7 +9,7 @@ may be public as a clearly labelled work in progress; it is not to be used with 
 |---|---|---|---|
 | F1 | High | A server that falsely reports a small payment as in a block made the wallet drop the refused payment it stood against from the day's sum; repeated, the day's limit did not hold | Mended: a payment counts into its day whatever became of it, only the owner's `forget` takes one out. Test: `test_a_server_that_lies_about_a_block_does_not_free_the_day` |
 | F2 | High | The wallet looks at 200 keys of a kind, yet sent change to key 200 and handed out address 200 | Mended: change reuses the last key that is looked at, and no address beyond is handed out (`TOO_MANY_ADDRESSES`). Two tests |
-| F3 | Medium | Text chosen by the server reaches the agent through MCP results | Open. Said plainly in the README |
+| F3 | Medium | Text chosen by the server reaches the agent through MCP results | Mended: a refusal is passed on as one of a few fixed words, an error as its HTTP status, and a receiver that has not the shape of an address is refused; the words are shown at the command line only. Two tests. A memo (F17) is still shown as it was given |
 | F4 | Medium | The bounds hold against the MCP tools only, not against a program with a shell or file access as the same user | By design; the README now says so |
 | F5 | Medium | One output of amount 0 on an address of the wallet stopped every command | Mended: such an output is no coin and is passed over. Test |
 | F6 | Low | A payment that did not go through and is asked for again after 24 hours is not counted in that day | Open |

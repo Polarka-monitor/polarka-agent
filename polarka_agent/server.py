@@ -47,9 +47,31 @@ class ServerError(Exception):
     """status is the HTTP status (0 when there was no answer, 200 for an answer that cannot be believed);
     kind is LATE, MOVED, UNREACHABLE or None."""
 
-    def __init__(self, status, message, kind=None):
+    def __init__(self, status, message, kind=None, said=None):
         super().__init__(message)
-        self.status, self.kind = status, kind
+        # said: the server's own words, cleaned. They are for the owner's eyes at the command line and are
+        # never part of the message, which is what a program or an agent is shown.
+        self.status, self.kind, self.said = status, kind, said
+
+
+# what an address can look like at all: one word of small letters and digits. Anything else is not passed on.
+ADDRESS_SHAPE = re.compile(r"^[a-z]{1,10}1[a-z0-9]{6,90}$")
+
+# Why a node did not take a transaction, as one of a few fixed words. The node's own text is free text from
+# the server's side and is not passed on to a program.
+REASONS = (("ALREADY_KNOWN", ("already",)), ("INPUTS_GONE", ("missingorspent", "missing-inputs", "missing inputs")),
+           ("CONFLICT", ("conflict",)), ("FEE_TOO_LOW", ("fee",)), ("DUST", ("dust",)), ("NOT_FINAL", ("non-final", "nonfinal")),
+           ("TOO_LONG_CHAIN", ("too-long-mempool-chain", "too many")), ("NOT_STANDARD", ("nonstandard", "non-standard", "scriptpubkey")))
+
+
+def reason_code(reason):
+    low = (reason or "").lower()
+    if not low:
+        return "NO_REASON"
+    for code, marks in REASONS:
+        if any(m in low for m in marks):
+            return code
+    return "OTHER"
 
 
 def clean(text, most=MAX_WORDS):
@@ -242,7 +264,7 @@ class Server:
             return obj
         said = obj.get("message") if obj else None
         said = clean(said) if type(said) is str and said.strip() else None
-        raise ServerError(status, said or ("the server is busy" if status in (429, 503) else "the server answered HTTP %d" % status))
+        raise ServerError(status, "the server is busy" if status in (429, 503) else "the server answered HTTP %d" % status, said=said)
 
     # ------------------------------------------------------------------------------------------ reading an answer
 
@@ -348,6 +370,8 @@ class Server:
         if received_at is not None and received_at not in named:
             raise ServerError(200, "the server named an address it was not asked about")
         sent_to = _text(t, "sent_to", MAX_ADDRESS, True)
+        if sent_to is not None and not ADDRESS_SHAPE.match(sent_to):
+            raise ServerError(200, "the server named a receiver that is not an address")
         height, deep = _whole(t, "block_height", MAX_HEIGHT, True), _whole(t, "confirmations", MAX_HEIGHT + 1)
         if not (deep == 0 if height is None else height <= tip and deep == tip - height + 1):
             raise ServerError(200, "the server sent a transaction whose depth does not fit its block")

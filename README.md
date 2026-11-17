@@ -28,8 +28,8 @@ that the tools given to the program cannot change.
   the words; against that the wallet does nothing. Give an agent the MCP server, not a shell in that account.
 - A payment counts into its day whatever became of it; only the owner's `forget` takes one out. A payment
   that another one replaced therefore counts twice for a day.
-- What a wallet server says in words is cut short and stripped to plain characters before it is passed on,
-  and the server's instructions to the agent say that such words are data.
+- What a wallet server says in words is not passed on to the program: a refusal comes as one of a few fixed
+  words and an error as its HTTP status.
 
 The recovery words are in `wallet.json`, readable by its owner only (mode 600; the program refuses to work
 with a file that others can read). Whoever can read that file can spend. This is a wallet for small amounts
@@ -49,8 +49,10 @@ at the wallet through another server or a node and forgets the payment by hand (
 A wallet server sees the wallet's addresses together and the machine's internet address. It can show a false
 balance or hold a payment back. It can stop the wallet until its owner acts (by refusing a payment and then
 hiding its coins), and it can keep one command waiting for a long time by answering slowly. It cannot take
-coins. What a server says in words (why it refused, an error) is passed on cut short and in plain
-characters, but it is still the server's text: an agent that reads it can be talked to by the server.
+coins. A program is not shown the server's own words: why a node refused a payment comes as one of a few
+fixed words (`FEE_TOO_LOW`, `INPUTS_GONE`, `OTHER`, ...), an error as its HTTP status, and a receiver in the
+history only if it has the shape of an address. The words themselves appear at the command line alone,
+under `server_said_untrusted`, for the owner.
 
 ## Commands
 
@@ -83,7 +85,7 @@ signature hash and signing; they come from the cold address tool
 
     TN_BIN=/path/to/bin python3 -B -m unittest discover -s tests -t .
 
-66 tests. Those in `test_wallet.py` and `test_cli_mcp.py` run against the official `truenorthd` on regtest
+67 tests. Those in `test_wallet.py` and `test_cli_mcp.py` run against the official `truenorthd` on regtest
 and a stand-in for a Northbound server (`tests/standin`, copied from the Polarka Wallet's repository); they
 are skipped without the node programs. No test touches a real network.
 

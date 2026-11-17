@@ -211,7 +211,8 @@ class WalletTest(unittest.TestCase):
         self.standin.set(refuse="we do not like it")
         first = w.pay([(to, 2 * N)])
         self.assertEqual(first["state"], "kept")
-        self.assertIn("we do not like it", first["note"])
+        self.assertNotIn("we do not like it", first["note"])                          # the server's words are not passed on
+        self.assertIn("(OTHER)", first["note"])
         self.assertFalse(self.in_mempool(first["id"]))
         self.assertEqual(self.standin.set()["kept"], [self.raw_of(w, first["id"])])    # the server has it, whatever it said
         self.standin.set(refuse="")

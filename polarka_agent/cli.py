@@ -153,7 +153,10 @@ def run(argv=None, out=sys.stdout):
     except BadInput as e:
         return show({"error": "INPUT", "message": str(e)}, 2)
     except ServerError as e:
-        return show({"error": "SERVER", "status": e.status, "kind": e.kind, "message": str(e)}, 3)
+        shown = {"error": "SERVER", "status": e.status, "kind": e.kind, "message": str(e)}
+        if e.said:
+            shown["server_said_untrusted"] = e.said      # for the owner at the command line; the MCP server never shows it
+        return show(shown, 3)
     except OSError as e:
         return show({"error": "FILE", "message": "%s: %s" % (type(e).__name__, e.strerror or e)}, 2)
     except Exception as e:      # whatever else: one JSON object, never a traceback with what it may hold

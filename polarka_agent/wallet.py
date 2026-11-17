@@ -22,7 +22,7 @@ import time
 from decimal import Decimal, InvalidOperation
 
 from . import keys, tx
-from .server import MOVED, Server, ServerError
+from .server import MOVED, Server, ServerError, reason_code
 
 GAP = 20                # unused addresses in a row after which a wallet is taken to end
 WINDOW = 40             # addresses of each kind that are looked at to begin with
@@ -462,7 +462,7 @@ class Wallet:
         except ServerError as e:
             return self._set(p, "unknown", "no answer to the question whether the node would take it (%s)" % e)
         if not allowed:
-            return self._set(p, "kept", "the server said that its node does not take it: %s" % (reason or "no reason given"))
+            return self._set(p, "kept", "the server said that its node does not take it (%s)" % reason_code(reason))
         for attempt in range(3):
             try:
                 answered = self.server.broadcast(p["raw"], 30)
