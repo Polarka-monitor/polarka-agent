@@ -130,5 +130,92 @@ class PostageTest(unittest.TestCase):
                 s.server_close()
 
 
+class PriceInHashesTest(unittest.TestCase):
+    """A price given as mining work: so many hashes, in NORTH at what the network needs for a block."""
+    BITS, HALF = "1e008689", "1e004344"         # the second target is half the first: twice the work for a block
+
+    @staticmethod
+    def work(bits):
+        n = int(bits, 16)
+        return (1 << 256) // (((n & 0x7FFFFF) << (8 * ((n >> 24) - 3))) + 1)
+
+    def setUp(self):
+        self.m = Model()
+        self.now = [1_800_000_000]
+        self.folder = os.path.join(tempfile.mkdtemp(prefix="polarka-postage-"), "w")
+        Wallet.create(self.folder, "regtest", self.m.fake.url, WORDS)
+        self.w = Wallet(self.folder, clock=lambda: self.now[0])
+        self.n = 0
+
+    def tearDown(self):
+        self.w.server.close()
+        self.m.fake.stop()
+
+    def template(self, bits):
+        self.m.fake.answers["/v1/mining/template"] = [(200, {"bits": bits, "coinbasevalue": 512 * N, "height": 301})]
+
+    def gate(self, hashes):
+        return postage.Gate(self.w, 0, 100, clock=lambda: self.now[0], look_every=0, hashes=hashes)
+
+    def test_the_price_is_the_work_in_north_and_follows_the_network(self):
+        self.template(self.BITS)
+        one_north = self.work(self.BITS) // 512                       # hashes behind one NORTH
+        g = self.gate(one_north)
+        a = g.quote()
+        first = 512 * N * one_north // self.work(self.BITS)
+        self.assertEqual(a["price"], "%d.%08d" % (first // N, first % N))
+        self.assertTrue(N - N // 1000 <= first <= N)                   # that much work is one NORTH, within rounding
+        about = g.about()
+        self.assertEqual((about["price_in_hashes"], about["hashes_for_one_north"]), (one_north, self.work(self.BITS) * N // (512 * N)))
+        # the network doubles: the price stays for ten minutes, then the same work is half the NORTH
+        self.template(self.HALF)
+        self.now[0] += postage.PRICE_LIFE - 1
+        self.assertEqual(g.quote()["price"], a["price"])
+        self.now[0] += 2
+        b = g.quote()
+        second = 512 * N * one_north // self.work(self.HALF)
+        self.assertEqual(b["price"], "%d.%08d" % (second // N, second % N))
+        self.assertTrue(abs(2 * second - first) <= first // 1000)
+        # a token keeps the price it was quoted: the new, lower price does not pay for the old quote
+        self.n += 1
+        self.m.coin(a["pay_to"], second, "%02x" % self.n * 32)
+        self.assertEqual(g.status(a["token"]), {"paid": False, "calls_left": 0})
+        self.n += 1
+        self.m.coin(b["pay_to"], second, "%02x" % self.n * 32)
+        self.assertEqual(g.status(b["token"]), {"paid": True, "calls_left": 100})
+
+    def test_a_server_without_a_template(self):
+        from polarka_agent.server import ServerError
+        g = self.gate(1000)
+        with self.assertRaises(ServerError):                           # never had a price: nothing is quoted
+            g.quote()
+        with self.assertRaises(Refused) as e:
+            postage.serve(self.w, "127.0.0.1:9", 0, 100, "127.0.0.1:0", hashes=1000)
+        self.assertEqual(e.exception.kind, "NO_WORK")
+        self.template(self.BITS)
+        price = g.quote()["price"]
+        del self.m.fake.answers["/v1/mining/template"]
+        self.now[0] += postage.PRICE_STALE                             # away for a while: the last price stands
+        self.assertEqual(g.quote()["price"], price)
+        self.now[0] += postage.PRICE_LIFE + 1                          # away for too long: no quote
+        with self.assertRaises(ServerError):
+            g.quote()
+
+    def test_a_template_that_makes_no_sense_is_refused(self):
+        from polarka_agent.server import ServerError
+        g = self.gate(1000)
+        for bad in ({"bits": "1e808689", "coinbasevalue": 512 * N}, {"bits": "1e000000", "coinbasevalue": 512 * N},
+                    {"bits": "ff008689", "coinbasevalue": 512 * N}, {"bits": "1E008689", "coinbasevalue": 512 * N},
+                    {"bits": "1e008689", "coinbasevalue": 0}, {"bits": "1e008689"}, {"bits": 503350921, "coinbasevalue": 512 * N}):
+            self.m.fake.answers["/v1/mining/template"] = [(200, bad)]
+            with self.assertRaises(ServerError):
+                g.quote()
+
+    def test_one_of_the_two_prices(self):
+        for price, hashes in ((0, 0), (N, 1000)):
+            with self.assertRaises(Refused):
+                postage.serve(self.w, "127.0.0.1:9", price, 100, "127.0.0.1:0", hashes=hashes)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -4,6 +4,12 @@ Whoever wants to keep robots from wearing a service out makes them burn processo
 With postage the caller pays instead, and the one who runs the service gets the coin.
 
     python3 -m polarka_agent --dir FOLDER postage-serve --upstream 127.0.0.1:9000 --price 0.01 --calls 100
+    python3 -m polarka_agent --dir FOLDER postage-serve --upstream 127.0.0.1:9000 --price-hashes 600 --calls 100
+
+A price can be a fixed amount of NORTH, or an amount of mining work in hashes. The second is turned into
+NORTH by what the network needs for a block and what a block pays, read from the wallet server's block
+template every ten minutes. When more machines mine, the same work is fewer NORTH. A quote keeps the price
+it was given.
 
     any request without paid postage  -> 402 with what to do, as JSON
     POST /_postage/quote              -> {"token", "pay_to", "price", "calls", "expires"}
@@ -29,10 +35,13 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from .keys import UNIT
 from .server import ServerError
-from .wallet import Refused, north
+from .wallet import Refused, north, units as units_of
 
 QUOTE_LIFE = 1800               # seconds an address waits for its payment
+PRICE_LIFE = 600                # seconds a price worked out from the network is kept
+PRICE_STALE = 6 * 3600          # when the server gives no template: a price older than this is not quoted
 MAX_BODY = 1 << 20              # the largest request passed on
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade",
        "x-postage", "host", "content-length"}
@@ -43,8 +52,10 @@ def mark(token):
 
 
 class Gate:
-    def __init__(self, wallet, price, calls, free=0, clock=time.time, look_every=20):
+    def __init__(self, wallet, price, calls, free=0, clock=time.time, look_every=20, hashes=0):
         self.wallet, self.price, self.calls, self.free, self.clock, self.look_every = wallet, price, calls, free, clock, look_every
+        self.hashes = hashes        # above nothing: the price of a lot is this much mining work, not a fixed amount
+        self.priced = None          # (when, the price in base units, hashes for one NORTH)
         self.lock = threading.Lock()
         self.book = os.path.join(wallet.folder, "postage.json")
         self.salt = os.urandom(16)
@@ -63,9 +74,26 @@ class Gate:
         os.chmod(tmp, 0o600)
         os.replace(tmp, self.book)
 
+    def _price(self):
+        """The price of one lot in base units: the fixed one, or so many hashes' worth of NORTH at what the
+        network needs for a block now. Called with the lock held."""
+        if not self.hashes:
+            return self.price
+        now = self.clock()
+        if self.priced is None or now - self.priced[0] >= PRICE_LIFE:
+            try:
+                work, pays = self.wallet.server.work()
+                self.priced = (now, max(1, self.hashes * pays // work), work * UNIT // pays)
+            except ServerError:
+                # a server that is away for a while does not stop the gate; one that stays away does
+                if self.priced is None or now - self.priced[0] > PRICE_STALE:
+                    raise
+        return self.priced[1]
+
     def quote(self):
         with self.lock:
             now = self.clock()
+            price = self._price()
             # an address stays with its token until the time for a late payment is over too
             waiting = {t["address"] for t in self.state["tokens"].values() if not t["paid"] and now < t["expires"] + 600}
             idle = [a for a in self.state["addresses"] if a not in waiting]
@@ -80,11 +108,11 @@ class Gate:
                     raise
                 self.state["addresses"][address] = 0
             token = os.urandom(24).hex()
-            self.state["tokens"][mark(token)] = {"address": address, "expires": int(now) + QUOTE_LIFE, "paid": False, "calls": 0}
+            self.state["tokens"][mark(token)] = {"address": address, "expires": int(now) + QUOTE_LIFE, "paid": False, "calls": 0, "price": price}
             # tokens that were never paid and whose time is long over are dropped
             self.state["tokens"] = {k: t for k, t in self.state["tokens"].items() if t["paid"] or now < t["expires"] + 3600}
             self._save()
-            return {"token": token, "pay_to": address, "price": north(self.price), "calls": self.calls, "expires": int(now) + QUOTE_LIFE,
+            return {"token": token, "pay_to": address, "price": north(price), "calls": self.calls, "expires": int(now) + QUOTE_LIFE,
                     "then": "pay the price to pay_to; when it is in a block, send the token in the header X-Postage"}
 
     def _settle(self, t):
@@ -95,10 +123,11 @@ class Gate:
         self.looked[t["address"]] = now
         seen = self.wallet.received(t["address"])
         counted = self.state["addresses"].get(t["address"], 0)
-        if seen["confirmations"] >= 1 and seen["amount"] - counted >= self.price:
+        price = t.get("price") or self._price()         # a token keeps the price it was quoted
+        if seen["confirmations"] >= 1 and seen["amount"] - counted >= price:
             # what came is counted once: the address can then serve the next asker
             self.state["addresses"][t["address"]] = seen["amount"]
-            t["paid"], t["calls"] = True, self.calls * ((seen["amount"] - counted) // self.price)
+            t["paid"], t["calls"] = True, self.calls * ((seen["amount"] - counted) // price)
             self._save()
 
     def status(self, token):
@@ -129,10 +158,18 @@ class Gate:
             return False
 
     def about(self):
-        return {"error": "POSTAGE", "message": "this service asks for postage in NORTH",
-                "price": north(self.price), "for_calls": self.calls, "free_calls_a_day": self.free,
-                "how": ["POST /_postage/quote", "pay the price to the address it names", "send the token in the header X-Postage"],
-                "note": "postage is counted in calls and is not given back; NORTH has no market price"}
+        with self.lock:
+            price = self._price()
+            priced = self.priced
+        a = {"error": "POSTAGE", "message": "this service asks for postage in NORTH",
+             "price": north(price), "for_calls": self.calls, "free_calls_a_day": self.free,
+             "how": ["POST /_postage/quote", "pay the price to the address it names", "send the token in the header X-Postage"],
+             "note": "postage is counted in calls and is not given back; NORTH has no market price"}
+        if self.hashes:
+            a["price_in_hashes"], a["hashes_for_one_north"] = self.hashes, priced[2]
+            a["note"] = ("the price is so many hashes of mining work, in NORTH at what the network needs for a block now, and moves with it; "
+                         + a["note"])
+        return a
 
 
 def make_handler(gate, upstream, trust_proxy):
@@ -212,12 +249,18 @@ def make_handler(gate, upstream, trust_proxy):
     return H
 
 
-def serve(wallet, upstream, price, calls, listen, free=0, trust_proxy=False):
-    if price <= 0 or calls <= 0 or free < 0:
-        raise Refused("INPUT", "a price and a number of calls above nothing")
-    gate = Gate(wallet, price, calls, free)
+def serve(wallet, upstream, price, calls, listen, free=0, trust_proxy=False, hashes=0):
+    if (price <= 0) == (hashes <= 0) or calls <= 0 or free < 0:
+        raise Refused("INPUT", "a price in NORTH or a price in hashes, one of the two, and a number of calls above nothing")
+    gate = Gate(wallet, price, calls, free, hashes=hashes)
+    if hashes:
+        try:
+            price = units_of(gate.about()["price"])
+        except ServerError as e:
+            raise Refused("NO_WORK", "the wallet server gives no block template (HTTP %s); a price in hashes needs a server with the mining routes of Northbound" % e.status)
     host, port = listen.rsplit(":", 1)
     srv = ThreadingHTTPServer((host, int(port)), make_handler(gate, upstream, trust_proxy))
     srv.daemon_threads = True
-    sys.stderr.write("postage gate on %s before %s: %s NORTH for %d calls, %d free a day\n" % (listen, upstream, north(price), calls, free))
+    sys.stderr.write("postage gate on %s before %s: %s NORTH for %d calls%s, %d free a day\n"
+                     % (listen, upstream, north(price), calls, " (%d hashes of work, at the network of this moment)" % hashes if hashes else "", free))
     srv.serve_forever()

@@ -317,6 +317,26 @@ class Server:
         """The height of the node behind the server. Good for seeing whether a server answers at all."""
         return _whole(self._call("/v1/chain/tip"), "height", MAX_HEIGHT)
 
+    def work(self):
+        """What the network needs for a block now and what a block pays: (hashes, base units). Read from
+        the block template of a server that has the mining routes of Northbound (/v1/mining/template). A
+        server without them answers 404."""
+        t = self._call("/v1/mining/template")
+        bits = _text(t, "bits", 8)
+        if not re.match(r"^[0-9a-f]{8}$", bits):
+            raise _unknown("bits")
+        n = int(bits, 16)
+        exponent, mantissa = n >> 24, n & 0x7FFFFF
+        if n & 0x800000 or mantissa == 0 or not 3 <= exponent <= 32:
+            raise _unknown("bits")
+        target = mantissa << (8 * (exponent - 3))
+        if target >= 1 << 256:
+            raise _unknown("bits")
+        pays = _whole(t, "coinbasevalue", MAX_AMOUNT)
+        if pays == 0:
+            raise _unknown("coinbasevalue")
+        return (1 << 256) // (target + 1), pays
+
     def activity(self, addresses):
         """(height, block, the addresses that were ever paid to). Any number of addresses; one block."""
         used, at = set(), None

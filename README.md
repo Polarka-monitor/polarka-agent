@@ -115,6 +115,13 @@ a quote (`POST /_postage/quote`), pay the price to the address it names, and sen
 anybody proving anything; an address that was not paid serves the next asker. `--free` lets one source make
 some calls a day without postage.
 
+The price can also be given as mining work: `--price-hashes 600` in place of `--price`. The gate then asks
+for so many hashes' worth of NORTH. It reads from its wallet server's block template what the network needs
+for a block and what a block pays, every ten minutes; a quote keeps the price it was given. When more
+machines mine, the same work is fewer NORTH, so the price in NORTH moves and the price in work stays. This
+needs a wallet server with the mining routes of Northbound. What a NORTH takes to make is a cost, not a
+market price; NORTH has none.
+
 Postage is counted in calls. It is not a balance, it is not given back, and the gate never pays from its
 wallet, so the gate holds nobody's coins. Whoever runs a service for payment has the duties of one who does
 (saying who they are, among others); the gate is a tool and takes none of them away. It is new: nobody
@@ -131,7 +138,7 @@ signature hash and signing; they come from the cold address tool
 
     TN_BIN=/path/to/bin python3 -B -m unittest discover -s tests -t .
 
-79 tests. Those in `test_wallet.py` and `test_cli_mcp.py` run against the official `truenorthd` on regtest
+83 tests. Those in `test_wallet.py` and `test_cli_mcp.py` run against the official `truenorthd` on regtest
 and a stand-in for a Northbound server (`tests/standin`, copied from the Polarka Wallet's repository); they
 are skipped without the node programs. No test touches a real network.
 

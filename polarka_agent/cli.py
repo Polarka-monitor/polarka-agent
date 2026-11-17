@@ -85,7 +85,9 @@ def run(argv=None, out=sys.stdout):
     c.add_argument("url")
     c = sub.add_parser("postage-serve", help="be a gate before a web service that lets through who paid postage to this wallet")
     c.add_argument("--upstream", required=True, help="the service behind the gate, host:port")
-    c.add_argument("--price", required=True, help="NORTH for one lot of calls")
+    c.add_argument("--price", help="NORTH for one lot of calls")
+    c.add_argument("--price-hashes", type=int, help="in place of --price: mining work for one lot of calls, in hashes; "
+                   "turned into NORTH by what the network needs for a block now")
     c.add_argument("--calls", type=int, default=100, help="calls in one lot")
     c.add_argument("--free", type=int, default=0, help="calls a day that one source may make without postage")
     c.add_argument("--listen", default="127.0.0.1:8670")
@@ -129,7 +131,10 @@ def run(argv=None, out=sys.stdout):
             return show(ask(a.url, wallet.fresh_address()))
         if a.cmd == "postage-serve":
             from .postage import serve as postage_serve
-            return postage_serve(wallet, a.upstream, units(a.price), a.calls, a.listen, a.free, a.trust_proxy)
+            if (a.price is None) == (a.price_hashes is None):
+                raise Refused("INPUT", "give --price or --price-hashes, one of the two")
+            return postage_serve(wallet, a.upstream, units(a.price) if a.price is not None else 0, a.calls, a.listen, a.free,
+                                 a.trust_proxy, a.price_hashes or 0)
         if a.cmd == "faucet-serve":
             from .faucet import serve as faucet_serve
             if not 10 <= a.bits <= 30:
