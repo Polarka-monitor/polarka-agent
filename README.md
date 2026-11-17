@@ -93,17 +93,36 @@ under its own bounds. It keeps the addresses it paid (`faucet.jsonl`) and no int
 asks for no name and no e-mail. It is meant to stand behind a web server that provides HTTPS
 (`--trust-proxy`). The faucet is new: nobody independent has read it, and it has never run in public.
 
+## Something to pay for: postage
+
+Whoever runs a web service and wants to keep robots from wearing it out makes them burn processor time for
+nothing today. With postage the caller pays a little NORTH instead, and the one who runs the service gets it.
+
+    python3 -m polarka_agent --dir FOLDER postage-serve --upstream 127.0.0.1:9000 --price 0.01 --calls 100 --free 20
+
+stands before the service on port 9000. A caller without postage gets `402` and what to do, as JSON: ask for
+a quote (`POST /_postage/quote`), pay the price to the address it names, and send the token in the header
+`X-Postage`. Every quote has an address for itself for half an hour, so a payment is told apart without
+anybody proving anything; an address that was not paid serves the next asker. `--free` lets one source make
+some calls a day without postage.
+
+Postage is counted in calls. It is not a balance, it is not given back, and the gate never pays from its
+wallet, so the gate holds nobody's coins. Whoever runs a service for payment has the duties of one who does
+(saying who they are, among others); the gate is a tool and takes none of them away. It is new: nobody
+independent has read it, and it has never run in public. There is no asker's command for it yet: a program
+pays the quoted address with `pay` and sends the token itself.
+
 ## Code and tests
 
 Python 3.9 or later, standard library only. `polarka_agent/keys.py` and `tx.py` hold the keys, addresses, the
 signature hash and signing; they come from the cold address tool
 (github.com/severka-monitor/truenorth-cold-address) and are checked against its published P2QRH test vectors.
 `server.py` is the client for a wallet server, `wallet.py` the wallet, `cli.py` and `mcp.py` the two faces,
-`faucet.py` the faucet and its asker.
+`faucet.py` the faucet and its asker, `postage.py` the postage gate.
 
     TN_BIN=/path/to/bin python3 -B -m unittest discover -s tests -t .
 
-73 tests. Those in `test_wallet.py` and `test_cli_mcp.py` run against the official `truenorthd` on regtest
+79 tests. Those in `test_wallet.py` and `test_cli_mcp.py` run against the official `truenorthd` on regtest
 and a stand-in for a Northbound server (`tests/standin`, copied from the Polarka Wallet's repository); they
 are skipped without the node programs. No test touches a real network.
 

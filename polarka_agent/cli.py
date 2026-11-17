@@ -83,6 +83,13 @@ def run(argv=None, out=sys.stdout):
     sub.add_parser("mcp", help="serve the wallet to an agent over the Model Context Protocol (standard input and output)")
     c = sub.add_parser("faucet", help="ask a faucet for a first coin, to a fresh address of this wallet")
     c.add_argument("url")
+    c = sub.add_parser("postage-serve", help="be a gate before a web service that lets through who paid postage to this wallet")
+    c.add_argument("--upstream", required=True, help="the service behind the gate, host:port")
+    c.add_argument("--price", required=True, help="NORTH for one lot of calls")
+    c.add_argument("--calls", type=int, default=100, help="calls in one lot")
+    c.add_argument("--free", type=int, default=0, help="calls a day that one source may make without postage")
+    c.add_argument("--listen", default="127.0.0.1:8670")
+    c.add_argument("--trust-proxy", action="store_true", help="take the caller's address from X-Forwarded-For")
     c = sub.add_parser("faucet-serve", help="be a faucet: hand out a little from this wallet, within its limits.json")
     c.add_argument("--amount", required=True, help="NORTH given to one address")
     c.add_argument("--listen", default="127.0.0.1:8660")
@@ -120,6 +127,9 @@ def run(argv=None, out=sys.stdout):
         if a.cmd == "faucet":
             from .faucet import ask
             return show(ask(a.url, wallet.fresh_address()))
+        if a.cmd == "postage-serve":
+            from .postage import serve as postage_serve
+            return postage_serve(wallet, a.upstream, units(a.price), a.calls, a.listen, a.free, a.trust_proxy)
         if a.cmd == "faucet-serve":
             from .faucet import serve as faucet_serve
             if not 10 <= a.bits <= 30:
