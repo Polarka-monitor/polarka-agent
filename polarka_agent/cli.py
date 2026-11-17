@@ -81,6 +81,13 @@ def run(argv=None, out=sys.stdout):
     c = sub.add_parser("forget", help="the owner's word that a payment which did not go through stands against nothing any more")
     c.add_argument("id")
     sub.add_parser("mcp", help="serve the wallet to an agent over the Model Context Protocol (standard input and output)")
+    c = sub.add_parser("faucet", help="ask a faucet for a first coin, to a fresh address of this wallet")
+    c.add_argument("url")
+    c = sub.add_parser("faucet-serve", help="be a faucet: hand out a little from this wallet, within its limits.json")
+    c.add_argument("--amount", required=True, help="NORTH given to one address")
+    c.add_argument("--listen", default="127.0.0.1:8660")
+    c.add_argument("--bits", type=int, default=20, help="zero bits of work asked for when the faucet is quiet")
+    c.add_argument("--trust-proxy", action="store_true", help="take the asker's address from X-Forwarded-For")
     a = p.parse_args(argv)
     folder = os.path.expanduser(a.dir)
 
@@ -110,6 +117,14 @@ def run(argv=None, out=sys.stdout):
             return serve(wallet)
         if a.cmd == "address":
             return show({"address": wallet.fresh_address()})
+        if a.cmd == "faucet":
+            from .faucet import ask
+            return show(ask(a.url, wallet.fresh_address()))
+        if a.cmd == "faucet-serve":
+            from .faucet import serve as faucet_serve
+            if not 10 <= a.bits <= 30:
+                raise Refused("INPUT", "--bits is 10 to 30")
+            return faucet_serve(wallet, units(a.amount), a.listen, a.trust_proxy, a.bits)
         if a.cmd == "balance":
             return show(_amounts(wallet.balance()))
         if a.cmd == "history":

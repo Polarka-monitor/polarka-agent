@@ -76,16 +76,33 @@ For an agent: start `python3 -m polarka_agent --dir FOLDER mcp` as an MCP server
 output. Its tools are `north_balance`, `north_address`, `north_received`, `north_wait`, `north_pay`,
 `north_stamp`, `north_payments`, `north_history` and `north_limits`.
 
+## A first coin: the faucet
+
+A program that has no coin can ask a faucet for one. It does a small piece of work first (hashing, a few
+seconds of one processor), so that asking a thousand times costs a thousand times as much.
+
+    python3 -m polarka_agent --dir FOLDER faucet https://ADDRESS-OF-A-FAUCET
+
+asks for a little NORTH to a fresh address of the wallet. There is no public faucet yet; when there is one,
+its address will be on polarka.org.
+
+Anybody can run one: `faucet-serve --amount 2` hands out 2 NORTH to an address once a day from the wallet in
+FOLDER. What it may give in a day is that wallet's `limits.json`, nothing else, so a faucet is this wallet
+under its own bounds. It keeps the addresses it paid (`faucet.jsonl`) and no internet addresses on disk; it
+asks for no name and no e-mail. It is meant to stand behind a web server that provides HTTPS
+(`--trust-proxy`). The faucet is new: nobody independent has read it, and it has never run in public.
+
 ## Code and tests
 
 Python 3.9 or later, standard library only. `polarka_agent/keys.py` and `tx.py` hold the keys, addresses, the
 signature hash and signing; they come from the cold address tool
 (github.com/severka-monitor/truenorth-cold-address) and are checked against its published P2QRH test vectors.
-`server.py` is the client for a wallet server, `wallet.py` the wallet, `cli.py` and `mcp.py` the two faces.
+`server.py` is the client for a wallet server, `wallet.py` the wallet, `cli.py` and `mcp.py` the two faces,
+`faucet.py` the faucet and its asker.
 
     TN_BIN=/path/to/bin python3 -B -m unittest discover -s tests -t .
 
-67 tests. Those in `test_wallet.py` and `test_cli_mcp.py` run against the official `truenorthd` on regtest
+73 tests. Those in `test_wallet.py` and `test_cli_mcp.py` run against the official `truenorthd` on regtest
 and a stand-in for a Northbound server (`tests/standin`, copied from the Polarka Wallet's repository); they
 are skipped without the node programs. No test touches a real network.
 

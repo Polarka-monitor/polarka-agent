@@ -1,0 +1,128 @@
+"""The faucet: work before a coin, one coin an address a day, nothing beyond the wallet's limits. Against the
+small model of a wallet server, without a node."""
+import json
+import os
+import sys
+import tempfile
+import threading
+import unittest
+from http.server import ThreadingHTTPServer
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from polarka_agent import faucet, keys
+from polarka_agent.wallet import Refused, Wallet
+from tests.test_wallet_rules import Model, WORDS
+
+N = keys.UNIT
+
+
+def address(n):
+    return keys.Account.from_words(keys.new_words(12), "regtest").address(0, n)
+
+
+class FaucetTest(unittest.TestCase):
+    def setUp(self):
+        self.m = Model()
+        self.now = [1_800_000_000]
+        self.folder = os.path.join(tempfile.mkdtemp(prefix="polarka-faucet-"), "w")
+        Wallet.create(self.folder, "regtest", self.m.fake.url, WORDS)
+        with open(os.path.join(self.folder, "limits.json"), "w") as f:
+            json.dump({"per_payment_north": "2.1", "per_day_north": "6.5"}, f)
+        self.w = Wallet(self.folder, clock=lambda: self.now[0])
+        for i in range(8):
+            self.m.coin(self.w.account.address(0, i), 10 * N, "%02x" % (i + 1) * 32)
+        self.f = faucet.Faucet(self.w, 2 * N, base_bits=8, clock=lambda: self.now[0])
+
+    def tearDown(self):
+        self.w.server.close()
+        self.m.fake.stop()
+
+    def claim(self, to, source="1.2.3.4"):
+        c = self.f.challenge(source, to)
+        return self.f.claim(source, to, c["challenge"], faucet.solve(c["challenge"], c["bits"]))
+
+    def refused(self, kind, call, *a):
+        with self.assertRaises(Refused) as e:
+            call(*a)
+        self.assertEqual(e.exception.kind, kind)
+
+    def test_work_then_a_coin_and_once_a_day(self):
+        to = address(0)
+        got = self.claim(to)
+        self.assertEqual(got["paid"], "2.00000000")
+        self.assertIn(got["transaction_id"], self.m.waiting)
+        self.refused("ALREADY", self.f.challenge, "1.2.3.4", to)
+        self.now[0] += faucet.PERIOD + 1
+        self.assertEqual(self.claim(to)["paid"], "2.00000000")
+        book = [json.loads(x) for x in open(os.path.join(self.folder, "faucet.jsonl"))]
+        self.assertEqual([(e["address"], e["state"]) for e in book], [(to, "handed")] * 2)
+        self.assertNotIn("1.2.3.4", open(os.path.join(self.folder, "faucet.jsonl")).read())
+
+    def test_no_coin_without_the_work_or_with_another_ones_challenge(self):
+        to, other = address(0), address(1)
+        c = self.f.challenge("s", to)
+        answer = faucet.solve(c["challenge"], c["bits"])
+        wrong = next("%x" % i for i in range(1000) if not faucet.work_done(c["challenge"], "%x" % i, c["bits"]))
+        self.refused("WORK", self.f.claim, "s", to, c["challenge"], wrong)
+        self.refused("WORK", self.f.claim, "s", to, c["challenge"], "zz")
+        self.refused("CHALLENGE", self.f.claim, "s", other, c["challenge"], answer)
+        self.refused("CHALLENGE", self.f.claim, "s", to, "8.9999999999.abcd.ffff", answer)
+        self.refused("CHALLENGE", self.f.claim, "s", to, "nonsense", answer)
+        self.refused("ADDRESS", self.f.challenge, "s", "north1znotanaddress")
+        self.refused("ADDRESS", self.f.challenge, "s", None)
+        self.now[0] += faucet.CHALLENGE_LIFE + 1
+        self.refused("CHALLENGE", self.f.claim, "s", to, c["challenge"], answer)
+        self.assertEqual(self.m.waiting, {})
+
+    def test_a_challenge_pays_once(self):
+        to = address(0)
+        c = self.f.challenge("s", to)
+        answer = faucet.solve(c["challenge"], c["bits"])
+        self.f.claim("s", to, c["challenge"], answer)
+        self.refused("ALREADY", self.f.claim, "s", to, c["challenge"], answer)
+        self.assertEqual(len(self.m.waiting), 1)
+
+    def test_the_wallets_limits_are_the_faucets_purse(self):
+        for i in range(3):
+            self.assertEqual(self.claim(address(i), "s%d" % i)["paid"], "2.00000000")
+        self.refused("EMPTY", self.claim, address(9), "s9")                 # 6.5 a day: a fourth would pass it
+        self.assertEqual(len(self.m.waiting), 3)
+        self.now[0] += faucet.PERIOD + 1
+        self.assertEqual(self.claim(address(9), "s9")["paid"], "2.00000000")
+
+    def test_more_asking_means_more_work_and_one_source_cannot_ask_without_end(self):
+        self.assertEqual(self.f.bits(), 8)
+        self.f.recent = [self.now[0]] * 8
+        self.assertEqual(self.f.bits(), 9)
+        self.f.recent = [self.now[0]] * 64
+        self.assertEqual(self.f.bits(), 12)
+        self.f.recent = [self.now[0]] * 10 ** 6
+        self.assertEqual(self.f.bits(), 25)
+        self.f.base_bits = 20
+        self.assertEqual(self.f.bits(), faucet.MAX_BITS)                    # and never more than that
+        self.f.base_bits = 8
+        self.now[0] += 3601
+        self.assertEqual(self.f.bits(), 8)
+        for i in range(20):
+            self.refused("ADDRESS", self.f.challenge, "one", "x")
+        self.refused("TOO_OFTEN", self.f.challenge, "one", address(0))
+        self.assertIn("challenge", self.f.challenge("another", address(0)))
+
+    def test_over_http_from_asking_to_a_coin(self):
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), faucet.make_handler(self.f, False))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            url = "http://127.0.0.1:%d" % srv.server_address[1]
+            to = address(0)
+            got = faucet.ask(url, to)
+            self.assertEqual((got["asked"], got["work_bits"]), (to, 8))
+            self.assertIn(got["transaction_id"], self.m.waiting)
+            self.refused("FAUCET", faucet.ask, url, to)                     # the same address again today
+            self.refused("FAUCET", faucet.ask, "http://example.org", to)    # not over plain http to somewhere else
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+
+if __name__ == "__main__":
+    unittest.main()
