@@ -10,6 +10,8 @@ Group=faucet
 ExecStart=/opt/polarka-faucet/venv/bin/polarka-agent --dir /var/lib/polarka-faucet/wallet faucet-serve --amount 0.25 --listen 127.0.0.1:8660 --trust-proxy
 Restart=on-failure
 RestartSec=10
+# exit 2 is a refusal to start (limits, journal): starting again changes nothing, a person has to look
+RestartPreventExitStatus=2
 # the service may write its wallet folder and nothing else
 NoNewPrivileges=true
 ProtectSystem=strict
@@ -18,7 +20,7 @@ PrivateTmp=true
 PrivateDevices=true
 ProtectKernelTunables=true
 ProtectControlGroups=true
-RestrictAddressFamilies=AF_INET AF_INET6
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 ReadWritePaths=/var/lib/polarka-faucet
 MemoryMax=300M
 TasksMax=200

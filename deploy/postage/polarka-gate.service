@@ -10,12 +10,14 @@ Group=gate
 ExecStart=/opt/polarka-faucet/venv/bin/polarka-agent --dir /var/lib/polarka-gate/wallet postage-serve --upstream 127.0.0.1:8680 --price-hashes 600 --calls 100 --free 20 --listen 127.0.0.1:8670 --trust-proxy
 Restart=on-failure
 RestartSec=10
+# exit 2 is a refusal to start (limits, journal): starting again changes nothing, a person has to look
+RestartPreventExitStatus=2
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 PrivateDevices=true
-RestrictAddressFamilies=AF_INET AF_INET6
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 ReadWritePaths=/var/lib/polarka-gate
 MemoryMax=300M
 TasksMax=200

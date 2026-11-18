@@ -100,7 +100,7 @@ its address will be on polarka.org.
 
 Anybody can run one: `faucet-serve --amount 2` hands out 2 NORTH to an address once a day from the wallet in
 FOLDER. What it may give in a day is that wallet's `limits.json`, nothing else, so a faucet is this wallet
-under its own bounds. Under that bound it gives one place (an IPv4 address or an IPv6 /64) two payments a day
+under its own bounds. Under that bound it gives one place (an IPv4 address or an IPv6 /48) two payments a day
 (`--per-source`) and at most a twelfth of the day's sum in one hour. None of this stops somebody who has many
 internet addresses; it bounds them, and the day's limit is the only promise. Set it to a sum you can give
 away every day. The limit for one payment has to be a little above the amount given, because a payment counts
@@ -112,9 +112,11 @@ on is in `deploy/faucet`.
 
 The faucet of version 0.1.2 was read by an independent reviewer (an AI agent that had not seen it being
 written), who found that a script from one place could take nearly the whole day's sum within a minute and
-that a claim the wallet refused could be sent again without end. This version holds the fixes; a summary of
-the report and what was done about each finding are in `docs/faucet-review-0.1.2.md`. The fixes themselves have not been read
-by a second pair of eyes, and the faucet has never run in public.
+that a claim the wallet refused could be sent again without end. After the fixes a second independent
+reviewer looked at them and found two more things that stood in the way: questions that cost nothing raised
+the work for everybody, and one customer with many IPv6 addresses counted as many places. Both are mended
+here. What was found both times and what was done about it is in `docs/faucet-review-0.1.2.md`. The last
+fixes have not been read by anybody else, and the faucet has never run in public.
 
 ## Something to pay for: postage
 
@@ -155,7 +157,7 @@ signature hash and signing; they come from the cold address tool
 
     TN_BIN=/path/to/bin python3 -B -m unittest discover -s tests -t .
 
-107 tests. Those in `test_wallet.py`, `test_cli_mcp.py` and `test_faucet_node.py` run against the official `truenorthd` on regtest
+112 tests. Those in `test_wallet.py`, `test_cli_mcp.py` and `test_faucet_node.py` run against the official `truenorthd` on regtest
 and a stand-in for a Northbound server (`tests/standin`, copied from the Polarka Wallet's repository); they
 are skipped without the node programs. No test touches a real network.
 

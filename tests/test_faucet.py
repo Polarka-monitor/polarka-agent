@@ -98,9 +98,11 @@ class FaucetTest(unittest.TestCase):
         self.f.recent = collections.deque([self.now[0]] * 64)
         self.assertEqual(self.f.bits(), 12)
         self.f.recent = collections.deque([self.now[0]] * 10 ** 6)
-        self.assertEqual(self.f.bits(), 25)
+        self.assertEqual(self.f.bits(), faucet.ASK_BITS)                    # never more than this program's own asker does unasked
         self.f.base_bits = 20
-        self.assertEqual(self.f.bits(), faucet.MAX_BITS)                    # and never more than that
+        self.assertEqual(self.f.bits(), faucet.ASK_BITS)
+        self.f.base_bits = 28
+        self.assertEqual(self.f.bits(), 28)                                 # unless the owner set the quiet work higher
         self.f.base_bits = 8
         self.now[0] += 3601
         self.assertEqual(self.f.bits(), 8)

@@ -102,7 +102,7 @@ def run(argv=None, out=sys.stdout):
     c.add_argument("--listen", default="127.0.0.1:8660")
     c.add_argument("--bits", type=int, default=20, help="zero bits of work asked for when the faucet is quiet")
     c.add_argument("--trust-proxy", action="store_true", help="take the asker's address from X-Forwarded-For")
-    c.add_argument("--per-source", type=int, default=2, help="payments one place (an IPv4 address or an IPv6 /64) may get in a day")
+    c.add_argument("--per-source", type=int, default=2, help="payments one place (an IPv4 address or an IPv6 /48) may get in a day")
     a = p.parse_args(argv)
     folder = os.path.expanduser(a.dir)
 

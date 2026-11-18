@@ -3,7 +3,7 @@
 It is meant for programs that have no coin yet. Whoever asks does a small piece of work first (hashing, a few
 seconds of one processor in this program). The work is friction and not a wall: a program written for speed
 does it many times faster. What bounds the faucet is what it counts: one address once a day, one place (an IPv4
-address or an IPv6 /64) a few coins a day, the faucet as a whole so many an hour, and above all of that the
+address or an IPv6 /48) a few coins a day, the faucet as a whole so many an hour, and above all of that the
 wallet's limits.json, written by its owner. The faucet holds no rule about the day's money of its own.
 
     python3 -m polarka_agent --dir FOLDER faucet-serve --amount 2 --listen 127.0.0.1:8660
@@ -27,6 +27,7 @@ import ipaddress
 import json
 import os
 import re
+import socket
 import sys
 import threading
 import time
@@ -44,7 +45,9 @@ BASE_BITS, MAX_BITS = 20, 30    # the work asked for: from about a second to abo
 ANSWER = re.compile(r"[0-9a-f]{1,32}")
 MAX_SOURCES = 100000            # places counted at one time; beyond that new ones wait
 MAX_THREADS = 64                # requests answered at one time
-SOCKET_TIMEOUT = 10             # seconds a request may take to arrive
+SOCKET_TIMEOUT = 10             # seconds one read of a request may take
+REQUEST_TIME = 20               # seconds the whole request has to arrive, however its bytes come
+ASK_BITS = 24                   # the most work this program's own asker does unasked; no faucet asks more of anybody
 PAY_WAIT = 20                   # seconds a claim waits for the payment before it
 ERRORS = ("ADDRESS", "ALREADY", "CHALLENGE", "WORK", "TOO_OFTEN", "EMPTY", "LATER", "NOT_NOW", "INPUT", "FAILED")
 
@@ -63,10 +66,12 @@ def work_done(challenge, answer, bits):
     return leading_zero_bits(hashlib.sha256(("%s:%s" % (challenge, answer)).encode()).digest()) >= bits
 
 
-def solve(challenge, bits, give_up_after=1 << 34):
-    """The asker's side of the work. Returns the answer, or None when it was not found."""
+def solve(challenge, bits, give_up_after=1 << 34, until=None):
+    """The asker's side of the work. Returns the answer, or None when it was not found or the time ran out."""
     prefix = (challenge + ":").encode()
     for i in range(give_up_after):
+        if until is not None and i % 65536 == 0 and time.time() > until:
+            return None
         answer = "%x" % i
         if leading_zero_bits(hashlib.sha256(prefix + answer.encode()).digest()) >= bits:
             return answer
@@ -93,7 +98,7 @@ class Faucet:
         self.source_paid = {}                   # salted hash of a place -> times it was paid in the last day
         self.used = {}                          # challenges that reached the wallet -> when they run out
         self.empty_until = self.dry_until = self.trouble_until = self.cleaned = 0
-        self.troubles = 0
+        self.troubles = self.dries = 0
         now, skipped = clock(), 0
         try:
             with open(self.book) as f:
@@ -123,12 +128,16 @@ class Faucet:
     def _close(self, address, t):
         self.paid[address] = max(self.paid.get(address, 0), t)
 
-    # the more challenges in the last hour, the more work: one bit more for every doubling beyond eight
-    def bits(self):
+    # The more claims whose work was done in the last hour, the more work: one bit more for every doubling beyond
+    # eight. A challenge that nobody answered raises nothing for others; it raises the work of the place that
+    # fetched it (own). And a faucet never asks more than this program's own asker does unasked, unless its
+    # owner set the quiet work higher than that.
+    def bits(self, own=0):
         now = self.clock()
         while self.recent and now - self.recent[0] >= 3600:
             self.recent.popleft()
-        return min(MAX_BITS, self.base_bits + max(0, (len(self.recent) // 8).bit_length()))
+        most = min(MAX_BITS, max(self.base_bits, ASK_BITS))
+        return min(most, self.base_bits + max(0, (len(self.recent) // 8).bit_length()) + max(0, own))
 
     def _clean(self, now):
         self.cleaned = now
@@ -139,19 +148,19 @@ class Faucet:
         self.paid = {a: t for a, t in self.paid.items() if now - t < PERIOD}
 
     def _key(self, source):
-        # one place is one IPv4 address or one IPv6 /64: whoever has a /64 has all of its addresses
+        # one place is one IPv4 address or one IPv6 /48: a customer of a provider often has a /56 or a /48 to himself
         source = str(source).strip()[:100]
         try:
             ip = ipaddress.ip_address(source)
             if ip.version == 6:
-                ip = ip.ipv4_mapped or ipaddress.ip_address(int(ip) >> 64 << 64)
+                ip = ip.ipv4_mapped or ipaddress.ip_address(int(ip) >> 80 << 80)
             source = str(ip)
         except ValueError:
             pass
         return hashlib.sha256(self.salt + source.encode()).hexdigest()[:16]
 
     def _source(self, source):
-        """Counts a request of this place and returns the place's key, or refuses."""
+        """Counts a request of this place and returns the place's key and its requests of the last hour, or refuses."""
         now = self.clock()
         if now - self.cleaned >= 60:
             self._clean(now)
@@ -166,7 +175,7 @@ class Faucet:
         if len(times) >= self.per_source:
             raise Refused("TOO_OFTEN", "too many requests from where you are; come back in an hour")
         times.append(now)
-        return key
+        return key, len(times)
 
     def _sign(self, address, bits, expires, nonce):
         return hmac.new(self.secret, ("%s|%d|%d|%s" % (address, bits, expires, nonce)).encode(), hashlib.sha256).hexdigest()[:32]
@@ -204,8 +213,14 @@ class Faucet:
         if kind == "OVER_DAY":
             self.empty_until = now + 600        # the wallet is asked again in ten minutes, not at every claim
             return Refused("EMPTY", "the faucet has given what it may give in a day; come back tomorrow")
-        if kind in ("NOT_ENOUGH", "NOTHING_TO_SPEND"):
-            self.dry_until = now + 120          # its coins wait for a block
+        if kind in ("NOT_ENOUGH", "NOTHING_TO_SPEND", "OPEN_PAYMENT"):
+            # its coins wait for a block, or a payment the network did not take stands in the way until the next block
+            self.dry_until = now + 120
+            self.dries += 1
+            if self.dries >= 5:                 # this often in a row it is not a block's wait: the wallet is empty or stuck
+                self.dry_until = now + 600
+                _say("ALARM the faucet had no coin to pay with %d times in a row (%s); its owner has to look"
+                     % (self.dries, re.sub(r"[^A-Z_]", "", str(kind))[:30]))
             return Refused("LATER", "the faucet has no coin free just now; try again in a few minutes")
         self.trouble_until = now + 600
         _say("ALARM the wallet refuses to pay (%s); the faucet's owner has to look" % re.sub(r"[^A-Z_]", "", str(kind))[:30])
@@ -227,18 +242,18 @@ class Faucet:
 
     def challenge(self, source, address):
         with self.lock:
-            key = self._source(source)
+            key, asked = self._source(source)
             address = self._address(address)
             now = self.clock()
             self._may_pay(key, address, now)
-            bits, expires, nonce = self.bits(), int(now) + CHALLENGE_LIFE, os.urandom(8).hex()
-            self.recent.append(now)
+            # a place's first questions get the common work; more of them within the hour cost that place more
+            bits, expires, nonce = self.bits(asked - 4), int(now) + CHALLENGE_LIFE, os.urandom(8).hex()
             return {"challenge": "%d.%d.%s.%s" % (bits, expires, nonce, self._sign(address, bits, expires, nonce)), "bits": bits, "expires": expires,
                     "work": "find an answer of up to 32 hex characters so that SHA-256(challenge + ':' + answer) begins with that many zero bits"}
 
     def claim(self, source, address, challenge, answer):
         with self.lock:
-            key = self._source(source)
+            key, _ = self._source(source)
             address = self._address(address)
             try:
                 if len(challenge) > 200:
@@ -259,6 +274,7 @@ class Faucet:
                 raise Refused("WORK", "the answer does not do the work asked for")
             if challenge in self.used:
                 raise Refused("ALREADY", "this challenge was answered before")
+            self.recent.append(now)                     # work was done: that is what raises the work for all
             self._may_pay(key, address, now)
             # From here on the challenge is used and the address is taken, before the wallet is asked: a claim
             # that the wallet refuses cannot be sent again and again, and two claims at once pay once.
@@ -287,6 +303,8 @@ class Faucet:
                 with self.lock:
                     self.pending.pop(address, None)
                     self.paid[address] = now
+                    self.hour.append(now)
+                    self.source_paid.setdefault(key, []).append(now)
                 raise
         finally:
             self.paying.release()
@@ -300,7 +318,7 @@ class Faucet:
                 self.hour.append(now)
                 self.source_paid.setdefault(key, []).append(now)
                 if state == "handed":
-                    self.troubles = 0
+                    self.troubles = self.dries = 0
                 else:
                     self._trouble(now, "the outcome of a payment is not known")
             self._write({"t": int(now), "address": address, "txid": done["id"], "state": state})
@@ -357,7 +375,24 @@ def make_handler(faucet, trust_proxy):
         protocol_version = "HTTP/1.1"
         server_version = "polarka-faucet"
         sys_version = ""
-        timeout = SOCKET_TIMEOUT        # a request that does not arrive in this time is dropped
+        timeout = SOCKET_TIMEOUT        # one read that takes longer than this ends the request
+
+        def setup(self):
+            super().setup()
+            # and the whole request has REQUEST_TIME to arrive: one byte every few seconds holds no thread for long
+            self._late = threading.Timer(REQUEST_TIME, self._drop)
+            self._late.daemon = True
+            self._late.start()
+
+        def _drop(self):
+            try:
+                self.connection.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+        def finish(self):
+            self._late.cancel()
+            super().finish()
 
         def source(self):
             if not trust_proxy:
@@ -380,6 +415,7 @@ def make_handler(faucet, trust_proxy):
             self.wfile.write(body)
 
         def do_GET(self):
+            self._late.cancel()                 # it has arrived
             if self.path != "/":
                 return self.send(404, {"error": "INPUT", "message": "there is /, /v1/challenge and /v1/claim"})
             self.send(200, faucet.about())
@@ -391,8 +427,10 @@ def make_handler(faucet, trust_proxy):
                 if not re.fullmatch(r"[0-9]{1,6}", length) or not 2 <= int(length) <= MAX_BODY:
                     outcome = "INPUT"
                     return self.send(413, {"error": "INPUT", "message": "request size"})
+                raw = self.rfile.read(int(length))
+                self._late.cancel()             # it has arrived; a payment may take longer than a request may
                 try:
-                    body = json.loads(self.rfile.read(int(length)).decode("utf-8"))
+                    body = json.loads(raw.decode("utf-8"))
                 except ValueError:
                     body = None
                 if type(body) is not dict:
@@ -434,10 +472,11 @@ def serve(wallet, amount, listen, trust_proxy=False, base_bits=BASE_BITS, per_so
     limits = wallet.limits()
     if limits is None:
         raise Refused("NO_LIMITS", "the faucet's wallet has no limits.json; its owner writes what it may give in a day")
-    if amount <= 0 or amount >= limits["per_payment"]:
-        # a payment counts with its fee, so a limit equal to the amount would let nothing through
-        raise Refused("LIMITS", "the amount given (%s NORTH) and its fee have to fit under per_payment_north in limits.json (%s)"
-                      % (north(amount), north(limits["per_payment"])))
+    room = (limits.get("fee_rate") or 2) * 2000         # the fee of a payment made of a dozen coins, with room to spare
+    if amount <= 0 or amount + room > limits["per_payment"]:
+        # a payment counts with its fee, so a limit equal to the amount, or a hair above it, would let nothing through
+        raise Refused("LIMITS", "the amount given (%s NORTH) and its fee have to fit under per_payment_north in limits.json (%s); "
+                      "leave at least %s NORTH above the amount" % (north(amount), north(limits["per_payment"]), north(room)))
     os.umask(0o077)                 # what the faucet writes is its owner's to read
     # the day's purse is not to be had in one burst: at most a twelfth of it in an hour
     per_hour = max(1, int(limits["per_day"] // amount) // 12)
@@ -462,6 +501,24 @@ def ask(url, address, timeout=30, most_bits=MAX_BITS):
             return None
 
     def post(path, obj):
+        # the whole exchange has a deadline of its own, whatever comes slowly: the header as well as the body
+        box = {}
+
+        def run():
+            try:
+                box["answer"] = fetch(path, obj)
+            except BaseException as e:
+                box["error"] = e
+        worker = threading.Thread(target=run, daemon=True)
+        worker.start()
+        worker.join(2 * timeout + 1)
+        if worker.is_alive():
+            raise Refused("FAUCET", "the faucet did not answer in time")
+        if "error" in box:
+            raise box["error"]
+        return box["answer"]
+
+    def fetch(path, obj):
         req = urllib.request.Request(url.rstrip("/") + path, json.dumps(obj).encode(), {"Content-Type": "application/json"})
         end, text = time.time() + 2 * timeout, b""
         try:
@@ -497,12 +554,15 @@ def ask(url, address, timeout=30, most_bits=MAX_BITS):
     bits, challenge = c.get("bits"), c.get("challenge")
     if type(bits) is not int or not 0 <= bits <= min(most_bits, MAX_BITS) or not isinstance(challenge, str) or len(challenge) > 200:
         raise Refused("FAUCET", "the faucet asks for work this program does not do")
-    answer = solve(challenge, bits, 1 << (bits + 4))        # sixteen times the work expected, then no more
+    until = c.get("expires")
+    if type(until) is not int or until <= time.time():
+        raise Refused("FAUCET", "the faucet gave a challenge that has run out already")
+    answer = solve(challenge, bits, 1 << (bits + 4), until)     # sixteen times the work expected or the challenge's time, then no more
     if answer is None:
         raise Refused("FAUCET", "the work was not done")
     got = post("/v1/claim", {"address": address, "challenge": challenge, "answer": answer})
     txid = got.get("transaction_id")
-    if not isinstance(txid, str) or not re.match(r"^[0-9a-f]{64}$", txid):
+    if not isinstance(txid, str) or not re.fullmatch(r"[0-9a-f]{64}", txid):
         raise Refused("FAUCET", "the faucet did not name a transaction")
     return {"asked": address, "transaction_id": txid, "work_bits": bits,
             "then": "this is the faucet's word; the coin shows in the balance once it is in a block"}

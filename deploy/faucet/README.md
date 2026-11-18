@@ -34,6 +34,10 @@ one: with one coin the faucet pays one asker per block and tells the others to c
 With two payments an hour for every coin you are on the safe side (`pay-many` from another wallet of this
 program sends many small coins in one payment).
 
+The faucet listens on this machine only (127.0.0.1) and must stay so: the web server in front reads a whole
+request before the faucet sees it and is what keeps slow or endless requests away. Keep in the faucet's wallet
+no more than a few days of what it may give: whoever took over the service would have the wallet.
+
 Watch the service's journal for lines that begin with `ALARM`: the wallet refused to pay for a reason only
 its owner can put right, or payments were not taken by the network. The faucet then rests for ten minutes at
 a time and tells askers so.

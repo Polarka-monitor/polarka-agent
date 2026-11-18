@@ -4,7 +4,8 @@ On 18 November 2026 the faucet of version 0.1.2 (`polarka_agent/faucet.py` and w
 a second AI agent that had not seen it being written. It read the code and then wrote 13 small programs that
 drove the real code against the repository's own model of a wallet server. This page is a summary of its
 report by the faucet's author (Cloe, an AI working with Severka), with what was done about each finding. The
-fixes have not been read by a second pair of eyes, and the faucet has never run in public.
+fixes were then read by a second independent AI reviewer (see "The second look" below), and the faucet has
+never run in public.
 
 ## Verdict of the review
 
@@ -20,13 +21,13 @@ Findings: critical 0, high 2, medium 6, low 7, notes 3.
 
 | | Finding | Done |
 |---|---|---|
-| F1 high | The work (plain SHA-256, ten times faster in C) and the count of requests by place do not bound a script; an address costs nothing to make | One place (an IPv4 address or an IPv6 /64) gets two payments a day (`--per-source`). The faucet gives at most a twelfth of the day's sum in an hour. The work now rises with the challenges handed out, paid or not. Not done: another kind of work (scrypt), see below |
+| F1 high | The work (plain SHA-256, ten times faster in C) and the count of requests by place do not bound a script; an address costs nothing to make | One place (an IPv4 address or an IPv6 /48) gets two payments a day (`--per-source`). The faucet gives at most a twelfth of the day's sum in an hour. The work now rises with the challenges handed out, paid or not. Not done: another kind of work (scrypt), see below |
 | F2 high | With a limit for one payment equal to the amount, nothing is ever paid (the fee counts), and askers are told "come back tomorrow" | The faucet does not start with such limits. A wallet that refuses for a reason only its owner can mend is reported as out of order, not as empty, and the owner gets an `ALARM` line |
-| F3 medium | No timeout and no cap on threads: about a thousand requests that never arrive took the faucet off the net | A request has 10 seconds to arrive; 64 requests are answered at one time and the rest get 503 at once; one request a connection; the deployment reads the whole request in the web server first and raises the file-handle limit |
+| F3 medium | No timeout and no cap on threads: about a thousand requests that never arrive took the faucet off the net | One read of a request has 10 seconds and the whole request 20; 64 requests are answered at one time and the rest get 503 at once; one request a connection; the deployment reads the whole request in the web server first and raises the file-handle limit |
 | F4 medium | A solved claim the wallet refused could be sent again without end, each time asking the wallet server, under the one lock that challenges need too | A challenge is used once it reaches the wallet. An empty faucet remembers that for ten minutes and asks nobody. The lock is held for the books only, never while the wallet server is asked |
 | F5 medium | With one coin the faucet pays one asker per block and tells the others "come back tomorrow" | "No coin free, try again in a few minutes" is its own answer, and no challenge is given meanwhile. The owner sends many small coins (deployment notes) |
 | F6 medium | The questions asked of the wallet server for one claim grow with the payments that wait for a block | Not done in the wallet. The hourly bound keeps the number of waiting payments small, and nothing waits behind a claim any more except other claims |
-| F7 medium | The table of places grew without bound and was walked at every request beyond 100000 entries | Cleaned once a minute; an IPv6 /64 is one place; a hard cap, beyond which new places are told to come back |
+| F7 medium | The table of places grew without bound and was walked at every request beyond 100000 entries | Cleaned once a minute; an IPv6 /48 is one place; a hard cap, beyond which new places are told to come back |
 | F8 low | One address was paid twice a day, written in small and in capital letters | Addresses are compared in small letters |
 | F9 low | A crash between the payment and the book, or a disk error after the payment left, paid the address again | Address and challenge are taken before the wallet is asked and given back only when nothing was signed. At its start the faucet also reads the wallet's journal, which is written before a payment leaves |
 | F10 low | A wallet server whose node takes no transaction made the faucet say "the payment was made" and close the address | "Nothing was paid, try again later"; the address stays open; after three such payments in a row the faucet rests ten minutes at a time and writes `ALARM` |
@@ -47,5 +48,28 @@ Findings: critical 0, high 2, medium 6, low 7, notes 3.
 - **Many internet addresses still get many coins.** Nothing in a faucet without accounts stops that. The
   day's limit in `limits.json` is the promise; everything else makes taking it slower.
 - **Places are forgotten at a restart** (their salt is new), payments are not.
+
+## The second look
+
+On 18 and 19 November 2026 another independent AI reviewer, who had seen neither the first fixes being written
+nor this page being written, checked them: it ran the first review's programs again and wrote its own. Its
+verdict was "yes after these fixes": the owner's limits held in every run, 11 of the 18 findings were fixed, 5
+partly, and two things still stood in the way.
+
+| | Finding of the second look | Done |
+|---|---|---|
+| S1 high | Questions that cost nothing raised the work for everybody: 128 of them an hour from 7 addresses put the faucet beyond what this program's own asker does, so every ordinary asker was shut out. The first fix had brought this in | Only work that was done raises the work for all. Questions raise the work of the place that asked them, from the fifth in an hour. And a faucet never asks more than the asker does unasked (24 bits), unless its owner sets the quiet work higher |
+| S2 medium | An IPv6 /64 counted as a place, so one customer with a /56 was 256 places and took 99.75 of 100 NORTH in twelve hours | A place is an IPv6 /48 |
+| S3 low | The 10 seconds were for one read, so a request sent a byte at a time held a thread as long as it liked | The whole request has 20 seconds; the faucet is said to belong behind a web server |
+| S4 low | 100000 places filled the table and new places had to wait | Follows from S2: so many /48s are not had for nothing |
+| S5 low | After a payment the network did not take, the next paid claim brought a false alarm and a ten-minute rest | That state is "no coin free, try again in a few minutes" and no alarm |
+| S6 low | A limit a hair above the amount still started and then alarmed at every claim | The start asks for room for the fee above the amount |
+| S7 low | The asker's deadline covered the body of an answer, not its header | The whole exchange has a deadline |
+| S8 low | A payment that left but ended in an error was counted for neither the hour nor the place | Counted |
+| S9 low | An empty wallet said "try again in a few minutes" for ever and told its owner nothing | After five such answers in a row the owner gets an `ALARM` line and the faucet asks the wallet less often |
+| S10 to S14 notes | A refused start looped under systemd; the asker did not read when a challenge runs out and let a newline through in a transaction id; the tool's text promised too short a time; the unit might not let names resolve | Exit code 2 is not started again; the asker stops when the challenge runs out; ids are matched whole; the text is true; the unit allows what resolving needs. Not done: an asker may still be sent to a private https address; two claims under way at the moment the day is spent still ask the wallet |
+
+Not checked by either reviewer: the web server (Caddy) and systemd themselves, and a real Northbound server
+under a real load. What was changed after the second look has been read by nobody else.
 
 The tests that hold these fixes are in `tests/test_faucet_bounds.py`.

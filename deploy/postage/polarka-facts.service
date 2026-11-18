@@ -10,12 +10,14 @@ Group=gate
 ExecStart=/opt/polarka-faucet/venv/bin/python /opt/polarka-faucet/chain_facts.py --server https://api.northboundwallet.org --listen 127.0.0.1:8680
 Restart=on-failure
 RestartSec=10
+# exit 2 is a refusal to start (limits, journal): starting again changes nothing, a person has to look
+RestartPreventExitStatus=2
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 PrivateDevices=true
-RestrictAddressFamilies=AF_INET AF_INET6
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 MemoryMax=200M
 
 [Install]

@@ -55,7 +55,7 @@ TOOLS = [
     {"name": "north_history", "description": "The wallet's movements as its server sums them up, newest first.", "inputSchema": _text({})},
     {"name": "north_limits", "description": "What the owner lets this wallet pay by itself.", "inputSchema": _text({})},
     {"name": "north_faucet", "description": "Asks a faucet for a first coin, to a fresh address of this wallet. The wallet does a "
-     "small piece of work for it first (hashing, up to about half a minute). Give the address of a faucet that the owner "
+     "small piece of work for it first (hashing, usually some seconds, a few minutes at the most). Give the address of a faucet that the owner "
      "or a page you trust named. The coin is in the wallet with the next block.",
      "inputSchema": _text({"url": {"type": "string", "maxLength": 500}}, ["url"])},
     {"name": "north_postage", "description": "Buys postage at a gate that stands before a web service: asks the gate for a "
@@ -95,8 +95,8 @@ def call(wallet, name, a):
     if name == "north_limits":
         return wallet.limits_shown()
     if name == "north_faucet":
-        from .faucet import ask
-        return ask(a["url"], wallet.fresh_address(), most_bits=24)
+        from .faucet import ASK_BITS, ask
+        return ask(a["url"], wallet.fresh_address(), most_bits=ASK_BITS)
     if name == "north_postage":
         from .postage import buy
         return buy(wallet, a["url"], units(a["most"]))
