@@ -84,6 +84,7 @@ def run(argv=None, out=sys.stdout):
     sub.add_parser("mcp", help="serve the wallet to an agent over the Model Context Protocol (standard input and output)")
     c = sub.add_parser("faucet", help="ask a faucet for a first coin, to a fresh address of this wallet")
     c.add_argument("url")
+    c.add_argument("--max-bits", type=int, default=24, help="the most work done for it, in zero bits (24 is about ten seconds of one core)")
     c = sub.add_parser("postage", help="buy postage at a gate: ask it for a quote and pay it, within the limits")
     c.add_argument("url")
     c.add_argument("--most", required=True, help="the most NORTH to pay for one lot of calls")
@@ -101,6 +102,7 @@ def run(argv=None, out=sys.stdout):
     c.add_argument("--listen", default="127.0.0.1:8660")
     c.add_argument("--bits", type=int, default=20, help="zero bits of work asked for when the faucet is quiet")
     c.add_argument("--trust-proxy", action="store_true", help="take the asker's address from X-Forwarded-For")
+    c.add_argument("--per-source", type=int, default=2, help="payments one place (an IPv4 address or an IPv6 /64) may get in a day")
     a = p.parse_args(argv)
     folder = os.path.expanduser(a.dir)
 
@@ -132,7 +134,9 @@ def run(argv=None, out=sys.stdout):
             return show({"address": wallet.fresh_address()})
         if a.cmd == "faucet":
             from .faucet import ask
-            return show(ask(a.url, wallet.fresh_address()))
+            if not 1 <= a.max_bits <= 30:
+                raise Refused("INPUT", "--max-bits is 1 to 30")
+            return show(ask(a.url, wallet.fresh_address(), most_bits=a.max_bits))
         if a.cmd == "postage":
             from .postage import buy
             return show(buy(wallet, a.url, units(a.most)))
@@ -146,7 +150,9 @@ def run(argv=None, out=sys.stdout):
             from .faucet import serve as faucet_serve
             if not 10 <= a.bits <= 30:
                 raise Refused("INPUT", "--bits is 10 to 30")
-            return faucet_serve(wallet, units(a.amount), a.listen, a.trust_proxy, a.bits)
+            if not 1 <= a.per_source <= 100:
+                raise Refused("INPUT", "--per-source is 1 to 100")
+            return faucet_serve(wallet, units(a.amount), a.listen, a.trust_proxy, a.bits, a.per_source)
         if a.cmd == "balance":
             return show(_amounts(wallet.balance()))
         if a.cmd == "history":

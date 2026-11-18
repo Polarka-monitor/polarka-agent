@@ -90,7 +90,8 @@ output. Its tools are `north_balance`, `north_address`, `north_received`, `north
 ## A first coin: the faucet
 
 A program that has no coin can ask a faucet for one. It does a small piece of work first (hashing, a few
-seconds of one processor), so that asking a thousand times costs a thousand times as much.
+seconds of one processor). The work is friction, not a wall: a program written for speed does it many times
+faster. What bounds a faucet is what it counts, below.
 
     python3 -m polarka_agent --dir FOLDER faucet https://ADDRESS-OF-A-FAUCET
 
@@ -99,11 +100,21 @@ its address will be on polarka.org.
 
 Anybody can run one: `faucet-serve --amount 2` hands out 2 NORTH to an address once a day from the wallet in
 FOLDER. What it may give in a day is that wallet's `limits.json`, nothing else, so a faucet is this wallet
-under its own bounds. It keeps the addresses it paid (`faucet.jsonl`) and no internet addresses on disk; it
-asks for no name and no e-mail. It is meant to stand behind a web server that provides HTTPS
-(`--trust-proxy`). The faucet is new: nobody independent has read it yet, and it has never run in public. What our own will run
-on is in `deploy/faucet`. The limit for one
-payment in `limits.json` has to be a little above the amount given, because a payment counts with its fee.
+under its own bounds. Under that bound it gives one place (an IPv4 address or an IPv6 /64) two payments a day
+(`--per-source`) and at most a twelfth of the day's sum in one hour. None of this stops somebody who has many
+internet addresses; it bounds them, and the day's limit is the only promise. Set it to a sum you can give
+away every day. The limit for one payment has to be a little above the amount given, because a payment counts
+with its fee; otherwise the faucet does not start.
+
+It keeps the addresses it paid (`faucet.jsonl`) and no internet addresses on disk; it asks for no name and no
+e-mail. It is meant to stand behind a web server that provides HTTPS (`--trust-proxy`); what our own will run
+on is in `deploy/faucet`.
+
+The faucet of version 0.1.2 was read by an independent reviewer (an AI agent that had not seen it being
+written), who found that a script from one place could take nearly the whole day's sum within a minute and
+that a claim the wallet refused could be sent again without end. This version holds the fixes; a summary of
+the report and what was done about each finding are in `docs/faucet-review-0.1.2.md`. The fixes themselves have not been read
+by a second pair of eyes, and the faucet has never run in public.
 
 ## Something to pay for: postage
 
@@ -144,7 +155,7 @@ signature hash and signing; they come from the cold address tool
 
     TN_BIN=/path/to/bin python3 -B -m unittest discover -s tests -t .
 
-93 tests. Those in `test_wallet.py`, `test_cli_mcp.py` and `test_faucet_node.py` run against the official `truenorthd` on regtest
+107 tests. Those in `test_wallet.py`, `test_cli_mcp.py` and `test_faucet_node.py` run against the official `truenorthd` on regtest
 and a stand-in for a Northbound server (`tests/standin`, copied from the Polarka Wallet's repository); they
 are skipped without the node programs. No test touches a real network.
 

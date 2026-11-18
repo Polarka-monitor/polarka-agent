@@ -1,5 +1,6 @@
 """The faucet: work before a coin, one coin an address a day, nothing beyond the wallet's limits. Against the
 small model of a wallet server, without a node."""
+import collections
 import json
 import os
 import sys
@@ -92,11 +93,11 @@ class FaucetTest(unittest.TestCase):
 
     def test_more_asking_means_more_work_and_one_source_cannot_ask_without_end(self):
         self.assertEqual(self.f.bits(), 8)
-        self.f.recent = [self.now[0]] * 8
+        self.f.recent = collections.deque([self.now[0]] * 8)
         self.assertEqual(self.f.bits(), 9)
-        self.f.recent = [self.now[0]] * 64
+        self.f.recent = collections.deque([self.now[0]] * 64)
         self.assertEqual(self.f.bits(), 12)
-        self.f.recent = [self.now[0]] * 10 ** 6
+        self.f.recent = collections.deque([self.now[0]] * 10 ** 6)
         self.assertEqual(self.f.bits(), 25)
         self.f.base_bits = 20
         self.assertEqual(self.f.bits(), faucet.MAX_BITS)                    # and never more than that
