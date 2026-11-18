@@ -144,7 +144,7 @@ class WalletTest(unittest.TestCase):
         self.assertEqual(other.balance()["spendable"], units("1.5"))
         self.assertEqual(self.node.cli("getrawtransaction", done["id"], 1, self.node.cli("getbestblockhash"))["confirmations"], 1)
         line = w.history()["lines"][0]
-        self.assertEqual((line["txid"], line["sent"], line["fee"]), (done["id"], units("1.5"), fee))
+        self.assertEqual((line["txid"], line["net"], line["fee"]), (done["id"], -(units("1.5") + fee), fee))
 
     def test_without_limits_nothing_is_paid(self):
         w = self.funded(limits=None)

@@ -1,0 +1,11 @@
+# Caddy in front of the faucet: HTTPS, small request bodies, and no access log.
+# An access log would keep the internet addresses of everybody who asks; the faucet itself keeps none on disk.
+faucet.example.org {
+	request_body {
+		max_size 8KB
+	}
+	reverse_proxy 127.0.0.1:8660
+	log {
+		output discard
+	}
+}

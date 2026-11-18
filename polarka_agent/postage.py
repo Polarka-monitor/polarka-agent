@@ -30,13 +30,14 @@ import hashlib
 import http.client
 import json
 import os
+import re
 import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from .keys import UNIT
-from .server import ServerError
+from .server import ServerError, reachable
 from .wallet import Refused, north, units as units_of
 
 QUOTE_LIFE = 1800               # seconds an address waits for its payment
@@ -247,6 +248,53 @@ def make_handler(gate, upstream, trust_proxy):
         def log_message(self, *a):
             pass
     return H
+
+
+TOKEN_SHAPE = re.compile(r"^[0-9a-f]{16,128}$")
+
+
+def buy(wallet, url, most, timeout=30):
+    """The asker's side: a quote from a gate, and the payment for it from this wallet. The owner's limits
+    hold as for any payment, and nothing above `most` base units is paid whatever the gate asks. The
+    token gives its calls once the payment is in a block."""
+    import urllib.error
+    import urllib.request
+
+    class Stay(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):
+            return None
+
+    if not reachable(url):
+        raise Refused("GATE", "a gate is reached over https")
+    req = urllib.request.Request(url.rstrip("/") + "/_postage/quote", b"{}", {"Content-Type": "application/json"})
+    try:
+        with urllib.request.build_opener(Stay).open(req, timeout=timeout) as r:
+            text = r.read(65536)
+    except urllib.error.HTTPError as e:
+        raise Refused("GATE", "the gate answered HTTP %d" % e.code)
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        raise Refused("GATE", "the gate cannot be reached (%s)" % type(e).__name__)
+    try:
+        q = json.loads(text.decode("utf-8"))
+    except ValueError:
+        q = None
+    if type(q) is not dict:
+        raise Refused("GATE", "the gate sent something that is not a quote")
+    token, pay_to, calls, asked = q.get("token"), q.get("pay_to"), q.get("calls"), q.get("price")
+    if not isinstance(token, str) or not TOKEN_SHAPE.match(token) or not isinstance(pay_to, str) or len(pay_to) > 100 \
+            or type(calls) is not int or not 1 <= calls <= 10 ** 9 or not isinstance(asked, str):
+        raise Refused("GATE", "the gate sent a quote this program does not understand")
+    try:
+        price = units_of(asked)
+    except Refused:
+        raise Refused("GATE", "the gate sent a quote this program does not understand")
+    if price <= 0:
+        raise Refused("GATE", "the gate sent a quote this program does not understand")
+    if price > most:
+        raise Refused("TOO_DEAR", "the gate asks %s NORTH for %d calls, and %s is the most to be paid" % (north(price), calls, north(most)))
+    done = wallet.pay([(pay_to, price)], memo="postage")
+    return {"token": token, "paid": north(price), "calls": calls, "pay_to": pay_to, "payment": done["id"], "state": done["state"],
+            "then": "when the payment is in a block, send the token in the header X-Postage with each call"}
 
 
 def serve(wallet, upstream, price, calls, listen, free=0, trust_proxy=False, hashes=0):

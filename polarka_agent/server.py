@@ -137,6 +137,23 @@ def _id(text):
     return text
 
 
+def reachable(url):
+    """True for an address a faucet or a gate may be asked at: https anywhere, plain http on this machine
+    only. The host is read from the address as a whole, so a name that merely begins like this machine's
+    does not pass."""
+    if not isinstance(url, str) or len(url) > 500:
+        return False
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+        parts.port
+    except ValueError:
+        return False
+    if not host or parts.username is not None or parts.password is not None:
+        return False
+    return parts.scheme == "https" or (parts.scheme == "http" and host in ("127.0.0.1", "localhost", "::1"))
+
+
 class Server:
     def __init__(self, url, timeout=30.0, max_wait=20.0, deadline=90.0, pause=time.sleep, clock=time.monotonic):
         url = url.strip()
@@ -385,20 +402,23 @@ class Server:
     def _move(t, tip, named):
         if type(t) is not dict:
             raise _unknown("transactions")
+        # The line of a Northbound server since 15 November 2026: one signed amount for the addresses asked
+        # about (what came to them less what left them, the fee with it), the whole transaction's fee, and
+        # whether it is a block reward. No address of anybody is named in it.
         txid = _id(_text(t, "transaction_id", 64))
-        received_at = _text(t, "received_at", MAX_ADDRESS, True)
-        if received_at is not None and received_at not in named:
-            raise ServerError(200, "the server named an address it was not asked about")
-        sent_to = _text(t, "sent_to", MAX_ADDRESS, True)
-        if sent_to is not None and not ADDRESS_SHAPE.match(sent_to):
-            raise ServerError(200, "the server named a receiver that is not an address")
+        net = t.get("net_amount")
+        if type(net) is not int:
+            raise _unknown("net_amount")
+        if abs(net) > MAX_AMOUNT:
+            raise ServerError(200, "the server sent a number that cannot exist (net_amount)")
+        reward = t.get("coinbase")                      # older servers leave it out
+        if reward is not None and type(reward) is not bool:
+            raise _unknown("coinbase")
         height, deep = _whole(t, "block_height", MAX_HEIGHT, True), _whole(t, "confirmations", MAX_HEIGHT + 1)
         if not (deep == 0 if height is None else height <= tip and deep == tip - height + 1):
             raise ServerError(200, "the server sent a transaction whose depth does not fit its block")
-        return {"txid": txid, "received_at": received_at, "sent_to": None if sent_to is None else clean(sent_to, MAX_ADDRESS),
-                "received": _whole(t, "received_amount", MAX_AMOUNT), "sent": _whole(t, "sent_amount", MAX_AMOUNT),
-                "fee": _whole(t, "fee", MAX_AMOUNT, True), "height": height, "confirmations": deep,
-                "time": _whole(t, "timestamp", MAX_TIME, True)}
+        return {"txid": txid, "net": net, "fee": _whole(t, "network_fee", MAX_AMOUNT, True), "reward": reward,
+                "height": height, "confirmations": deep, "time": _whole(t, "timestamp", MAX_TIME, True)}
 
     def history(self, addresses, most=2000):
         """(height, block, lines, complete): the history of at most a hundred addresses, newest first, the
@@ -457,9 +477,10 @@ class Server:
         return _flag(answer, "allowed"), None if reason is None else clean(reason)
 
     def broadcast(self, tx_hex, within=None):
-        """Hands a signed transaction over and returns the id the server answers with. Every error of the node
-        behind the server comes back as 502, a refusal as well as a node that is down: an error here says
-        nothing about what became of the transaction, and known() has to be asked."""
+        """Hands a signed transaction over and returns the id the server answers with. A server from
+        v0.2.0-alpha.3 on answers a refusal by its node with 400 or 409 and the node's reason (in .said);
+        older ones answer 502 for every error. Whatever the error, it says little about what became of the
+        transaction, and known() has to be asked."""
         return _id(_text(self._call("/v1/transactions/broadcast", self._carrying(tx_hex), within), "transaction_id", 64))
 
     def known(self, txid, within=None):

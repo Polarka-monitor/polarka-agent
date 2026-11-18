@@ -24,9 +24,10 @@ def _amounts(result):
         if isinstance(result.get(name), int) and not isinstance(result.get(name), bool):
             result[name] = north(result[name])
     for line in result.get("lines", []):
-        for name in ("received", "sent", "fee"):
-            if isinstance(line.get(name), int):
-                line[name] = north(line[name])
+        if isinstance(line.get("net"), int):
+            line["net"] = ("-" if line["net"] < 0 else "") + north(abs(line["net"]))
+        if isinstance(line.get("fee"), int):
+            line["fee"] = north(line["fee"])
     return result
 
 
@@ -83,6 +84,9 @@ def run(argv=None, out=sys.stdout):
     sub.add_parser("mcp", help="serve the wallet to an agent over the Model Context Protocol (standard input and output)")
     c = sub.add_parser("faucet", help="ask a faucet for a first coin, to a fresh address of this wallet")
     c.add_argument("url")
+    c = sub.add_parser("postage", help="buy postage at a gate: ask it for a quote and pay it, within the limits")
+    c.add_argument("url")
+    c.add_argument("--most", required=True, help="the most NORTH to pay for one lot of calls")
     c = sub.add_parser("postage-serve", help="be a gate before a web service that lets through who paid postage to this wallet")
     c.add_argument("--upstream", required=True, help="the service behind the gate, host:port")
     c.add_argument("--price", help="NORTH for one lot of calls")
@@ -129,6 +133,9 @@ def run(argv=None, out=sys.stdout):
         if a.cmd == "faucet":
             from .faucet import ask
             return show(ask(a.url, wallet.fresh_address()))
+        if a.cmd == "postage":
+            from .postage import buy
+            return show(buy(wallet, a.url, units(a.most)))
         if a.cmd == "postage-serve":
             from .postage import serve as postage_serve
             if (a.price is None) == (a.price_hashes is None):

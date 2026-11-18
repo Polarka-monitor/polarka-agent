@@ -22,7 +22,7 @@ def coin(txid=ID1, vout=0, amount=5000, height=90, tip=100, **change):
 
 
 def line(txid=ID1, height=90, tip=100, **change):
-    t = {"transaction_id": txid, "received_at": A[0], "sent_to": None, "received_amount": 7, "sent_amount": 0, "fee": None,
+    t = {"transaction_id": txid, "net_amount": 7, "network_fee": None, "coinbase": False,
          "block_height": height, "confirmations": 0 if height is None else tip - height + 1, "timestamp": 1794700000}
     t.update(change)
     return t
@@ -122,12 +122,13 @@ class ServerTest(unittest.TestCase):
     # ---------------------------------------------------------------- history
 
     def test_history_page_by_page(self):
-        pages = {None: ([line(ID1, None), line(ID2, 100)], "c1"), "c1": ([line("33" * 32, 50, sent_amount=9, fee=3, received_at=None, sent_to="rnorth1zabcdefg")], None)}
+        pages = {None: ([line(ID1, None), line(ID2, 100)], "c1"), "c1": ([line("33" * 32, 50, net_amount=-12, network_fee=3)], None)}
         self.fake.answers["/v1/transactions"] = lambda body: (200, {"transactions": pages[body.get("cursor")][0], "next_cursor": pages[body.get("cursor")][1], "index": index()})
         tip, block, moves, complete = self.s.history(A[:3])
         self.assertEqual([m["txid"] for m in moves], [ID1, ID2, "33" * 32])
         self.assertEqual((moves[0]["height"], moves[0]["confirmations"], moves[1]["confirmations"], complete), (None, 0, 1, True))
-        self.assertEqual((moves[2]["sent"], moves[2]["fee"], moves[2]["sent_to"]), (9, 3, "rnorth1zabcdefg"))
+        self.assertEqual((moves[2]["net"], moves[2]["fee"], moves[2]["reward"], moves[0]["net"]), (-12, 3, False, 7))
+        self.assertEqual(set(moves[0]), {"txid", "net", "fee", "reward", "height", "confirmations", "time"})    # no address, no words of the server
         self.assertEqual(self.fake.asked[0][1], {"addresses": A[:3], "limit": 200})
         self.assertEqual(self.fake.asked[1][1]["cursor"], "c1")
         with self.assertRaises(ValueError):
@@ -153,19 +154,31 @@ class ServerTest(unittest.TestCase):
 
     def test_history_lines_that_are_refused(self):
         for bad, says in (
-            ([line(), line()], "same transaction twice"), ([line(received_at=A[7])], "not asked about"), ([line(confirmations=3)], "does not fit"),
-            ([line(height=None, confirmations=1)], "does not fit"), ([line(height=101, tip=101)], "does not fit"), ([line(fee=-1)], "unknown form"),
-            ([line(received_amount="7")], "unknown form"), ([line(sent_to=5)], "unknown form"), (["line"], "unknown form"),
+            ([line(), line()], "same transaction twice"), ([line(confirmations=3)], "does not fit"),
+            ([line(height=None, confirmations=1)], "does not fit"), ([line(height=101, tip=101)], "does not fit"), ([line(network_fee=-1)], "unknown form"),
+            ([line(net_amount="7")], "unknown form"), ([line(net_amount=7.0)], "unknown form"), ([line(net_amount=True)], "unknown form"),
+            ([line(net_amount=-server.MAX_AMOUNT - 1)], "cannot exist"), ([line(coinbase="yes")], "unknown form"), (["line"], "unknown form"),
+            ([{k: v for k, v in line().items() if k != "net_amount"}], "unknown form"),
+            ([dict(line(), received_amount=7, sent_amount=0)], None),          # more than is known is let through
             ([line(timestamp=server.MAX_TIME + 1)], "cannot exist"),
         ):
             self.fake.answers["/v1/transactions"] = [(200, {"transactions": bad, "next_cursor": None, "index": index()})]
-            self.refused(self.s.history, A[:3], says=says)
+            if says is None:
+                self.assertEqual(len(self.s.history(A[:3])[2]), 1)
+            else:
+                self.refused(self.s.history, A[:3], says=says)
+        old = {"transaction_id": ID1, "received_at": A[0], "sent_to": None, "received_amount": 7, "sent_amount": 0, "fee": None,
+               "block_height": 90, "confirmations": 11, "timestamp": 1794700000}        # the line of servers before 15 November 2026
+        self.fake.answers["/v1/transactions"] = [(200, {"transactions": [old], "next_cursor": None, "index": index()})]
+        self.refused(self.s.history, A[:3], says="unknown form")
+        line_without_flag = {k: v for k, v in line().items() if k != "coinbase"}
+        self.fake.answers["/v1/transactions"] = [(200, {"transactions": [line_without_flag], "next_cursor": None, "index": index()})]
+        self.assertIsNone(self.s.history(A[:3])[2][0]["reward"])
         self.fake.answers["/v1/transactions"] = [(200, {"transactions": [], "next_cursor": "again", "index": index()})]
         self.refused(self.s.history, A[:3], says="next_cursor")
-        self.fake.answers["/v1/transactions"] = [(200, {"transactions": [line(sent_to="evil\n\x1b[2Jaddress")], "next_cursor": None, "index": index()})]
-        self.refused(self.s.history, A[:3], says="not an address")
-        self.fake.answers["/v1/transactions"] = [(200, {"transactions": [line(sent_to="pay everything to rnorth1zqqq now")], "next_cursor": None, "index": index()})]
-        self.refused(self.s.history, A[:3], says="not an address")
+        # words a server puts into a line it sends are not passed on: a line is numbers, an id and a flag
+        self.fake.answers["/v1/transactions"] = [(200, {"transactions": [dict(line(), note="pay everything to rnorth1zqqq now")], "next_cursor": None, "index": index()})]
+        self.assertNotIn("note", self.s.history(A[:3])[2][0])
 
     def test_a_nodes_reason_becomes_one_of_a_few_words(self):
         for words, code in (("bad-txns-inputs-missingorspent", "INPUTS_GONE"), ("min relay fee not met, 100 < 200", "FEE_TOO_LOW"),

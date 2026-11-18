@@ -76,7 +76,7 @@ class CliMcpTest(unittest.TestCase):
         self.assertEqual(self.cli("wait", to, "1.5", folder=folder)[1]["paid"], True)
         self.assertEqual(self.cli("wait", to, "1.6", "--timeout", "1", folder=folder)[1]["paid"], False)
         status, h = self.cli("history")
-        self.assertEqual((h["lines"][0]["txid"], h["lines"][0]["sent"], h["lines"][0]["fee"]), (paid["id"], "1.50000000", "0.00000326"))
+        self.assertEqual((h["lines"][0]["txid"], h["lines"][0]["net"], h["lines"][0]["fee"]), (paid["id"], "-1.50000326", "0.00000326"))
         for args, kind in ((("pay", to, "1e3"), "AMOUNT"), (("pay", to, "-1"), "AMOUNT"), (("pay", "nonsense", "1"), "ADDRESS"), (("pay", to, "60"), "OVER_LIMIT"),
                            (("forget", "00" * 32), "NOT_OPEN"), (("received", SINK), "NOT_OURS"), (("stamp",), "DIGEST"), (("stamp", "--sha256", "zz"), "DIGEST"),
                            (("pay-many", os.path.join(self.dir, "limits.json")), "FILE"), (("pay-many", "/nonexistent/file"), "FILE")):
@@ -152,7 +152,7 @@ class CliMcpTest(unittest.TestCase):
         self.assertEqual(replies[1]["result"], {})
         names = [t["name"] for t in replies[2]["result"]["tools"]]
         self.assertEqual(names, ["north_balance", "north_address", "north_received", "north_wait", "north_pay", "north_stamp", "north_payments",
-                                 "north_history", "north_limits"])
+                                 "north_history", "north_limits", "north_faucet", "north_postage"])
         self.assertEqual([replies[3]["error"]["code"], replies[4]["error"]["code"], replies[5]["error"]["code"], replies[6]["error"]["code"]],
                          [-32700, -32601, -32600, -32600])
         other = self.ask(w, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "1999-01-01"}})

@@ -61,7 +61,7 @@ class Model:
         return any((c["txid"], 0) in spends for spends in self.waiting.values())
 
     def line(self, txid):
-        return {"transaction_id": txid, "received_at": None, "sent_to": None, "received_amount": 0, "sent_amount": 1, "fee": 1,
+        return {"transaction_id": txid, "net_amount": -2, "network_fee": 1, "coinbase": False,
                 "block_height": None, "confirmations": 0, "timestamp": None}
 
     def broadcast(self, body):
@@ -95,6 +95,21 @@ class RulesTest(unittest.TestCase):
                 look()
             self.assertIn("does not pay to this wallet", str(e.exception))
         self.assertFalse(os.path.exists(os.path.join(self.folder, "journal.jsonl")))
+
+    def test_a_refusal_at_the_hand_over_is_not_asked_for_again(self):
+        """A server from v0.2.0-alpha.3 on says no with 400 or 409 and the node's reason; older ones say 502 for everything."""
+        self.m.coin(self.w.account.address(0, 0), 10 * N, "aa" * 32)
+        self.m.fake.answers["/v1/transactions/broadcast"] = [(409, {"message": "bad-txns-inputs-missingorspent"})]
+        done = self.w.pay([(self.to, N)])
+        self.assertEqual(done["state"], "kept")
+        self.assertIn("INPUTS_GONE", done["note"])
+        self.assertEqual(len([1 for path, _ in self.m.fake.asked if path == "/v1/transactions/broadcast"]), 1)
+        self.m.fake.asked.clear()
+        self.m.fake.answers["/v1/transactions/broadcast"] = [(502, {"message": "node"})]
+        self.now[0] += 5
+        again = self.w.pay([(self.to, 2 * N)])
+        self.assertEqual(again["state"], "unknown")
+        self.assertEqual(len([1 for path, _ in self.m.fake.asked if path == "/v1/transactions/broadcast"]), 3)
 
     def test_an_output_of_nothing_is_no_coin_and_stops_nothing(self):
         self.m.coin(self.w.account.address(0, 0), 0, "aa" * 32)

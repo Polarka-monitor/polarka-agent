@@ -476,4 +476,8 @@ class Wallet:
                         return self._set(p, "handed", "the hand-over failed, but the server knows the transaction")
                 except ServerError:
                     pass
+                else:
+                    if e.status in (400, 409):
+                        # the node said no and the server does not know the transaction: asking again changes nothing
+                        return self._set(p, "kept", "the server said that its node does not take it (%s)" % reason_code(e.said))
         return self._set(p, "unknown", "handed over three times and nobody knows it (%s)" % last)

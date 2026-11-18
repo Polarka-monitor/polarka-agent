@@ -1,0 +1,27 @@
+# systemd unit for a public faucet. It listens on this machine only; a web server in front provides HTTPS.
+[Unit]
+Description=Polarka faucet (polarka-agent faucet-serve)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=faucet
+Group=faucet
+ExecStart=/opt/polarka-faucet/venv/bin/polarka-agent --dir /var/lib/polarka-faucet/wallet faucet-serve --amount 2 --listen 127.0.0.1:8660 --trust-proxy
+Restart=on-failure
+RestartSec=10
+# the service may write its wallet folder and nothing else
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+ReadWritePaths=/var/lib/polarka-faucet
+MemoryMax=300M
+TasksMax=200
+
+[Install]
+WantedBy=multi-user.target

@@ -130,6 +130,113 @@ class PostageTest(unittest.TestCase):
                 s.server_close()
 
 
+class BuyingTest(unittest.TestCase):
+    """The asker's side: a quote, a payment within the buyer's own bounds, and calls for the token."""
+
+    def setUp(self):
+        self.m = Model()
+        self.now = [1_800_000_000]
+        tmp = tempfile.mkdtemp(prefix="polarka-postage-")
+        self.gate_folder, self.buyer_folder = os.path.join(tmp, "gate"), os.path.join(tmp, "buyer")
+        Wallet.create(self.gate_folder, "regtest", self.m.fake.url, WORDS)
+        Wallet.create(self.buyer_folder, "regtest", self.m.fake.url, None)
+        with open(os.path.join(self.buyer_folder, "limits.json"), "w") as f:
+            json.dump({"per_payment_north": "0.5", "per_day_north": "1"}, f)
+        self.gw = Wallet(self.gate_folder, clock=lambda: self.now[0])
+        self.bw = Wallet(self.buyer_folder, clock=lambda: self.now[0])
+        self.m.coin(self.bw.account.address(0, 0), 10 * N, "ee" * 32)
+        self.g = postage.Gate(self.gw, N // 100, 100, clock=lambda: self.now[0], look_every=0)
+        self.behind = ThreadingHTTPServer(("127.0.0.1", 0), Behind)
+        self.gate = ThreadingHTTPServer(("127.0.0.1", 0), postage.make_handler(self.g, "127.0.0.1:%d" % self.behind.server_address[1], False))
+        for s in (self.behind, self.gate):
+            threading.Thread(target=s.serve_forever, daemon=True).start()
+        self.url = "http://127.0.0.1:%d" % self.gate.server_address[1]
+
+    def tearDown(self):
+        for s in (self.behind, self.gate):
+            s.shutdown()
+            s.server_close()
+        self.gw.server.close()
+        self.bw.server.close()
+        self.m.fake.stop()
+
+    def test_a_quote_is_paid_within_bounds_and_the_token_gets_its_calls(self):
+        got = postage.buy(self.bw, self.url, N // 10)
+        self.assertEqual((got["paid"], got["calls"], got["state"]), ("0.01000000", 100, "handed"))
+        self.assertEqual(len(self.m.handed), 1)                                  # one payment left the buyer
+        self.assertEqual(self.g.status(got["token"]), {"paid": False, "calls_left": 0})
+        self.m.coin(got["pay_to"], N // 100, "cd" * 32)                          # the payment, in a block
+        req = urllib.request.Request(self.url + "/v1/thing", headers={"X-Postage": got["token"]})
+        with urllib.request.urlopen(req, timeout=10) as r:
+            self.assertEqual(r.status, 200)
+        self.assertEqual(self.g.status(got["token"]), {"paid": True, "calls_left": 99})
+
+    def test_an_agent_buys_postage_through_the_mcp_server(self):
+        from polarka_agent import mcp
+        self.assertTrue({"north_faucet", "north_postage"} <= {t["name"] for t in mcp.TOOLS})
+        got = mcp.call(self.bw, "north_postage", {"url": self.url, "most": "0.1"})
+        self.assertEqual((got["paid"], got["state"], len(self.m.handed)), ("0.01000000", "handed", 1))
+        with self.assertRaises(Refused) as e:
+            mcp.call(self.bw, "north_postage", {"url": self.url, "most": "0.001"})
+        self.assertEqual(e.exception.kind, "TOO_DEAR")
+        with self.assertRaises(KeyError):                                        # no bound given: nothing is asked or paid
+            mcp.call(self.bw, "north_postage", {"url": self.url})
+        self.assertEqual(len(self.m.handed), 1)
+
+    def test_nothing_is_paid_above_what_the_buyer_allows(self):
+        with self.assertRaises(Refused) as e:
+            postage.buy(self.bw, self.url, N // 100 - 1)                         # the gate asks 0.01
+        self.assertEqual(e.exception.kind, "TOO_DEAR")
+        dear = postage.Gate(self.gw, N, 100, clock=lambda: self.now[0])          # 1 NORTH: over the buyer's own limit of 0.5
+        self.gate.RequestHandlerClass = postage.make_handler(dear, "127.0.0.1:%d" % self.behind.server_address[1], False)
+        with self.assertRaises(Refused) as e:
+            postage.buy(self.bw, self.url, 5 * N)
+        self.assertEqual(e.exception.kind, "OVER_LIMIT")
+        self.assertEqual(self.m.handed, [])
+
+    def test_where_a_gate_or_a_faucet_may_be_asked(self):
+        from polarka_agent.server import reachable
+        for good in ("https://gate.example", "https://gate.example:8443/x", "http://127.0.0.1:8670", "http://localhost:1/"):
+            self.assertTrue(reachable(good), good)
+        for bad in ("http://gate.example", "http://127.0.0.1.gate.example", "http://localhost.gate.example", "ftp://gate.example",
+                    "https://user:word@gate.example", "http://10.0.0.1", "gate.example", "", None, "https://" + "a" * 600, "http://127.0.0.1:x"):
+            self.assertFalse(reachable(bad), bad)
+        for call in (lambda: postage.buy(self.bw, "http://127.0.0.1.gate.example", N),):
+            with self.assertRaises(Refused) as e:
+                call()
+            self.assertEqual(e.exception.kind, "GATE")
+
+    def test_a_gate_that_sends_nonsense_is_paid_nothing(self):
+        class Odd(BaseHTTPRequestHandler):
+            quote = {}
+
+            def do_POST(self):
+                body = json.dumps(self.quote).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        odd = ThreadingHTTPServer(("127.0.0.1", 0), Odd)
+        threading.Thread(target=odd.serve_forever, daemon=True).start()
+        url = "http://127.0.0.1:%d" % odd.server_address[1]
+        to = self.gw.account.address(0, 0)
+        try:
+            for q in ({}, {"token": "zz", "pay_to": to, "price": "0.01", "calls": 1}, {"token": "ab" * 12, "pay_to": to, "price": 1, "calls": 1},
+                      {"token": "ab" * 12, "pay_to": to, "price": "0", "calls": 1}, {"token": "ab" * 12, "pay_to": to, "price": "-1", "calls": 1},
+                      {"token": "ab" * 12, "pay_to": to, "price": "0.01", "calls": 0}, {"token": "ab" * 12, "pay_to": "x" * 200, "price": "0.01", "calls": 1}):
+                Odd.quote = q
+                with self.assertRaises(Refused) as e:
+                    postage.buy(self.bw, url, N)
+                self.assertEqual(e.exception.kind, "GATE", q)
+            self.assertEqual(self.m.handed, [])
+        finally:
+            odd.shutdown()
+            odd.server_close()
+
+
 class PriceInHashesTest(unittest.TestCase):
     """A price given as mining work: so many hashes, in NORTH at what the network needs for a block."""
     BITS, HALF = "1e008689", "1e004344"         # the second target is half the first: twice the work for a block

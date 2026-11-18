@@ -51,8 +51,8 @@ A wallet server sees the wallet's addresses together and the machine's internet 
 balance or hold a payment back. It can stop the wallet until its owner acts (by refusing a payment and then
 hiding its coins), and it can keep one command waiting for a long time by answering slowly. It cannot take
 coins. A program is not shown the server's own words: why a node refused a payment comes as one of a few
-fixed words (`FEE_TOO_LOW`, `INPUTS_GONE`, `OTHER`, ...), an error as its HTTP status, and a receiver in the
-history only if it has the shape of an address. The words themselves appear at the command line alone,
+fixed words (`FEE_TOO_LOW`, `INPUTS_GONE`, `OTHER`, ...), an error as its HTTP status, and a line of the history is
+numbers, an id and a flag. The words themselves appear at the command line alone,
 under `server_said_untrusted`, for the owner.
 
 ## Installing
@@ -72,6 +72,7 @@ and uploads it, and prints the SHA-256 of the files it made.
     python3 -m polarka_agent --dir FOLDER pay-many FILE.json
     python3 -m polarka_agent --dir FOLDER received ADDRESS | wait ADDRESS 1.5
     python3 -m polarka_agent --dir FOLDER stamp FILE | stamp --sha256 HEX
+    python3 -m polarka_agent --dir FOLDER faucet URL | postage URL --most 0.05
     python3 -m polarka_agent --dir FOLDER forget ID
     python3 -m polarka_agent --dir FOLDER mcp
 
@@ -84,7 +85,7 @@ rate is small: a stamp shows an order of events, it is not proof for a court.
 
 For an agent: start `python3 -m polarka_agent --dir FOLDER mcp` as an MCP server over standard input and
 output. Its tools are `north_balance`, `north_address`, `north_received`, `north_wait`, `north_pay`,
-`north_stamp`, `north_payments`, `north_history` and `north_limits`.
+`north_stamp`, `north_payments`, `north_history`, `north_limits`, `north_faucet` and `north_postage`.
 
 ## A first coin: the faucet
 
@@ -100,7 +101,9 @@ Anybody can run one: `faucet-serve --amount 2` hands out 2 NORTH to an address o
 FOLDER. What it may give in a day is that wallet's `limits.json`, nothing else, so a faucet is this wallet
 under its own bounds. It keeps the addresses it paid (`faucet.jsonl`) and no internet addresses on disk; it
 asks for no name and no e-mail. It is meant to stand behind a web server that provides HTTPS
-(`--trust-proxy`). The faucet is new: nobody independent has read it, and it has never run in public.
+(`--trust-proxy`). The faucet is new: nobody independent has read it yet, and it has never run in public. What our own will run
+on is in `deploy/faucet`. The limit for one
+payment in `limits.json` has to be a little above the amount given, because a payment counts with its fee.
 
 ## Something to pay for: postage
 
@@ -125,8 +128,11 @@ market price; NORTH has none.
 Postage is counted in calls. It is not a balance, it is not given back, and the gate never pays from its
 wallet, so the gate holds nobody's coins. Whoever runs a service for payment has the duties of one who does
 (saying who they are, among others); the gate is a tool and takes none of them away. It is new: nobody
-independent has read it, and it has never run in public. There is no asker's command for it yet: a program
-pays the quoted address with `pay` and sends the token itself.
+independent has read it, and it has never run in public.
+
+The asker's side is `postage URL --most 0.05` (for an agent the tool `north_postage`): it asks the gate for a
+quote, pays it from the wallet and shows the token. The owner's limits hold as for any payment, and nothing
+above `--most` is paid whatever the gate asks.
 
 ## Code and tests
 
@@ -138,7 +144,7 @@ signature hash and signing; they come from the cold address tool
 
     TN_BIN=/path/to/bin python3 -B -m unittest discover -s tests -t .
 
-83 tests. Those in `test_wallet.py` and `test_cli_mcp.py` run against the official `truenorthd` on regtest
+93 tests. Those in `test_wallet.py`, `test_cli_mcp.py` and `test_faucet_node.py` run against the official `truenorthd` on regtest
 and a stand-in for a Northbound server (`tests/standin`, copied from the Polarka Wallet's repository); they
 are skipped without the node programs. No test touches a real network.
 

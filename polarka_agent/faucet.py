@@ -29,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import keys
 from .keys import BadInput
-from .server import ServerError
+from .server import ServerError, reachable
 from .wallet import Refused, north
 
 MAX_BODY = 4096
@@ -233,8 +233,13 @@ def make_handler(faucet, trust_proxy):
 
 
 def serve(wallet, amount, listen, trust_proxy=False, base_bits=BASE_BITS):
-    if wallet.limits() is None:
+    limits = wallet.limits()
+    if limits is None:
         raise Refused("NO_LIMITS", "the faucet's wallet has no limits.json; its owner writes what it may give in a day")
+    if amount <= 0 or amount >= limits["per_payment"]:
+        # a payment counts with its fee, so a limit equal to the amount would let nothing through
+        raise Refused("LIMITS", "the amount given (%s NORTH) and its fee have to fit under per_payment_north in limits.json (%s)"
+                      % (north(amount), north(limits["per_payment"])))
     faucet = Faucet(wallet, amount, base_bits)
     host, port = listen.rsplit(":", 1)
     srv = ThreadingHTTPServer((host, int(port)), make_handler(faucet, trust_proxy))
@@ -243,15 +248,20 @@ def serve(wallet, amount, listen, trust_proxy=False, base_bits=BASE_BITS):
     srv.serve_forever()
 
 
-def ask(url, address, timeout=30):
-    """The asker's side: challenge, work, claim. Returns what the faucet answered, as a dict."""
+def ask(url, address, timeout=30, most_bits=MAX_BITS):
+    """The asker's side: challenge, work, claim. Returns what the faucet answered, as a dict. No more work
+    is done than most_bits, and no redirect is followed: the address asked is the one that answers."""
     import urllib.error
     import urllib.request
+
+    class Stay(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):
+            return None
 
     def post(path, obj):
         req = urllib.request.Request(url.rstrip("/") + path, json.dumps(obj).encode(), {"Content-Type": "application/json"})
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with urllib.request.build_opener(Stay).open(req, timeout=timeout) as r:
                 text = r.read(65536)
         except urllib.error.HTTPError as e:
             text = e.read(65536)
@@ -267,11 +277,11 @@ def ask(url, address, timeout=30):
             raise Refused("FAUCET", "the faucet said no (%s)" % re.sub(r"[^A-Z_]", "", str(answer["error"]))[:20])
         return answer
 
-    if not (url.startswith("https://") or url.startswith("http://127.0.0.1") or url.startswith("http://localhost")):
+    if not reachable(url):
         raise Refused("FAUCET", "a faucet is reached over https")
     c = post("/v1/challenge", {"address": address})
     bits, challenge = c.get("bits"), c.get("challenge")
-    if type(bits) is not int or not 0 <= bits <= MAX_BITS or not isinstance(challenge, str) or len(challenge) > 200:
+    if type(bits) is not int or not 0 <= bits <= min(most_bits, MAX_BITS) or not isinstance(challenge, str) or len(challenge) > 200:
         raise Refused("FAUCET", "the faucet asks for work this program does not do")
     answer = solve(challenge, bits)
     if answer is None:

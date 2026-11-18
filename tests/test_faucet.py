@@ -108,6 +108,36 @@ class FaucetTest(unittest.TestCase):
         self.refused("TOO_OFTEN", self.f.challenge, "one", address(0))
         self.assertIn("challenge", self.f.challenge("another", address(0)))
 
+    def test_an_amount_that_the_limits_would_never_let_through_does_not_start(self):
+        with open(os.path.join(self.folder, "limits.json"), "w") as f:
+            json.dump({"per_payment_north": "2", "per_day_north": "500"}, f)       # 2 and its fee is over 2
+        self.refused("LIMITS", faucet.serve, self.w, 2 * N, "127.0.0.1:0")
+        self.refused("LIMITS", faucet.serve, self.w, 0, "127.0.0.1:0")
+        os.remove(os.path.join(self.folder, "limits.json"))
+        self.refused("NO_LIMITS", faucet.serve, self.w, 2 * N, "127.0.0.1:0")
+
+    def test_an_agent_asks_through_the_mcp_server_and_does_no_work_without_bound(self):
+        from polarka_agent import mcp
+        asker_folder = os.path.join(os.path.dirname(self.folder), "asker")
+        Wallet.create(asker_folder, "regtest", self.m.fake.url, None)
+        asker = Wallet(asker_folder)
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), faucet.make_handler(self.f, False))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        url = "http://127.0.0.1:%d" % srv.server_address[1]
+        try:
+            got = mcp.call(asker, "north_faucet", {"url": url})
+            self.assertEqual(got["transaction_id"], self.m.handed[-1])
+            self.assertEqual(asker.account.address(0, 0), got["asked"])          # to a fresh address of the asking wallet
+            # a faucet that asks for a quarter of an hour of work gets none from an agent's tool
+            srv.RequestHandlerClass = faucet.make_handler(faucet.Faucet(self.w, 2 * N, base_bits=28, clock=lambda: self.now[0]), False)
+            self.refused("FAUCET", mcp.call, asker, "north_faucet", {"url": url})
+            self.refused("FAUCET", mcp.call, asker, "north_faucet", {"url": "http://127.0.0.1.faucet.example"})
+            self.assertEqual(len(self.m.handed), 1)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            asker.server.close()
+
     def test_over_http_from_asking_to_a_coin(self):
         srv = ThreadingHTTPServer(("127.0.0.1", 0), faucet.make_handler(self.f, False))
         threading.Thread(target=srv.serve_forever, daemon=True).start()

@@ -54,6 +54,16 @@ TOOLS = [
     {"name": "north_payments", "description": "Every payment this wallet made and what became of it.", "inputSchema": _text({})},
     {"name": "north_history", "description": "The wallet's movements as its server sums them up, newest first.", "inputSchema": _text({})},
     {"name": "north_limits", "description": "What the owner lets this wallet pay by itself.", "inputSchema": _text({})},
+    {"name": "north_faucet", "description": "Asks a faucet for a first coin, to a fresh address of this wallet. The wallet does a "
+     "small piece of work for it first (hashing, up to about half a minute). Give the address of a faucet that the owner "
+     "or a page you trust named. The coin is in the wallet with the next block.",
+     "inputSchema": _text({"url": {"type": "string", "maxLength": 500}}, ["url"])},
+    {"name": "north_postage", "description": "Buys postage at a gate that stands before a web service: asks the gate for a "
+     "quote and pays it from this wallet, within the owner's limits and never more than `most`. Answers with a token. Once "
+     "the payment is in a block (about two minutes), send the token in the header X-Postage with each call to the "
+     "service. Postage is counted in calls and is not given back.",
+     "inputSchema": _text({"url": {"type": "string", "maxLength": 500},
+                           "most": {"type": "string", "description": "the most NORTH to pay for one lot of calls, as text"}}, ["url", "most"])},
 ]
 
 
@@ -84,6 +94,12 @@ def call(wallet, name, a):
         return _amounts(wallet.history())
     if name == "north_limits":
         return wallet.limits_shown()
+    if name == "north_faucet":
+        from .faucet import ask
+        return ask(a["url"], wallet.fresh_address(), most_bits=24)
+    if name == "north_postage":
+        from .postage import buy
+        return buy(wallet, a["url"], units(a["most"]))
     raise Refused("NO_TOOL", "there is no such tool")
 
 
