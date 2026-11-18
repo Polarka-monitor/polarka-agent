@@ -4,7 +4,7 @@ A wallet for TrueNorth (NORTH) that a program can use: a command line, a Python 
 agents that speak the Model Context Protocol (MCP). The keys stay on the machine it runs on. What its
 addresses hold it asks a wallet server with the Northbound API (github.com/nova9/northbound).
 
-**State: 0.1.1, an early version.** It was written with an AI model under its author's direction. An
+**State: 0.1.2, an early version.** It was written with an AI model under its author's direction. An
 independent AI reviewer read it and found faults, the serious ones of which are mended (`REVIEW.md`); no
 human security expert has read it. On 17 November 2026 it made its first payments on the real network: two
 small payments went into blocks, and its owner's limits refused what they should (`NO_LIMITS`, `OVER_LIMIT`,
