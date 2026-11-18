@@ -13,13 +13,14 @@ coins in it on the internet.
 The last command shows the recovery words once. Write them down away from the server. Then the owner's
 limits, by hand, in `/var/lib/polarka-faucet/wallet/limits.json` (mode 600, owner `faucet`):
 
-    {"per_payment_north": "2.1", "per_day_north": "500"}
+    {"per_payment_north": "0.26", "per_day_north": "100"}
 
 A payment counts with its fee, so the limit for one payment has to be a little above the amount given; with
 a limit equal to the amount the faucet does not start. What the faucet may give in a day is `per_day_north`
 and nothing else.
 
-Set `per_day_north` to a sum you can give away every single day: somebody with many internet addresses can
+Our own faucet gives 0.25 NORTH to an address (enough for a few thousand calls of postage and for trying
+payments) and at most 100 NORTH a day, so that the same sum reaches more programs. Set `per_day_north` to a sum you can give away every single day: somebody with many internet addresses can
 take all of it, and the faucet's own counting (two payments a day to one place, a twelfth of the day in an
 hour) only makes that slower. Start low and raise it when the faucet has run a while.
 
