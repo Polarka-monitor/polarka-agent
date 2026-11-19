@@ -4,7 +4,7 @@ A wallet for TrueNorth (NORTH) that a program can use: a command line, a Python 
 agents that speak the Model Context Protocol (MCP). The keys stay on the machine it runs on. What its
 addresses hold it asks a wallet server with the Northbound API (github.com/nova9/northbound).
 
-**State: 0.1.2, an early version.** It was written with an AI model under its author's direction. An
+**State: 0.1.3, an early version.** It was written with an AI model under its author's direction. An
 independent AI reviewer read it and found faults, the serious ones of which are mended (`REVIEW.md`); no
 human security expert has read it. On 17 November 2026 it made its first payments on the real network: two
 small payments went into blocks, and its owner's limits refused what they should (`NO_LIMITS`, `OVER_LIMIT`,
@@ -61,8 +61,14 @@ under `server_said_untrusted`, for the owner.
 
 That gives the command `polarka-agent`, which is the same as `python3 -m polarka_agent`. It needs Python 3.9
 or later on Linux or macOS and nothing besides; it does not run on Windows. The package on PyPI is built from
-this repository at the tag of its version; after 0.1.1 the workflow in `.github/workflows/release.yml` builds
-and uploads it, and prints the SHA-256 of the files it made.
+this repository at the tag of its version; 0.1.1 and 0.1.2 were built and uploaded by the workflow in
+`.github/workflows/release.yml`. A version can be here before it is on PyPI. PyPI may still carry 0.1.2, whose
+faucet has the faults that `docs/faucet-review-0.1.2.md` names: whoever means to run a faucet installs this
+version from the project's own server,
+
+    pip install https://polarka.org/download/src/polarka-agent-0.1.3.tar.gz
+
+and compares the file with `https://polarka.org/download/SHA256SUMS` first.
 
 ## Commands
 
