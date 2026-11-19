@@ -141,6 +141,12 @@ class PayingOnRegtest(unittest.TestCase):
         got = self.miner_wallet.received(self.worker)
         self.assertEqual((pool.north(got["amount"]), got["confirmations"]), (owed, 1))
         self.assertEqual(len(self.wallet.payments()), 1)
+        # by the pool's own node the payment is one block deep
+        depth = pool.depth_by(self.rpc)
+        self.assertEqual(depth(self.wallet.payments()[0]["id"]), 1)
+        self.assertEqual(depth("00" * 32), 0)
+        self.node.mine(2, SINK)
+        self.assertEqual(depth(self.wallet.payments()[0]["id"]), 3)
         # a pool started again over the same folder knows what it paid
         again = pool.Pool(self.rpc, "regtest", self.pay_to, self.folder, payouts=payout.Payouts(self.wallet, self.folder, minimum=pool.UNITS))
         self.assertEqual(again.account(self.worker), account)

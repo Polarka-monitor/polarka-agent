@@ -38,6 +38,8 @@ class FakeNode:
                     "transactions": self.transactions, "default_witness_commitment": "6a24aa21a9ed" + "00" * 32}
         if method == "getblockhash":
             return "%064x" % params[0]
+        if method == "getbestblockhash":
+            return self.previous
         if method == "submitblock":
             self.sent.append(params[0])
             if self.refuse:
@@ -182,6 +184,15 @@ class PoolRules(unittest.TestCase):
         self.pool.accounts[ALICE]["blocks"] = 1
         self.pool.work(ALICE)
 
+    def test_a_share_for_a_tip_that_moved_is_stale_at_once(self):
+        work = self.pool.work(ALICE)
+        good = search(work, want_block=False)
+        self.node.height, self.node.previous = 3001, "22" * 32      # somebody else found a block
+        self.now[0] += pool.TIP_AGE                                  # well within the life of a template
+        self.refused("STALE", self.pool.share, work["job"], good)
+        self.assertEqual(self.pool.account(ALICE)["shares"], 0)
+        self.assertEqual(self.pool.work(ALICE)["height"], 3001)
+
     def test_the_ledger_is_what_the_pool_owes(self):
         work = self.pool.work(ALICE)
         first = search(work, want_block=False)
@@ -261,7 +272,10 @@ class FakeChain:
             ago, whose = self.blocks[i]
             coinbase = "03b80b00" + (pool.TAG.hex() if whose == "pool" else "aa")
             script = "5220" + ("77" * 32 if whose == "own" else "88" * 32)
-            block = {"time": self.now - ago, "tx": [{"vin": [{"coinbase": coinbase}], "vout": [{"scriptPubKey": {"hex": script}}]}]}
+            outs = [{"scriptPubKey": {"hex": script}}]
+            if whose == "framed":           # a stranger's block with an output of nothing to the owner's address
+                outs.append({"scriptPubKey": {"hex": "5220" + "77" * 32}})
+            block = {"time": self.now - ago, "tx": [{"vin": [{"coinbase": coinbase}], "vout": outs}]}
             if i:
                 block["previousblockhash"] = "h%d" % (i - 1)
             return block
@@ -302,7 +316,12 @@ class CapRules(unittest.TestCase):
             self.now[0] += 60
             self.chain.now = self.now[0]
             self.assertEqual(cap.is_closed(), closed)
-        self.assertEqual(self.chain.calls, seen + 4)                  # only the new blocks were read
+        self.assertEqual(self.chain.calls, seen + 6)       # the old ones are remembered, young ones asked about again;                  # only the new blocks were read
+
+    def test_a_stranger_cannot_close_the_pool(self):
+        cap = self.cap([(2000 - i * 100, "framed") for i in range(12)])
+        self.assertEqual(cap.measure()[3600], (0, 12))
+        self.assertFalse(cap.is_closed())
 
     def test_few_blocks_say_nothing_and_no_node_changes_nothing(self):
         cap = self.cap([(100, "pool")] * 9)
@@ -347,6 +366,13 @@ class GuardRules(unittest.TestCase):
         self.assertEqual(pool.place("2001:db8:1:2::5"), pool.place("2001:db8:1:ffff::9"))      # one customer's /48
         self.assertNotEqual(pool.place("2001:db8:1::5"), pool.place("2001:db8:2::5"))
         self.assertEqual(pool.place("nonsense"), "?")
+        self.assertEqual(pool.place("203.0.113.9:4711"), "203.0.113.9")
+        self.assertEqual(pool.place("[2001:db8:1::5]:4711"), pool.place("2001:db8:1::5"))
+        self.assertIsNone(pool.place("127.0.0.1"))                  # a proxy that was not named is nobody's place
+        self.assertIsNone(pool.place("::1"))
+        for _ in range(10):
+            self.guard.wrong("127.0.0.1")
+        self.guard.check("127.0.0.1")                                # and nobody is shut out for what came through it
 
     def test_asking_too_often_or_for_too_many(self):
         carol = encode_address("rnorth", 2, bytes([11]) * 32)

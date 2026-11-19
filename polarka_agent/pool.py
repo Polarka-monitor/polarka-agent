@@ -35,6 +35,8 @@ UNITS = 100_000_000
 TAG = b"/Polarka/"          # written into the coinbase, so that anybody can count the pool's blocks
 RATIO = 2048
 TEMPLATE_AGE = 5            # seconds a template is used before the node is asked again
+TIP_AGE = 1                 # seconds the node's word about its tip is believed when a share comes in
+MOST_CALLS = 200            # askers served at once; the rest are turned away at the door
 JOB_AGE = 120               # seconds an asker gets the same header before it is given a fresh one
 MOST_JOBS = 50_000          # headers remembered for one tip; beyond that no new ones until the next block
 MOST = (1 << 256) - 1
@@ -166,6 +168,29 @@ class Node:
         return answer.get("result")
 
 
+def depth_by(node, most=300):
+    """A function that says how many blocks deep a transaction is by this node's own chain (0: not in the last
+    `most` blocks). The node needs no index for it: the blocks are read from the tip back, each one once."""
+    seen = {}
+
+    def depth(txid):
+        tip = node.call("getbestblockhash")
+        at, steps = tip, 0
+        while at and steps < most:
+            block = seen.get(at)
+            if block is None:
+                got = node.call("getblock", at, 1)
+                block = seen[at] = (set(got["tx"]), got.get("previousblockhash"))
+                if len(seen) > 2 * most:
+                    seen.pop(next(iter(seen)))
+            if txid in block[0]:
+                return steps + 1
+            at, steps = block[1], steps + 1
+        return 0
+
+    return depth
+
+
 class RxHasher:
     """Checks a header with the real proof of work, the slow way (no 2 GiB table), one at a time."""
 
@@ -186,10 +211,17 @@ class RxHasher:
 
 def place(source):
     """One place on the internet: an IPv4 address, or the /48 of an IPv6 address (one customer of a provider)."""
+    source = str(source).strip()
+    if source.startswith("[") and "]" in source:
+        source = source[1:source.index("]")]            # [2001:db8::1]:4711
+    elif source.count(":") == 1:
+        source = source.split(":")[0]                   # 203.0.113.9:4711
     try:
         ip = ipaddress.ip_address(source)
     except ValueError:
         return "?"
+    if ip.is_loopback:
+        return None         # the pool's own machine, or a proxy that was not named with --trust-proxy: nobody's place
     if ip.version == 6 and ip.ipv4_mapped is not None:
         ip = ip.ipv4_mapped
     if ip.version == 6:
@@ -222,8 +254,11 @@ class Cap:
             if info is None:
                 block = self.node.call("getblock", at, 2)
                 first = block["tx"][0]
-                ours = (self.is_ours is not None and self.is_ours(at)) or any(o["scriptPubKey"].get("hex") in self.own for o in first["vout"])
-                info = self.blocks[at] = (block["time"], ours, block.get("previousblockhash"))
+                # the owner's blocks are known by what the coinbase pays first; anybody can add an output of nothing
+                ours = (self.is_ours is not None and self.is_ours(at)) or first["vout"][0]["scriptPubKey"].get("hex") in self.own
+                info = (block["time"], ours, block.get("previousblockhash"))
+                if ours or now - block["time"] > 300:
+                    self.blocks[at] = info      # "not ours" is kept only for a block old enough for the ledger to know it
             if info[0] < horizon:
                 break
             chain.append(info)
@@ -275,9 +310,9 @@ class Guard:
 
     def check(self, source):
         """Refuses a place that is not listened to at the moment."""
-        if source is None:
+        key, now = None if source is None else place(source), self.clock()
+        if key is None:
             return
-        key, now = place(source), self.clock()
         with self.lock:
             until = self.banned.get(key)
             if until is not None and now < until:
@@ -285,13 +320,15 @@ class Guard:
             self.banned.pop(key, None)
 
     def asked(self, source, address, tip):
-        if source is None:
+        key, now = None if source is None else place(source), self.clock()
+        if key is None:
             return
         self.check(source)
-        key, now = place(source), self.clock()
         with self.lock:
             if tip != self.tip:
                 self.tip, self.addresses = tip, {}
+                self.banned = {k: until for k, until in self.banned.items() if until > now}
+                self.bad = {k: v for k, v in self.bad.items() if v and now - v[-1] < self.ban}
                 if len(self.asks) > self.most_places // 2:
                     self.asks = {k: v for k, v in self.asks.items() if v and now - v[-1] < 60}
             times = self._recent(self.asks, key, 60, now)
@@ -304,9 +341,9 @@ class Guard:
             seen.add(address)
 
     def wrong(self, source):
-        if source is None:
+        key, now = None if source is None else place(source), self.clock()
+        if key is None:
             return
-        key, now = place(source), self.clock()
         with self.lock:
             times = self._recent(self.bad, key, self.ban, now)
             times.append(now)
@@ -323,6 +360,8 @@ class Pool:
         self.node, self.chain, self.pay_to = node, chain, pay_to
         self.pay_script = script_for_address(chain, pay_to)
         self.ratio, self.fee, self.clock = ratio, fee_percent, clock
+        self.ticks = time.monotonic if clock is time.time else clock       # ages, on a clock nobody can set back
+        self.tip_seen = None
         self.hasher = hasher or RxHasher()
         self.cap, self.guard, self.payouts = cap, guard, payouts
         self.folder, self.most_owed = folder, most_owed
@@ -389,7 +428,7 @@ class Pool:
 
     def _fresh_template(self):
         """Called with the lock held. A node that does not answer stops the pool from handing out work."""
-        now = self.clock()
+        now = self.ticks()
         if self.template is not None and now - self.template_at < TEMPLATE_AGE:
             return self.template
         try:
@@ -438,7 +477,7 @@ class Pool:
             if self.guard is not None:
                 self.guard.asked(source, address, template["previousblockhash"])
             self._may_work(address)
-            now = self.clock()
+            now = self.ticks()
             job_id = self.job_of.get(address)
             job = self.jobs.get(job_id)
             if job is None or now - job["made"] >= JOB_AGE:
@@ -446,12 +485,13 @@ class Pool:
                     raise PoolError("BUSY", "too many askers for this block; ask again after the next one", 503)
                 self.counter += 1
                 extranonce = (self.boot << 32) | (self.counter & 0xFFFFFFFF)
-                header, rest, network = assemble(template, self.pay_script, extranonce)
+                header, _, network = assemble(template, self.pay_script, extranonce)
                 share = min(network * self.ratio, MOST)
                 fees = sum(int(t.get("fee", 0)) for t in template.get("transactions", []))
                 value = (template["coinbasevalue"] - fees) * network // share * (100 - self.fee) // 100
                 job_id = os.urandom(8).hex()
-                job = {"address": address, "header": header, "rest": rest, "network": network, "share": share, "odds": share // network,
+                job = {"address": address, "header": header, "template": template, "extranonce": extranonce, "network": network,
+                       "share": share, "odds": share // network,
                        "value": value, "height": template["height"], "key": self.key, "made": now,
                        "template_at": self.template_at}
                 self.jobs[job_id] = job
@@ -477,12 +517,18 @@ class Pool:
         job_id, mark = token.split(".")
         with self.lock:
             try:
+                now = self.ticks()
+                if self.template is not None and (self.tip_seen is None or now - self.tip_seen >= TIP_AGE):
+                    # a share for a block that is no longer the tip is worth nothing: ask the node, not the clock
+                    if self.node.call("getbestblockhash") != self.template["previousblockhash"]:
+                        self.template_at = now - TEMPLATE_AGE
+                    self.tip_seen = now
                 self._fresh_template()
-            except PoolError:
+            except (PoolError, OSError):
                 # a share for the tip the pool last knew still counts, but not for long: a pool that cannot see
                 # the chain cannot know what its shares are worth
-                if self.template_good_at is None or self.clock() - self.template_good_at > NODE_SILENCE:
-                    raise
+                if self.template_good_at is None or self.ticks() - self.template_good_at > NODE_SILENCE:
+                    raise PoolError("PAUSED", "the pool's node does not answer, so no shares are taken", 503)
             job = self.jobs.get(job_id)
             if job is None:
                 raise PoolError("STALE", "that job is not for the block being looked for now; ask for work again", 409)
@@ -500,7 +546,8 @@ class Pool:
         if proof <= job["network"]:
             entry["block"] = dsha(header)[::-1].hex()
             try:
-                refused = self.node.call("submitblock", (header + job["rest"]).hex())
+                rest = assemble(job["template"], self.pay_script, job["extranonce"])[1]
+                refused = self.node.call("submitblock", (header + rest).hex())
                 entry["accepted"] = refused is None
                 if refused is not None:
                     entry["refused"] = str(refused)[:60]
@@ -573,7 +620,7 @@ def handler_for(pool, trust_proxy=False):
     class Handler(BaseHTTPRequestHandler):
         server_version = "polarka-pool"
         protocol_version = "HTTP/1.1"
-        timeout = 30
+        timeout = 10
 
         def log_message(self, *a):
             pass
@@ -639,9 +686,35 @@ def handler_for(pool, trust_proxy=False):
     return Handler
 
 
+class Server(ThreadingHTTPServer):
+    """Serves MOST_CALLS askers at once and turns the rest away, so that silent connections cannot use up
+    the threads and the open files. In front of the internet it still belongs behind a web server."""
+    request_queue_size = 64
+
+    def __init__(self, *a, **k):
+        ThreadingHTTPServer.__init__(self, *a, **k)
+        self.slots = threading.BoundedSemaphore(MOST_CALLS)
+
+    def process_request(self, request, client_address):
+        if not self.slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            ThreadingHTTPServer.process_request(self, request, client_address)
+        except Exception:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            ThreadingHTTPServer.process_request_thread(self, request, client_address)
+        finally:
+            self.slots.release()
+
+
 def make_server(pool, listen, trust_proxy=False):
     host, _, port = listen.rpartition(":")
-    server = ThreadingHTTPServer((host or "127.0.0.1", int(port)), handler_for(pool, trust_proxy))
+    server = Server((host or "127.0.0.1", int(port)), handler_for(pool, trust_proxy))
     server.daemon_threads = True
     return server
 

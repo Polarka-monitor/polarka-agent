@@ -69,6 +69,19 @@ class Rules(unittest.TestCase):
         again = self.make()                                           # the ledger says the same after a new start
         self.assertEqual(again.sums(), self.pay.sums())
 
+    def test_paid_is_what_the_pools_own_node_sees_deep_enough(self):
+        deep = {}
+        pay = payout.Payouts(self.wallet, self.folder, minimum=N, depth=lambda txid: deep.get(txid, 0), deep=6)
+        pay.run({A: 30 * N})
+        self.wallet.made[0]["state"] = "in_block"                    # the wallet server's word
+        self.assertEqual(pay.run({A: 30 * N})["state"], "on the way")       # the node does not see it
+        deep["tx1"] = 5
+        self.assertEqual(pay.run({A: 30 * N})["state"], "on the way")
+        self.assertEqual(pay.sums(), {A: (0, 30 * N)})
+        deep["tx1"] = 6
+        self.assertEqual(pay.run({A: 30 * N})["state"], "nothing is due")
+        self.assertEqual(pay.sums(), {A: (30 * N, 0)})
+
     def test_nothing_due_and_what_is_refused(self):
         self.assertEqual(self.pay.run({A: N - 1})["state"], "nothing is due")
         self.wallet.refuse = "OVER_DAY"

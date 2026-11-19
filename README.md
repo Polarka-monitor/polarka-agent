@@ -196,9 +196,11 @@ more than its wallet holds, and none to an address whose shares should long have
 An independent reviewer (an AI agent that had not seen the code being written) read the pool at commit
 b4eac9b and found that a lost ledger, a second process or a lost wallet journal paid people twice, that
 nothing bounded what the pool owed, and that the miner searched the same nonces again. Those are mended
-here; nobody else has read the fixes. Still open from that review: stale shares credited for up to five
-seconds after a new block, a payout counted as paid after one block on a server's word, an HTTP server
-without bounds of its own (run it behind a proxy with `--trust-proxy`), and a cap that a stranger can close.
+here, and so are these from the same review: a share for a block that is no longer the tip is refused within
+a second, a payout counts as paid when the pool's own node sees it six blocks deep, the server turns askers
+away above 200 at once (it still belongs behind a web server, with `--trust-proxy`), and a stranger can no
+longer close the cap. Nobody else has read the fixes. Still open: a payment that sticks stops all payouts
+until a person looks, and the share ledger grows without end.
 
 Not built: a share target that follows the miner's speed and taking back credit for a block that left the chain. Until somebody
 else has read it, it must not run on the real network.
@@ -214,7 +216,7 @@ library in `native/`, `pool.py` the pool, `payout.py` its payouts and `miner.py`
 
     TN_BIN=/path/to/bin python3 -B -m unittest discover -s tests -t .
 
-152 tests. Those in `test_wallet.py`, `test_cli_mcp.py`, `test_faucet_node.py` and `test_pool_node.py` run against the official
+155 tests. Those in `test_wallet.py`, `test_cli_mcp.py`, `test_faucet_node.py` and `test_pool_node.py` run against the official
 `truenorthd` on regtest
 and a stand-in for a Northbound server (`tests/standin`, copied from the Polarka Wallet's repository); they
 are skipped without the node programs. No test touches a real network.

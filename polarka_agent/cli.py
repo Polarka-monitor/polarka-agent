@@ -129,6 +129,7 @@ def run(argv=None, out=sys.stdout):
     c.add_argument("--ratio", type=int, default=2048, help="shares in a block on average")
     c.add_argument("--fee", type=int, default=5, help="the pool's fee in percent")
     c.add_argument("--most-owed", default="5000", help="NORTH the pool may owe at once; above it no work is handed out")
+    c.add_argument("--deep", type=int, default=6, help="blocks on top of a payout, by the pool's own node, before it counts as paid")
     a = p.parse_args(argv)
     folder = os.path.expanduser(a.dir)
 
@@ -164,7 +165,7 @@ def run(argv=None, out=sys.stdout):
         if a.cmd == "pool-serve":
             from .keys import script_for_address
             from .payout import Payouts
-            from .pool import Cap, Guard, Node, Pool, serve as pool_serve
+            from .pool import Cap, Guard, Node, Pool, depth_by, serve as pool_serve
             if a.chain != "regtest":
                 raise Refused("STAGE", "the pool has run on regtest only and nobody else has read it; it does not start on another chain")
             if not 1 <= a.ratio <= 1 << 20 or not 0 <= a.fee <= 50 or not 0 <= a.cap <= 50 or a.pay_every < 0:
@@ -179,7 +180,7 @@ def run(argv=None, out=sys.stdout):
                 with open(os.path.expanduser(a.own_mining)) as f:
                     own = [script_for_address(a.chain, line.strip()) for line in f if line.strip()]
             cap = Cap(node, own, ((86400, a.cap, max(a.cap - 2, 0)), (3600, a.cap + 8, a.cap + 6))) if a.cap else None
-            payouts = Payouts(wallet, folder, units(a.minimum)) if a.pay_every else None
+            payouts = Payouts(wallet, folder, units(a.minimum), depth=depth_by(node), deep=a.deep) if a.pay_every else None
             return pool_serve(Pool(node, a.chain, pay_to, folder, a.ratio, a.fee, cap=cap, guard=Guard(), payouts=payouts,
                                    most_owed=units(a.most_owed)),
                               a.listen, a.trust_proxy, a.pay_every)

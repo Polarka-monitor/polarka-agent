@@ -80,10 +80,11 @@ def sync_folder(folder):
 
 
 class Payouts:
-    def __init__(self, wallet, folder, minimum=UNITS, most_payees=MOST_PAYEES, clock=time.time):
+    def __init__(self, wallet, folder, minimum=UNITS, most_payees=MOST_PAYEES, clock=time.time, depth=None, deep=6):
         hold_folder(folder)
         self.wallet, self.minimum, self.most_payees, self.clock = wallet, max(int(minimum), 1000), most_payees, clock
         self.folder, self.path = folder, os.path.join(folder, "pool-payouts.jsonl")
+        self.depth, self.deep = depth, deep     # depth(txid): blocks on top of it by the pool's own node
         self.lock = threading.RLock()
         self.rounds = {}            # number -> {"pay": {address: units}, "txids": [...], "state": "open" | "paid" | "void", "mark"}
         if not os.path.exists(self.path):
@@ -174,8 +175,12 @@ class Payouts:
             self._write({"event": "void", "round": number, "why": "never signed"})
             return None
         if any(p["state"] == "in_block" for p in mine):
-            self._write({"event": "paid", "round": number})
-            return None
+            # The wallet has a server's word for it. With a node of the pool's own, the round is paid when that
+            # node sees the payment `deep` blocks down; until then it is on the way, also if a block was undone.
+            if self.depth is None or max(self.depth(p["id"]) for p in mine if p["state"] == "in_block") >= self.deep:
+                self._write({"event": "paid", "round": number})
+                return None
+            return number
         if any(p["state"] == "handed" for p in mine):
             return number                                   # it waits for a block: left alone
         if any(p["state"] in OPEN for p in mine):
