@@ -155,12 +155,12 @@ above `--most` is paid whatever the gate asks.
 
 ## Mining for a pool (in work, regtest only)
 
-This branch holds the first stage of a pool that pays for each share, and a miner for it. It is not released
-and has run on regtest only; `pool-serve` refuses any other chain.
+This branch holds a pool that pays for each share, and a miner for it. It is not released, nobody else has
+read it, and it has run on regtest only; `pool-serve` refuses any other chain.
 
     python3 -m polarka_agent build-rx --randomx /path/to/truenorth/src/randomx
-    python3 -m polarka_agent --dir POOL-FOLDER pool-serve --chain regtest --rpc-url http://127.0.0.1:PORT \
-        --rpc-cookie /path/to/.cookie --pay-to ADDRESS
+    python3 -m polarka_agent --dir POOL-WALLET pool-serve --chain regtest --rpc-url http://127.0.0.1:PORT \
+        --rpc-cookie /path/to/.cookie --pay-every 3600
     python3 -m polarka_agent mine http://127.0.0.1:8690 --address ADDRESS --threads 4
 
 `build-rx` builds a small C library around RandomX as it stands in the TrueNorth sources (`native/`); it needs
@@ -175,9 +175,21 @@ node. When the node does not answer, the pool hands out no work.
 The calls: `GET /v1/pool`, `GET /v1/work?address=`, `GET /v1/tip`, `POST /v1/share {"job", "nonce"}`,
 `GET /v1/account?address=`, `GET /v1/blocks`.
 
-Not built yet: paying out what is owed, the bound on the pool's part of the network (it is to stop handing
-out work above a third), limits on one asker, and a second pair of eyes on any of it. Until those exist it
-must not run on the real network.
+What is owed is paid out in rounds from the wallet in `--dir`, within that wallet's `limits.json`: one
+transaction to everybody who is owed the minimum or more, written into `pool-payouts.jsonl` before the wallet
+is asked. One round is on the way at a time, and a round that fell in the middle is found again in the
+wallet's own journal, so nobody is paid twice and nobody is forgotten. Block rewards can be spent after 100
+blocks, so a pool needs coins of its own to pay from before its first rewards are ripe, and whenever it has
+found fewer blocks than its shares were worth.
+
+The pool hands out no work while its blocks, counted together with those of the addresses in `--own-mining`,
+are 32 % or more of the blocks of the last hour or the last day, and starts again below 30 %. One place may
+ask for work 120 times a minute and for 50 addresses in a block, and is not listened to for ten minutes
+after 20 wrong shares.
+
+Not built: a share target that follows the miner's speed, anything against a miner who keeps back blocks,
+taking back credit for a block that left the chain, and a second pair of eyes on any of it. Until somebody
+else has read it, it must not run on the real network.
 
 ## Code and tests
 
@@ -186,11 +198,11 @@ signature hash and signing; they come from the cold address tool
 (github.com/severka-monitor/truenorth-cold-address) and are checked against its published P2QRH test vectors.
 `server.py` is the client for a wallet server, `wallet.py` the wallet, `cli.py` and `mcp.py` the two faces,
 `faucet.py` the faucet and its asker, `postage.py` the postage gate, `rx.py` the proof of work through the
-library in `native/`, `pool.py` the pool and `miner.py` its miner.
+library in `native/`, `pool.py` the pool, `payout.py` its payouts and `miner.py` its miner.
 
     TN_BIN=/path/to/bin python3 -B -m unittest discover -s tests -t .
 
-130 tests. Those in `test_wallet.py`, `test_cli_mcp.py`, `test_faucet_node.py` and `test_pool_node.py` run against the official
+149 tests. Those in `test_wallet.py`, `test_cli_mcp.py`, `test_faucet_node.py` and `test_pool_node.py` run against the official
 `truenorthd` on regtest
 and a stand-in for a Northbound server (`tests/standin`, copied from the Polarka Wallet's repository); they
 are skipped without the node programs. No test touches a real network.

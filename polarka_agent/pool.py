@@ -1,19 +1,23 @@
-"""A mining pool for TrueNorth that pays for each share. Stage 1: the work, the shares and their ledger.
+"""A mining pool for TrueNorth that pays for each share.
 
-What is here: the pool takes a block template from a node of its own, gives every asker a header of its own
-(a number in the coinbase that nobody else gets), checks the proof of work of what comes back, writes down
-what it owes for it and hands a share that is also a block to the node.
+The pool takes a block template from a node of its own, gives every asker a header of its own (a number in
+the coinbase that nobody else gets), checks the proof of work of what comes back, writes down what it owes
+for it and hands a share that is also a block to the node. What it owes is paid out in rounds (payout.py).
+Cap keeps the pool under a part of the network, Guard bounds what one place may ask and send.
 
-What is not here yet: payouts, the bound on the pool's part of the network, and anything against an asker who
-means harm beyond what is said below. It has run on regtest only, and `pool-serve` refuses any other chain.
+It has run on regtest only and nobody else has read it; `pool-serve` refuses any other chain. Not here: a
+share target that follows the miner's speed, anything against a miner who keeps back the blocks he finds,
+and taking back what was credited for a block that later left the chain.
 
 A share is a header whose hash is at or below the share target, which is `ratio` times the network's target
 (2048: a block is worth 2048 shares on average). The pool owes the reward of a block without the fees,
 divided by that ratio, less its fee, for every share, whether or not the pool finds blocks.
 """
 import base64
+import collections
 import hashlib
 import hmac
+import ipaddress
 import json
 import os
 import threading
@@ -168,14 +172,143 @@ class RxHasher:
             return self.engine.rx.hash(self.vm, header80)
 
 
+def place(source):
+    """One place on the internet: an IPv4 address, or the /48 of an IPv6 address (one customer of a provider)."""
+    try:
+        ip = ipaddress.ip_address(source)
+    except ValueError:
+        return "?"
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    if ip.version == 6:
+        return str(ipaddress.ip_network((int(ip) >> 80 << 80, 48)))
+    return str(ip)
+
+
+class Cap:
+    """Keeps the pool, counted together with the mining of whoever runs it, under a part of the network: when
+    that part of the blocks of the last hour or of the last day reaches `stop` percent, no work is handed out
+    until it is below `resume` in both. The pool's blocks are known by their tag, the owner's by the scripts
+    they pay. A window with fewer than `least` blocks says nothing."""
+
+    def __init__(self, node, own_scripts=(), stop=32, resume=30, windows=(3600, 86400), least=10, every=60, clock=time.time):
+        self.node, self.own = node, {s.hex() for s in own_scripts}
+        self.stop, self.resume, self.windows, self.least, self.every, self.clock = stop, resume, windows, least, every, clock
+        self.blocks, self.closed, self.checked, self.last = {}, False, None, {}
+        self.lock = threading.Lock()
+
+    def measure(self):
+        """{seconds of the window: (blocks of ours, blocks)} from the node, walking back from the tip."""
+        now = self.clock()
+        horizon = now - max(self.windows)
+        at, chain = self.node.call("getbestblockhash"), []
+        while at:
+            info = self.blocks.get(at)
+            if info is None:
+                block = self.node.call("getblock", at, 2)
+                first = block["tx"][0]
+                ours = TAG.hex() in first["vin"][0].get("coinbase", "") or any(o["scriptPubKey"].get("hex") in self.own for o in first["vout"])
+                info = self.blocks[at] = (block["time"], ours, block.get("previousblockhash"))
+            if info[0] < horizon:
+                break
+            chain.append(info)
+            at = info[2]
+        self.blocks = {h: i for h, i in self.blocks.items() if i[0] >= horizon - 3600}
+        return {w: (sum(1 for t, ours, _ in chain if ours and t >= now - w), sum(1 for t, _, _ in chain if t >= now - w)) for w in self.windows}
+
+    def is_closed(self):
+        with self.lock:
+            now = self.clock()
+            if self.checked is None or now - self.checked >= self.every:
+                try:
+                    self.last = self.measure()
+                except (OSError, KeyError, TypeError, IndexError):
+                    return self.closed          # no answer: what was decided last stands
+                self.checked = now
+                parts = [100.0 * ours / total for ours, total in self.last.values() if total >= self.least]
+                if any(part >= self.stop for part in parts):
+                    self.closed = True
+                elif all(part < self.resume for part in parts):
+                    self.closed = False
+            return self.closed
+
+    def shown(self):
+        return {"stop_percent": self.stop, "resume_percent": self.resume, "closed": self.closed,
+                "windows": {str(w): {"ours": o, "blocks": t} for w, (o, t) in self.last.items()}}
+
+
+class Guard:
+    """Bounds on one place: how often it asks for work, for how many addresses in one block, and how many
+    wrong shares it may send before it is not listened to for a while."""
+
+    def __init__(self, work_a_minute=120, addresses_a_block=50, bad_shares=20, ban=600, most_places=100_000, clock=time.time):
+        self.work_a_minute, self.addresses_a_block, self.bad_shares, self.ban = work_a_minute, addresses_a_block, bad_shares, ban
+        self.most_places, self.clock = most_places, clock
+        self.lock = threading.Lock()
+        self.asks, self.addresses, self.bad, self.banned, self.tip = {}, {}, {}, {}, None
+
+    def _recent(self, table, key, window, now):
+        times = table.get(key)
+        if times is None:
+            if len(table) >= self.most_places:
+                raise PoolError("BUSY", "the pool is asked from too many places at once", 503)
+            times = table[key] = collections.deque()
+        while times and now - times[0] >= window:
+            times.popleft()
+        return times
+
+    def check(self, source):
+        """Refuses a place that is not listened to at the moment."""
+        if source is None:
+            return
+        key, now = place(source), self.clock()
+        with self.lock:
+            until = self.banned.get(key)
+            if until is not None and now < until:
+                raise PoolError("BANNED", "too many wrong shares came from this place; it is listened to again in %d s" % (until - now), 429)
+            self.banned.pop(key, None)
+
+    def asked(self, source, address, tip):
+        if source is None:
+            return
+        self.check(source)
+        key, now = place(source), self.clock()
+        with self.lock:
+            if tip != self.tip:
+                self.tip, self.addresses = tip, {}
+                if len(self.asks) > self.most_places // 2:
+                    self.asks = {k: v for k, v in self.asks.items() if v and now - v[-1] < 60}
+            times = self._recent(self.asks, key, 60, now)
+            if len(times) >= self.work_a_minute:
+                raise PoolError("SLOW", "this place asks for work too often; a header is good for two minutes", 429)
+            times.append(now)
+            seen = self.addresses.setdefault(key, set())
+            if address not in seen and len(seen) >= self.addresses_a_block:
+                raise PoolError("SLOW", "this place asked for work for too many addresses in one block", 429)
+            seen.add(address)
+
+    def wrong(self, source):
+        if source is None:
+            return
+        key, now = place(source), self.clock()
+        with self.lock:
+            times = self._recent(self.bad, key, self.ban, now)
+            times.append(now)
+            if len(times) >= self.bad_shares:
+                self.banned[key] = now + self.ban
+                times.clear()
+
+
 class Pool:
-    def __init__(self, node, chain, pay_to, folder, ratio=RATIO, fee_percent=5, hasher=None, clock=time.time):
+    def __init__(self, node, chain, pay_to, folder, ratio=RATIO, fee_percent=5, hasher=None, clock=time.time,
+                 cap=None, guard=None, payouts=None):
         if not 1 <= ratio <= 1 << 20 or not 0 <= fee_percent < 100:
             raise ValueError("ratio or fee out of range")
         self.node, self.chain, self.pay_to = node, chain, pay_to
         self.pay_script = script_for_address(chain, pay_to)
         self.ratio, self.fee, self.clock = ratio, fee_percent, clock
         self.hasher = hasher or RxHasher()
+        self.cap, self.guard, self.payouts = cap, guard, payouts
         self.folder = folder
         os.makedirs(folder, mode=0o700, exist_ok=True)
         self.secret = self._secret()
@@ -253,15 +386,20 @@ class Pool:
     def _mark(self, job_id, address, header):
         return hmac.new(self.secret, ("%s|%s|" % (job_id, address)).encode() + header, hashlib.sha256).hexdigest()[:24]
 
-    def work(self, address):
+    def work(self, address, source=None):
         """A header for this address to look for nonces on."""
         try:
             script_for_address(self.chain, address)
         except BadInput as e:
             raise PoolError("ADDRESS", "that is not an address of this network that can be paid: %s" % e)
         address = address.lower()
+        if self.cap is not None and self.cap.is_closed():
+            raise PoolError("CAP", "the pool has found %d %% of the network's blocks or more and hands out no work until it is "
+                                   "below %d %%; mine alone or elsewhere meanwhile" % (self.cap.stop, self.cap.resume), 503)
         with self.lock:
             template = self._fresh_template()
+            if self.guard is not None:
+                self.guard.asked(source, address, template["previousblockhash"])
             now = self.clock()
             job_id = self.job_of.get(address)
             job = self.jobs.get(job_id)
@@ -284,8 +422,18 @@ class Pool:
                     "share_target": "%064x" % job["share"], "seed": job["key"].hex(), "height": job["height"],
                     "share_value": north(job["value"]), "network": self.chain}
 
-    def share(self, token, nonce):
+    def share(self, token, nonce, source=None):
         """Takes a nonce for a header the pool handed out. Returns what was written down for it."""
+        if self.guard is not None:
+            self.guard.check(source)
+        try:
+            return self._share(token, nonce)
+        except PoolError as e:
+            if self.guard is not None and e.kind in ("LOW", "INPUT"):
+                self.guard.wrong(source)
+            raise
+
+    def _share(self, token, nonce):
         if not isinstance(token, str) or token.count(".") != 1 or type(nonce) is not int or not 0 <= nonce <= 0xFFFFFFFF:
             raise PoolError("INPUT", 'a share is {"job": the job as it was given, "nonce": a number below 2^32}')
         job_id, mark = token.split(".")
@@ -328,8 +476,18 @@ class Pool:
         address = str(address).lower()
         with self.lock:
             account = dict(self.accounts.get(address, {"shares": 0, "earned": 0}))
-        return {"address": address, "shares": account["shares"], "earned": north(account["earned"]),
-                "paid": north(0), "owed": north(account["earned"]), "note": "stage 1: nothing is paid out yet"}
+        paid, flying = (0, 0) if self.payouts is None else self.payouts.sums().get(address, (0, 0))
+        return {"address": address, "shares": account["shares"], "earned": north(account["earned"]), "paid": north(paid),
+                "on_the_way": north(flying), "owed": north(account["earned"] - paid - flying),
+                "pays_from": None if self.payouts is None else north(self.payouts.minimum)}
+
+    def pay_round(self):
+        """One step of paying out (see payout.py). Nothing happens in a pool that was started without payouts."""
+        if self.payouts is None:
+            return {"round": None, "state": "this pool does not pay out"}
+        with self.lock:
+            earned = {a: account["earned"] for a, account in self.accounts.items()}
+        return self.payouts.run(earned)
 
     def tip(self):
         with self.lock:
@@ -345,7 +503,8 @@ class Pool:
         with self.lock:
             shares = sum(a["shares"] for a in self.accounts.values())
             owed = sum(a["earned"] for a in self.accounts.values())
-        return {"service": "polarka-pool", "network": self.chain, "stage": "1: shares are written down, nothing is paid out yet",
+        return {"service": "polarka-pool", "network": self.chain, "pays_out": self.payouts is not None,
+                "cap": None if self.cap is None else self.cap.shown(),
                 "pays": "for each share, the block reward without fees divided by share_ratio, less the fee",
                 "share_ratio": self.ratio, "fee_percent": self.fee, "coinbase_tag": TAG.decode(), "pays_blocks_to": self.pay_to,
                 "height": height, "paused": paused, "shares": shares, "owed": north(owed), "blocks": len(self.blocks),
@@ -359,7 +518,7 @@ def _say(text):
     sys.stderr.flush()
 
 
-def handler_for(pool):
+def handler_for(pool, trust_proxy=False):
     class Handler(BaseHTTPRequestHandler):
         server_version = "polarka-pool"
         protocol_version = "HTTP/1.1"
@@ -377,6 +536,15 @@ def handler_for(pool):
             self.end_headers()
             self.wfile.write(body)
 
+        def source(self):
+            if not trust_proxy:
+                return self.client_address[0]
+            # the web server in front writes last: the last element of the last line is its word
+            last = (self.headers.get_all("X-Forwarded-For") or [""])[-1].split(",")[-1].strip()
+            if not last:
+                raise PoolError("PROXY", "no X-Forwarded-For", 500)
+            return last
+
         def answer(self, make):
             try:
                 self.send(200, make())
@@ -393,7 +561,7 @@ def handler_for(pool):
             if url.path in ("/", "/v1/pool"):
                 return self.answer(pool.info)
             if url.path == "/v1/work":
-                return self.answer(lambda: pool.work(address))
+                return self.answer(lambda: pool.work(address, self.source()))
             if url.path == "/v1/tip":
                 return self.answer(pool.tip)
             if url.path == "/v1/account":
@@ -415,20 +583,32 @@ def handler_for(pool):
             except ValueError:
                 self.close_connection = True
                 return self.send(400, {"error": "INPUT", "message": "a share is a small JSON object"})
-            self.answer(lambda: pool.share(said.get("job"), said.get("nonce")))
+            self.answer(lambda: pool.share(said.get("job"), said.get("nonce"), self.source()))
 
     return Handler
 
 
-def make_server(pool, listen):
+def make_server(pool, listen, trust_proxy=False):
     host, _, port = listen.rpartition(":")
-    server = ThreadingHTTPServer((host or "127.0.0.1", int(port)), handler_for(pool))
+    server = ThreadingHTTPServer((host or "127.0.0.1", int(port)), handler_for(pool, trust_proxy))
     server.daemon_threads = True
     return server
 
 
-def serve(pool, listen):
-    server = make_server(pool, listen)
+def pay_for_ever(pool, every, sleep=time.sleep):
+    while True:
+        sleep(every)
+        try:
+            done = pool.pay_round()
+            _say("payout: %s" % json.dumps(done, sort_keys=True))
+        except Exception as e:          # the next step looks at the ledgers again; nothing is assumed from this one
+            _say("payout failed: %s" % type(e).__name__)
+
+
+def serve(pool, listen, trust_proxy=False, pay_every=0):
+    server = make_server(pool, listen, trust_proxy)
+    if pool.payouts is not None and pay_every > 0:
+        threading.Thread(target=pay_for_ever, args=(pool, pay_every), daemon=True).start()
     _say("pool on %s:%d, chain %s, a share is 1/%d of a block, fee %d %%, blocks pay %s"
          % (server.server_address[0], server.server_address[1], pool.chain, pool.ratio, pool.fee, pool.pay_to))
     try:

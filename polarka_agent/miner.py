@@ -115,7 +115,7 @@ def mine(url, address, threads=1, fast=True, shares=None, seconds=None, say=lamb
         try:
             work = _work(url, address)
         except PoolSaid as e:
-            if e.status != 503:
+            if e.status not in (429, 503):
                 raise
             say({"event": "waiting", "kind": e.kind, "message": str(e)})
             time.sleep(look_every)

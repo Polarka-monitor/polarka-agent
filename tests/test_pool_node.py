@@ -8,7 +8,9 @@ import tempfile
 import threading
 import unittest
 
-from polarka_agent import miner, pool, rx
+from polarka_agent import miner, payout, pool, rx
+from polarka_agent.keys import script_for_address
+from polarka_agent.wallet import Wallet
 
 from . import bench
 
@@ -78,6 +80,83 @@ class PoolOnRegtest(unittest.TestCase):
         with self.assertRaises(miner.PoolSaid) as caught:
             miner._call(self.url + "/v1/share", {"job": work["job"], "nonce": 1})
         self.assertEqual(caught.exception.kind, "STALE")
+
+
+SINK = "rnorth1zfgvaxg6parqfv2drvsk9zadefh40zg97ese44hjkjzkjamkftpzsnpx4h6"       # key 0/0 of the public test phrase
+
+
+@unittest.skipUnless(BIN and rx.find_library(), "needs truenorthd (TN_BIN) and the proof-of-work library")
+class PayingOnRegtest(unittest.TestCase):
+    """Shares are mined through the pool, the pool's wallet pays them out through the stand-in wallet server,
+    and the coins are in a block on the miner's address. Once, whatever is asked again."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.node = bench.Node(BIN)
+        cls.standin = bench.StandIn(cls.node)
+        cls.tmp = tempfile.mkdtemp(prefix="polarka-pool-pay-")
+        cls.folder = os.path.join(cls.tmp, "pool")
+        Wallet.create(cls.folder, "regtest", cls.standin.url, None)
+        with open(os.path.join(cls.folder, "limits.json"), "w") as f:
+            json.dump({"per_payment_north": "100000", "per_day_north": "1000000"}, f)
+        cls.wallet = Wallet(cls.folder)
+        Wallet.create(os.path.join(cls.tmp, "miner"), "regtest", cls.standin.url, None)
+        cls.miner_wallet = Wallet(os.path.join(cls.tmp, "miner"))
+        cls.worker = cls.miner_wallet.fresh_address()
+        cls.pay_to = cls.wallet.account.address(0, 0)
+        cls.node.mine(1, SINK)
+        cls.rpc = pool.Node("http://127.0.0.1:%d" % cls.node.port, cls.node.cookie)
+        cls.pool = pool.Pool(cls.rpc, "regtest", cls.pay_to, cls.folder, payouts=payout.Payouts(cls.wallet, cls.folder, minimum=pool.UNITS))
+        cls.server = pool.make_server(cls.pool, "127.0.0.1:0")
+        cls.url = "http://127.0.0.1:%d" % cls.server.server_address[1]
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.standin.stop()
+        cls.node.stop()
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_shares_are_paid_once(self):
+        sums = miner.mine(self.url, self.worker, threads=1, fast=False, shares=5, seconds=240, look_every=0.3)
+        self.assertGreater(sums["blocks"], 0)
+        owed = self.pool.account(self.worker)["owed"]
+        self.assertEqual(owed, sums["credited"])
+        # the pool's rewards are not ripe and it has nothing else: nobody is paid, and nothing is written down
+        self.assertIsNone(self.pool.pay_round()["round"])
+        self.assertEqual(self.pool.account(self.worker)["on_the_way"], "0.00000000")
+        # the pool's own reserve (it pays for shares whether or not it found the blocks), and a hundred blocks on top
+        self.node.mine(10, self.pay_to)
+        self.node.mine(100, SINK)
+        done = self.pool.pay_round()
+        self.assertEqual((done["round"], done["state"], done["payees"], done["paid_now"]), (1, "handed", 1, owed))
+        account = self.pool.account(self.worker)
+        self.assertEqual((account["on_the_way"], account["owed"], account["paid"]), (owed, "0.00000000", "0.00000000"))
+        self.assertEqual(self.pool.pay_round()["state"], "on the way")
+        self.node.mine(1, SINK)
+        self.assertEqual(self.pool.pay_round()["state"], "nothing is due")
+        account = self.pool.account(self.worker)
+        self.assertEqual((account["paid"], account["on_the_way"], account["owed"]), (owed, "0.00000000", "0.00000000"))
+        got = self.miner_wallet.received(self.worker)
+        self.assertEqual((pool.north(got["amount"]), got["confirmations"]), (owed, 1))
+        self.assertEqual(len(self.wallet.payments()), 1)
+        # a pool started again over the same folder knows what it paid
+        again = pool.Pool(self.rpc, "regtest", self.pay_to, self.folder, payouts=payout.Payouts(self.wallet, self.folder, minimum=pool.UNITS))
+        self.assertEqual(again.account(self.worker), account)
+        self.assertEqual(again.pay_round()["state"], "nothing is due")
+
+    def test_the_cap_reads_the_real_chain(self):
+        self.node.mine(3, SINK)
+        tagged = len(self.pool.blocks)
+        height = self.node.cli("getblockcount")
+        cap = pool.Cap(self.rpc, [], least=1)
+        ours, blocks = cap.measure()[86400]
+        self.assertEqual((ours, blocks), (len([b for b in self.pool.blocks if b["accepted"]]), height))
+        self.assertLessEqual(ours, tagged)
+        own = pool.Cap(self.rpc, [script_for_address("regtest", SINK)], least=1)
+        self.assertGreater(own.measure()[86400][0], ours)             # the owner's own blocks count too
 
 
 if __name__ == "__main__":

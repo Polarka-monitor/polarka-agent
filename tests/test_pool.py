@@ -224,5 +224,155 @@ class OverHttp(unittest.TestCase):
         self.assertEqual((len(work["header"]), len(work["key"]), work["height"]), (76, 32, 3000))
 
 
+class FakeChain:
+    """A chain for the cap: blocks as (seconds ago, whose), the newest last."""
+
+    def __init__(self, now, blocks):
+        self.now, self.blocks, self.calls, self.down = now, blocks, 0, False
+
+    def call(self, method, *params):
+        if self.down:
+            raise OSError("no node")
+        if method == "getbestblockhash":
+            return "h%d" % (len(self.blocks) - 1)
+        if method == "getblock":
+            self.calls += 1
+            i = int(params[0][1:])
+            ago, whose = self.blocks[i]
+            coinbase = "03b80b00" + (pool.TAG.hex() if whose == "pool" else "aa")
+            script = "5220" + ("77" * 32 if whose == "own" else "88" * 32)
+            block = {"time": self.now - ago, "tx": [{"vin": [{"coinbase": coinbase}], "vout": [{"scriptPubKey": {"hex": script}}]}]}
+            if i:
+                block["previousblockhash"] = "h%d" % (i - 1)
+            return block
+        raise OSError(method)
+
+
+class CapRules(unittest.TestCase):
+    def cap(self, blocks, **more):
+        self.now = [100000.0]
+        self.chain = FakeChain(self.now[0], blocks)
+        return pool.Cap(self.chain, [bytes.fromhex("5220" + "77" * 32)], clock=lambda: self.now[0], **more)
+
+    def test_the_pool_and_the_owner_count_together(self):
+        day = [(90000, "x")] + [(80000 - i * 100, "x") for i in range(60)]        # one block older than a day, 60 within it
+        hour = [(3000 - i * 100, w) for i, w in enumerate(["pool"] * 4 + ["own"] * 3 + ["x"] * 13)]
+        cap = self.cap(day + hour)
+        self.assertEqual(cap.measure(), {3600: (7, 20), 86400: (7, 80)})
+        self.assertTrue(cap.is_closed())                              # 35 % of the last hour
+        self.assertEqual(cap.shown()["windows"]["3600"], {"ours": 7, "blocks": 20})
+
+    def test_it_opens_again_only_below_the_lower_mark(self):
+        cap = self.cap([(3000 - i * 100, w) for i, w in enumerate(["pool"] * 7 + ["x"] * 13)])
+        self.assertTrue(cap.is_closed())
+        seen = self.chain.calls
+        self.assertTrue(cap.is_closed())
+        self.assertEqual(self.chain.calls, seen)                      # asked again within the minute: the node is left alone
+        for others, closed in ((2, True), (3, False)):                # 7 of 22 is 31.8 %: still closed; 7 of 24 is 29.2 %: open
+            self.chain.blocks += [(50, "x")] * (others if closed else 2)
+            self.now[0] += 60
+            self.chain.now = self.now[0]
+            self.assertEqual(cap.is_closed(), closed)
+        self.assertEqual(self.chain.calls, seen + 4)                  # only the new blocks were read
+
+    def test_few_blocks_say_nothing_and_no_node_changes_nothing(self):
+        cap = self.cap([(100, "pool")] * 9)
+        self.assertFalse(cap.is_closed())                             # nine blocks, all ours: fewer than ten says nothing
+        cap = self.cap([(100, "pool")] * 10)
+        self.assertTrue(cap.is_closed())
+        self.chain.down = True
+        self.now[0] += 60
+        self.assertTrue(cap.is_closed())
+
+    def test_a_closed_pool_hands_out_no_work(self):
+        folder = tempfile.mkdtemp(prefix="polarka-pool-test-")
+        try:
+            cap = self.cap([(100, "pool")] * 10)
+            p = pool.Pool(FakeNode(), "regtest", PAY, folder, ratio=16, hasher=FakeHash(), cap=cap)
+            with self.assertRaises(pool.PoolError) as caught:
+                p.work(ALICE)
+            self.assertEqual((caught.exception.kind, caught.exception.status), ("CAP", 503))
+            self.assertTrue(p.info()["cap"]["closed"])
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+
+class GuardRules(unittest.TestCase):
+    def setUp(self):
+        self.folder = tempfile.mkdtemp(prefix="polarka-pool-test-")
+        self.now = [1000.0]
+        self.guard = pool.Guard(work_a_minute=5, addresses_a_block=2, bad_shares=3, ban=600, clock=lambda: self.now[0])
+        self.pool = pool.Pool(FakeNode(), "regtest", PAY, self.folder, ratio=16, hasher=FakeHash(), clock=lambda: self.now[0], guard=self.guard)
+
+    def tearDown(self):
+        shutil.rmtree(self.folder, ignore_errors=True)
+
+    def kind(self, call, *a):
+        with self.assertRaises(pool.PoolError) as caught:
+            call(*a)
+        return caught.exception.kind
+
+    def test_places(self):
+        self.assertEqual(pool.place("203.0.113.9"), "203.0.113.9")
+        self.assertEqual(pool.place("::ffff:203.0.113.9"), "203.0.113.9")
+        self.assertEqual(pool.place("2001:db8:1:2::5"), pool.place("2001:db8:1:ffff::9"))      # one customer's /48
+        self.assertNotEqual(pool.place("2001:db8:1::5"), pool.place("2001:db8:2::5"))
+        self.assertEqual(pool.place("nonsense"), "?")
+
+    def test_asking_too_often_or_for_too_many(self):
+        carol = encode_address("rnorth", 2, bytes([11]) * 32)
+        self.pool.work(ALICE, "203.0.113.9")
+        self.pool.work(BOB, "203.0.113.9")
+        self.assertEqual(self.kind(self.pool.work, carol, "203.0.113.9"), "SLOW")       # a third address in one block
+        self.pool.work(carol, "203.0.113.10")                                           # another place is not bound by it
+        for _ in range(2):
+            self.pool.work(ALICE, "203.0.113.9")
+        self.assertEqual(self.kind(self.pool.work, ALICE, "203.0.113.9"), "SLOW")       # the sixth question in a minute
+        self.now[0] += 60
+        self.pool.work(ALICE, "203.0.113.9")
+
+    def test_wrong_shares_close_the_door_for_a_while(self):
+        work = self.pool.work(ALICE, "203.0.113.9")
+        header, key, share = bytes.fromhex(work["header"]), bytes.fromhex(work["seed"]), int(work["share_target"], 16)
+        low = [n for n in range(10000) if int.from_bytes(hashlib.sha256(key + header + n.to_bytes(4, "little")).digest(), "little") > share][:3]
+        for nonce in low:
+            self.assertEqual(self.kind(self.pool.share, work["job"], nonce, "203.0.113.9"), "LOW")
+        good = search(work)
+        self.assertEqual(self.kind(self.pool.share, work["job"], good, "203.0.113.9"), "BANNED")
+        self.assertEqual(self.kind(self.pool.work, ALICE, "203.0.113.9"), "BANNED")
+        self.assertTrue(self.pool.share(work["job"], good, "203.0.113.10")["ok"])        # the share itself was good
+        self.now[0] += 600
+        self.pool.work(ALICE, "203.0.113.9")
+        # stale and duplicate shares happen to honest miners and are not counted against them
+        for _ in range(5):
+            self.assertEqual(self.kind(self.pool.share, work["job"], good, "203.0.113.9"), "DUPLICATE")
+        self.pool.work(ALICE, "203.0.113.9")
+
+
+class Owed(unittest.TestCase):
+    def test_the_account_shows_what_was_paid_and_what_is_on_the_way(self):
+        from polarka_agent import payout
+        from tests.test_payout import FakeWallet
+        folder = tempfile.mkdtemp(prefix="polarka-pool-test-")
+        try:
+            wallet = FakeWallet()
+            p = pool.Pool(FakeNode(), "regtest", PAY, folder, ratio=16, hasher=FakeHash(), payouts=payout.Payouts(wallet, folder, minimum=pool.UNITS))
+            work = p.work(ALICE)
+            first = search(work, want_block=False)
+            p.share(work["job"], first)
+            self.assertEqual(p.pay_round()["paid_now"], "30.40000000")
+            p.share(work["job"], search(work, want_block=False, start=first + 1))
+            account = p.account(ALICE)
+            self.assertEqual((account["earned"], account["paid"], account["on_the_way"], account["owed"]),
+                             ("60.80000000", "0.00000000", "30.40000000", "30.40000000"))
+            wallet.made[0]["state"] = "in_block"
+            p.pay_round()
+            account = p.account(ALICE)
+            self.assertEqual((account["paid"], account["on_the_way"], account["owed"]), ("30.40000000", "30.40000000", "0.00000000"))
+            self.assertTrue(p.info()["pays_out"])
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

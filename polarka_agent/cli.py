@@ -115,11 +115,16 @@ def run(argv=None, out=sys.stdout):
     c.add_argument("--light", action="store_true", help="without the 2 GiB table: tens of hashes a second, for trying it out")
     c.add_argument("--shares", type=int, help="stop after this many shares were taken")
     c.add_argument("--seconds", type=int, help="stop after this many seconds")
-    c = sub.add_parser("pool-serve", help="be a pool that writes down shares (stage 1: regtest only, no payouts); --dir is its folder")
+    c = sub.add_parser("pool-serve", help="be a pool that pays for shares (regtest only so far); --dir is its folder and its wallet")
     c.add_argument("--chain", required=True, choices=("main", "regtest"))
     c.add_argument("--rpc-url", required=True, help="the pool's own node, for example http://127.0.0.1:9554")
     c.add_argument("--rpc-cookie", required=True, help="the node's .cookie file")
-    c.add_argument("--pay-to", required=True, help="the address the blocks pay")
+    c.add_argument("--pay-to", help="the address the blocks pay (default: the first address of the wallet in --dir)")
+    c.add_argument("--pay-every", type=int, default=0, help="seconds between payout rounds from the wallet in --dir; 0: no payouts")
+    c.add_argument("--minimum", default="1", help="NORTH owed from which an address is paid")
+    c.add_argument("--own-mining", help="a file with the addresses the pool's owner mines to elsewhere, one a line; they count for the cap")
+    c.add_argument("--cap", type=int, default=32, help="percent of the network's blocks at which no work is handed out; 0: no cap")
+    c.add_argument("--trust-proxy", action="store_true", help="take the asker's address from X-Forwarded-For")
     c.add_argument("--listen", default="127.0.0.1:8690")
     c.add_argument("--ratio", type=int, default=2048, help="shares in a block on average")
     c.add_argument("--fee", type=int, default=5, help="the pool's fee in percent")
@@ -156,12 +161,26 @@ def run(argv=None, out=sys.stdout):
             return show(mine(a.url, a.address, a.threads, not a.light, a.shares, a.seconds,
                              say=lambda event: sys.stderr.write(json.dumps(event) + "\n")))
         if a.cmd == "pool-serve":
-            from .pool import Node, Pool, serve as pool_serve
+            from .keys import script_for_address
+            from .payout import Payouts
+            from .pool import Cap, Guard, Node, Pool, serve as pool_serve
             if a.chain != "regtest":
-                raise Refused("STAGE", "the pool is at stage 1 and has run on regtest only; it does not start on another chain")
-            if not 1 <= a.ratio <= 1 << 20 or not 0 <= a.fee <= 50:
-                raise Refused("INPUT", "--ratio is 1 to 1048576 and --fee 0 to 50")
-            return pool_serve(Pool(Node(a.rpc_url, os.path.expanduser(a.rpc_cookie)), a.chain, a.pay_to, folder, a.ratio, a.fee), a.listen)
+                raise Refused("STAGE", "the pool has run on regtest only and nobody else has read it; it does not start on another chain")
+            if not 1 <= a.ratio <= 1 << 20 or not 0 <= a.fee <= 50 or not 0 <= a.cap <= 50 or a.pay_every < 0:
+                raise Refused("INPUT", "--ratio is 1 to 1048576, --fee 0 to 50, --cap 0 to 50, --pay-every 0 or more")
+            wallet = Wallet(folder) if a.pay_every or not a.pay_to else None
+            if wallet is not None and wallet.chain != a.chain:
+                raise Refused("CHAIN", "the wallet in --dir is of another chain")
+            pay_to = a.pay_to or wallet.account.address(0, 0)
+            node = Node(a.rpc_url, os.path.expanduser(a.rpc_cookie))
+            own = []
+            if a.own_mining:
+                with open(os.path.expanduser(a.own_mining)) as f:
+                    own = [script_for_address(a.chain, line.strip()) for line in f if line.strip()]
+            cap = Cap(node, own, a.cap, max(a.cap - 2, 0)) if a.cap else None
+            payouts = Payouts(wallet, folder, units(a.minimum)) if a.pay_every else None
+            return pool_serve(Pool(node, a.chain, pay_to, folder, a.ratio, a.fee, cap=cap, guard=Guard(), payouts=payouts),
+                              a.listen, a.trust_proxy, a.pay_every)
         wallet = Wallet(folder)
         if a.cmd == "mcp":
             from .mcp import serve
