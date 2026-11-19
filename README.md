@@ -61,8 +61,8 @@ under `server_said_untrusted`, for the owner.
 
 That gives the command `polarka-agent`, which is the same as `python3 -m polarka_agent`. It needs Python 3.9
 or later on Linux or macOS and nothing besides; it does not run on Windows. The package on PyPI is built from
-this repository at the tag of its version; 0.1.1 and 0.1.2 were built and uploaded by the workflow in
-`.github/workflows/release.yml`. A version can be here before it is on PyPI. PyPI may still carry 0.1.2, whose
+this repository at the tag of its version; 0.1.1 and 0.1.2 were built and uploaded by a GitHub Actions
+workflow that this repository no longer carries; later versions are built and uploaded by hand. A version can be here before it is on PyPI. PyPI may still carry 0.1.2, whose
 faucet has the faults that `docs/faucet-review-0.1.2.md` names: whoever means to run a faucet installs this
 version from the project's own server,
 
