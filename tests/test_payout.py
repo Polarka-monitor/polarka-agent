@@ -80,12 +80,20 @@ class Rules(unittest.TestCase):
 
     def test_cut_to_what_is_there(self):
         self.wallet.spendable = 12 * N
-        done = self.pay.run({A: 30 * N, B: 9 * N, C: 2 * N})
-        self.assertEqual(self.wallet.made[0]["outputs"], [(B, 9 * N), (C, 2 * N)])        # A waits for ripe coins
-        self.assertEqual(done["paid_now"], "11.00000000")
+        earned = {A: 30 * N, B: 9 * N, C: 2 * N}
+        done = self.pay.run(earned)
+        self.assertEqual(self.wallet.made[0]["outputs"], [(A, 12 * N - payout.MARGIN)])    # who is owed most gets what there is
+        self.assertEqual(done["paid_now"], "11.99000000")
         self.wallet.made[0]["state"] = "in_block"
         self.wallet.spendable, self.wallet.per_payment = 1000 * N, 20 * N
-        self.assertEqual(self.pay.run({A: 30 * N, B: 9 * N, C: 2 * N})["round"], None)   # over the owner's limit for one payment
+        self.pay.run(earned)                                         # the owner's limit for one payment cuts the next round
+        self.assertEqual(self.wallet.made[1]["outputs"], [(A, 18 * N + payout.MARGIN), (B, 2 * N - 2 * payout.MARGIN)])
+        self.wallet.made[1]["state"] = "in_block"
+        self.wallet.per_payment = 1000 * N
+        self.pay.run(earned)
+        self.wallet.made[2]["state"] = "in_block"
+        self.assertEqual(self.pay.run(earned)["state"], "nothing is due")
+        self.assertEqual(self.pay.sums(), {A: (30 * N, 0), B: (9 * N, 0), C: (2 * N, 0)})  # in the end everybody has all of it
 
     def test_a_fall_before_the_wallet_signed(self):
         self.pay._write({"event": "round", "round": 1, "pay": [[A, 30 * N]], "mark": "aa"})
@@ -133,10 +141,36 @@ class Rules(unittest.TestCase):
         self.pay.run({A: 30 * N})
         self.wallet.made[0]["state"] = "in_block"
         os.remove(os.path.join(self.folder, "pool-payouts.jsonl"))
-        fresh = self.make()
-        fresh.run({A: 30 * N})
-        self.assertEqual(fresh.run({A: 30 * N})["state"], "on the way")     # round 1 again, and not paid by the old tx1
-        self.assertEqual(fresh.rounds[1]["txids"], ["tx2"])
+        fresh = self.make()                  # the ledger is gone and the wallet remembers a round: nothing is paid again
+        with self.assertRaises(payout.BooksDisagree):
+            fresh.run({A: 30 * N})
+        self.assertEqual(len(self.wallet.made), 1)
+
+    def test_a_lost_journal_or_ledger_stops_the_payouts(self):
+        self.pay.run({A: 30 * N})
+        kept, self.wallet.made = self.wallet.made, []            # the wallet's journal is gone, the round is open
+        with self.assertRaises(payout.BooksDisagree):
+            self.pay.run({A: 30 * N})
+        self.assertEqual((self.pay.rounds[1]["state"], self.wallet.made), ("open", []))     # not voided, not paid again
+        self.wallet.made = kept
+        os.remove(os.path.join(self.folder, "pool-payouts.jsonl"))
+        with open(os.path.join(self.folder, "pool-shares.jsonl"), "w") as f:
+            f.write("{}\n")
+        with self.assertRaises(payout.BooksDisagree):          # shares are written down and the payout ledger is missing
+            self.make()
+
+    def test_one_process_over_a_folder_and_one_round_of_a_number(self):
+        import subprocess, sys
+        code = "import sys; from polarka_agent import payout; payout.hold_folder(sys.argv[1])"
+        other = subprocess.run([sys.executable, "-B", "-c", code, self.folder], stderr=subprocess.PIPE, universal_newlines=True,
+                               cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        self.assertNotEqual(other.returncode, 0)
+        self.assertIn("another pool process", other.stderr)
+        self.pay.run({A: 30 * N})
+        with open(os.path.join(self.folder, "pool-payouts.jsonl"), "a") as f:
+            f.write(json.dumps({"event": "round", "round": 1, "pay": [[B, N]], "mark": "bb", "t": 1}) + "\n")
+        with self.assertRaises(ValueError):
+            self.make()
 
     def test_ledgers_that_do_not_agree(self):
         self.pay.run({A: 30 * N})

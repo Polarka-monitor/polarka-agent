@@ -128,6 +128,7 @@ def run(argv=None, out=sys.stdout):
     c.add_argument("--listen", default="127.0.0.1:8690")
     c.add_argument("--ratio", type=int, default=2048, help="shares in a block on average")
     c.add_argument("--fee", type=int, default=5, help="the pool's fee in percent")
+    c.add_argument("--most-owed", default="5000", help="NORTH the pool may owe at once; above it no work is handed out")
     a = p.parse_args(argv)
     folder = os.path.expanduser(a.dir)
 
@@ -179,7 +180,8 @@ def run(argv=None, out=sys.stdout):
                     own = [script_for_address(a.chain, line.strip()) for line in f if line.strip()]
             cap = Cap(node, own, ((86400, a.cap, max(a.cap - 2, 0)), (3600, a.cap + 8, a.cap + 6))) if a.cap else None
             payouts = Payouts(wallet, folder, units(a.minimum)) if a.pay_every else None
-            return pool_serve(Pool(node, a.chain, pay_to, folder, a.ratio, a.fee, cap=cap, guard=Guard(), payouts=payouts),
+            return pool_serve(Pool(node, a.chain, pay_to, folder, a.ratio, a.fee, cap=cap, guard=Guard(), payouts=payouts,
+                                   most_owed=units(a.most_owed)),
                               a.listen, a.trust_proxy, a.pay_every)
         wallet = Wallet(folder)
         if a.cmd == "mcp":

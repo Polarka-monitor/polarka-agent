@@ -29,6 +29,7 @@ from urllib.parse import parse_qs, urlparse
 
 from . import rx as rxmod
 from .keys import BadInput, script_for_address
+from .payout import hold_folder, sync
 
 UNITS = 100_000_000
 TAG = b"/Polarka/"          # written into the coinbase, so that anybody can count the pool's blocks
@@ -37,12 +38,23 @@ TEMPLATE_AGE = 5            # seconds a template is used before the node is aske
 JOB_AGE = 120               # seconds an asker gets the same header before it is given a fresh one
 MOST_JOBS = 50_000          # headers remembered for one tip; beyond that no new ones until the next block
 MOST = (1 << 256) - 1
+NODE_SILENCE = 30           # seconds without a template after which shares are no longer taken
+UNLUCKY = 0.001             # an address whose shares would have found more blocks with this certainty gets no more work
 
 
 class PoolError(Exception):
     def __init__(self, kind, message, status=400):
         Exception.__init__(self, message)
         self.kind, self.status = kind, status
+
+
+def at_most(blocks, expected):
+    """The chance of finding this few blocks or fewer when `expected` were due (Poisson)."""
+    term = total = pow(2.718281828459045, -expected)
+    for k in range(1, blocks + 1):
+        term *= expected / k
+        total += term
+    return total
 
 
 def north(value):
@@ -305,7 +317,7 @@ class Guard:
 
 class Pool:
     def __init__(self, node, chain, pay_to, folder, ratio=RATIO, fee_percent=5, hasher=None, clock=time.time,
-                 cap=None, guard=None, payouts=None):
+                 cap=None, guard=None, payouts=None, most_owed=None):
         if not 1 <= ratio <= 1 << 20 or not 0 <= fee_percent < 100:
             raise ValueError("ratio or fee out of range")
         self.node, self.chain, self.pay_to = node, chain, pay_to
@@ -313,8 +325,9 @@ class Pool:
         self.ratio, self.fee, self.clock = ratio, fee_percent, clock
         self.hasher = hasher or RxHasher()
         self.cap, self.guard, self.payouts = cap, guard, payouts
-        self.folder = folder
-        os.makedirs(folder, mode=0o700, exist_ok=True)
+        self.folder, self.most_owed = folder, most_owed
+        hold_folder(folder)
+        self.earned_total, self.paid_total, self.assets, self.template_good_at = 0, 0, None, None
         self.secret = self._secret()
         self.ledger_path = os.path.join(folder, "pool-shares.jsonl")
         self.lock = threading.Lock()
@@ -356,9 +369,12 @@ class Pool:
                                      % (number, self.ledger_path))
 
     def _count(self, entry):
-        account = self.accounts.setdefault(entry["address"], {"shares": 0, "earned": 0})
+        account = self.accounts.setdefault(entry["address"], {"shares": 0, "earned": 0, "blocks": 0, "expected": 0.0})
         account["shares"] += 1
         account["earned"] += int(entry["value"])
+        account["expected"] += 1.0 / max(int(entry.get("odds", self.ratio)), 1)
+        account["blocks"] += 1 if entry.get("accepted") else 0
+        self.earned_total += int(entry["value"])
         if entry.get("block"):
             self.blocks.append({"height": entry["height"], "hash": entry["block"], "accepted": entry.get("accepted"),
                                 "time": entry["t"]})
@@ -369,8 +385,7 @@ class Pool:
         with self.ledger_lock:
             with open(self.ledger_path, "a") as f:
                 f.write(json.dumps(entry, sort_keys=True) + "\n")
-                f.flush()
-                os.fsync(f.fileno())
+                sync(f)
 
     def _fresh_template(self):
         """Called with the lock held. A node that does not answer stops the pool from handing out work."""
@@ -388,8 +403,22 @@ class Pool:
             raise PoolError("PAUSED", "the pool's node does not answer, so no work is handed out (%s)" % type(e).__name__, 503)
         if self.template is None or template["previousblockhash"] != self.template["previousblockhash"]:
             self.jobs, self.job_of, self.seen = {}, {}, set()       # a new tip: what was handed out is stale
-        self.template, self.template_at = template, now
+        self.template, self.template_at, self.template_good_at = template, now, now
         return template
+
+    def _may_work(self, address):
+        """Called with the lock held. The pool pays for shares whether or not blocks come of them, so it stops
+        handing out work when it owes more than it may or more than it has, and to an address whose shares
+        should long have found a block and did not."""
+        owed = self.earned_total - self.paid_total
+        if self.most_owed is not None and owed > self.most_owed:
+            raise PoolError("FUNDS", "the pool owes as much as it allows itself to owe; no work until it has paid out", 503)
+        if self.assets is not None and owed > self.assets:
+            raise PoolError("FUNDS", "the pool owes more than its wallet holds; no work until blocks or coins come in", 503)
+        account = self.accounts.get(address)
+        if account is not None and at_most(account["blocks"], account["expected"]) < UNLUCKY:
+            raise PoolError("LUCK", "the shares of this address should have found %.1f blocks and found %d; it gets no more work "
+                                    "until a person has looked" % (account["expected"], account["blocks"]), 403)
 
     def _mark(self, job_id, address, header):
         return hmac.new(self.secret, ("%s|%s|" % (job_id, address)).encode() + header, hashlib.sha256).hexdigest()[:24]
@@ -408,6 +437,7 @@ class Pool:
             template = self._fresh_template()
             if self.guard is not None:
                 self.guard.asked(source, address, template["previousblockhash"])
+            self._may_work(address)
             now = self.clock()
             job_id = self.job_of.get(address)
             job = self.jobs.get(job_id)
@@ -421,7 +451,7 @@ class Pool:
                 fees = sum(int(t.get("fee", 0)) for t in template.get("transactions", []))
                 value = (template["coinbasevalue"] - fees) * network // share * (100 - self.fee) // 100
                 job_id = os.urandom(8).hex()
-                job = {"address": address, "header": header, "rest": rest, "network": network, "share": share,
+                job = {"address": address, "header": header, "rest": rest, "network": network, "share": share, "odds": share // network,
                        "value": value, "height": template["height"], "key": self.key, "made": now,
                        "template_at": self.template_at}
                 self.jobs[job_id] = job
@@ -449,7 +479,10 @@ class Pool:
             try:
                 self._fresh_template()
             except PoolError:
-                pass                    # a share for the tip the pool last knew still counts
+                # a share for the tip the pool last knew still counts, but not for long: a pool that cannot see
+                # the chain cannot know what its shares are worth
+                if self.template_good_at is None or self.clock() - self.template_good_at > NODE_SILENCE:
+                    raise
             job = self.jobs.get(job_id)
             if job is None:
                 raise PoolError("STALE", "that job is not for the block being looked for now; ask for work again", 409)
@@ -463,7 +496,7 @@ class Pool:
         if proof > job["share"]:
             raise PoolError("LOW", "the hash of that header is above the share target")
         entry = {"t": int(self.clock()), "address": job["address"], "height": job["height"], "job": job_id,
-                 "nonce": nonce, "value": job["value"], "block": None, "accepted": None}
+                 "nonce": nonce, "value": job["value"], "odds": job["odds"], "block": None, "accepted": None}
         if proof <= job["network"]:
             entry["block"] = dsha(header)[::-1].hex()
             try:
@@ -483,7 +516,7 @@ class Pool:
     def account(self, address):
         address = str(address).lower()
         with self.lock:
-            account = dict(self.accounts.get(address, {"shares": 0, "earned": 0}))
+            account = dict(self.accounts.get(address, {"shares": 0, "earned": 0, "blocks": 0}))
         paid, flying = (0, 0) if self.payouts is None else self.payouts.sums().get(address, (0, 0))
         return {"address": address, "shares": account["shares"], "earned": north(account["earned"]), "paid": north(paid),
                 "on_the_way": north(flying), "owed": north(account["earned"] - paid - flying),
@@ -495,7 +528,17 @@ class Pool:
             return {"round": None, "state": "this pool does not pay out"}
         with self.lock:
             earned = {a: account["earned"] for a, account in self.accounts.items()}
-        return self.payouts.run(earned)
+        try:
+            return self.payouts.run(earned)
+        finally:
+            paid = sum(p for p, _ in self.payouts.sums().values())
+            try:
+                held = self.payouts.wallet.balance()
+                assets = sum(int(held.get(k, 0)) for k in ("spendable", "set_aside", "unripe"))
+            except Exception:
+                assets = self.assets        # no answer about the wallet: what was known stands
+            with self.lock:
+                self.paid_total, self.assets = paid, assets
 
     def tip(self):
         with self.lock:
@@ -610,7 +653,7 @@ def pay_for_ever(pool, every, sleep=time.sleep):
             done = pool.pay_round()
             _say("payout: %s" % json.dumps(done, sort_keys=True))
         except Exception as e:          # the next step looks at the ledgers again; nothing is assumed from this one
-            _say("payout failed: %s" % type(e).__name__)
+            _say("payout failed: %s: %s" % (type(e).__name__, str(e)[:300]))
 
 
 def serve(pool, listen, trust_proxy=False, pay_every=0):

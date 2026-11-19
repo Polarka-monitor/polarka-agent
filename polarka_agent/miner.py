@@ -4,6 +4,7 @@ Nothing of the wallet is touched: the miner knows an address and nothing else. T
 what the pool writes down for that address; whether and when it pays is the pool's word, not this program's.
 """
 import json
+import os
 import threading
 import time
 import urllib.error
@@ -69,24 +70,27 @@ def mine(url, address, threads=1, fast=True, shares=None, seconds=None, say=lamb
     chunk = 512 if fast else 4
     sums = {"shares": 0, "blocks": 0, "refused": 0, "hashes": 0, "credited": 0}
     lock, started = threading.Lock(), clock()
+    places = {}         # job -> where each thread stands, so that a header handed out again is not searched again
 
     def over():
         return (shares is not None and sums["shares"] >= shares) or (seconds is not None and clock() - started >= seconds)
 
     def look(work, index, stop):
         vm = engine.rx.vm()
+        place = places[work["job"]]
         try:
-            at = index
-            while not stop.is_set() and at < 1 << 32:
-                found = engine.rx.scan(vm, work["header"], work["target"], at, threads, chunk)
+            while not stop.is_set() and place[index] - place["base"] < 1 << 32:
+                at = place[index]
+                found = engine.rx.scan(vm, work["header"], work["target"], at & 0xFFFFFFFF, threads, chunk)
                 if found is None:
                     with lock:
                         sums["hashes"] += chunk
-                    at += chunk * threads
+                    place[index] = at + chunk * threads
                     continue
+                tried = ((found[0] - at) & 0xFFFFFFFF) // threads + 1
                 with lock:
-                    sums["hashes"] += (found[0] - at) // threads + 1
-                at = found[0] + threads
+                    sums["hashes"] += tried
+                place[index] = at + tried * threads
                 try:
                     took = _call(url + "/v1/share", {"job": work["job"], "nonce": found[0]})
                 except PoolSaid as e:
@@ -125,6 +129,11 @@ def mine(url, address, threads=1, fast=True, shares=None, seconds=None, say=lamb
             time.sleep(look_every)
             continue
         engine.ensure(work["key"], fast, threads)
+        if work["job"] not in places:
+            # a start of its own: two machines mining to one address get the same header from the pool
+            base = int.from_bytes(os.urandom(4), "little") // threads * threads
+            places.clear()
+            places[work["job"]] = dict({i: base + i for i in range(threads)}, base=base)
         stop = threading.Event()
         crew = [threading.Thread(target=look, args=(work, i, stop), daemon=True) for i in range(threads)]
         for t in crew:

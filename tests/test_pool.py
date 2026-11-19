@@ -158,9 +158,29 @@ class PoolRules(unittest.TestCase):
         error = self.refused("PAUSED", self.pool.work, BOB)
         self.assertEqual(error.status, 503)
         self.assertTrue(self.pool.info()["paused"])
+        self.pool.share(work["job"], search(work, want_block=False))     # for a short while the last tip still counts
+        self.now[0] += pool.NODE_SILENCE
+        self.refused("PAUSED", self.pool.share, work["job"], search(work, want_block=False, start=5000))
         self.node.down = False
         self.assertFalse(self.pool.info()["paused"])
         self.refused("STALE", self.pool.share, work["job"], search(work))    # after a pause nothing old is taken
+
+    def test_no_work_when_the_pool_owes_too_much_or_an_address_finds_no_blocks(self):
+        self.assertAlmostEqual(pool.at_most(0, 7.0), 0.000912, places=5)
+        self.assertAlmostEqual(pool.at_most(2, 3.0), 0.42319, places=4)
+        work = self.pool.work(ALICE)
+        self.pool.share(work["job"], search(work, want_block=False))
+        self.pool.most_owed = 30 * pool.UNITS                        # one share is 30.4
+        self.assertEqual(self.refused("FUNDS", self.pool.work, BOB).status, 503)
+        self.pool.most_owed, self.pool.assets = None, 20 * pool.UNITS
+        self.refused("FUNDS", self.pool.work, BOB)
+        self.pool.assets = None
+        self.pool.work(BOB)
+        self.assertAlmostEqual(self.pool.accounts[ALICE]["expected"], 1 / 16)
+        self.pool.accounts[ALICE]["expected"] = 7.0                  # seven blocks' worth of shares and no block
+        self.assertEqual(self.refused("LUCK", self.pool.work, ALICE).status, 403)
+        self.pool.accounts[ALICE]["blocks"] = 1
+        self.pool.work(ALICE)
 
     def test_the_ledger_is_what_the_pool_owes(self):
         work = self.pool.work(ALICE)

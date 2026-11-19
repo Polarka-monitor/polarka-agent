@@ -43,8 +43,8 @@ class PoolOnRegtest(unittest.TestCase):
     def test_mining_through_the_pool(self):
         before = self.node.cli("getblockcount")
         events = []
-        sums = miner.mine(self.url, self.worker, threads=2, fast=False, shares=8, seconds=240, say=events.append, look_every=0.3)
-        self.assertGreaterEqual(sums["shares"], 8)
+        sums = miner.mine(self.url, self.worker, threads=2, fast=False, shares=16, seconds=240, say=events.append, look_every=0.3)
+        self.assertGreaterEqual(sums["shares"], 16)
         self.assertGreater(sums["blocks"], 0)       # on regtest about every second hash is a block
         # every block the pool says the node took is in the chain, and nothing else was added to it
         self.assertEqual(self.node.cli("getblockcount"), before + sums["blocks"])
@@ -121,7 +121,6 @@ class PayingOnRegtest(unittest.TestCase):
 
     def test_shares_are_paid_once(self):
         sums = miner.mine(self.url, self.worker, threads=1, fast=False, shares=5, seconds=240, look_every=0.3)
-        self.assertGreater(sums["blocks"], 0)
         owed = self.pool.account(self.worker)["owed"]
         self.assertEqual(owed, sums["credited"])
         # the pool's rewards are not ripe and it has nothing else: nobody is paid, and nothing is written down

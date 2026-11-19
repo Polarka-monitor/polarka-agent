@@ -188,8 +188,19 @@ hour's blocks stop it at 40 %: an hour is too few blocks to hold a pool to a thi
 ask for work 120 times a minute and for 50 addresses in a block, and is not listened to for ten minutes
 after 20 wrong shares.
 
-Not built: a share target that follows the miner's speed, anything against a miner who keeps back blocks,
-taking back credit for a block that left the chain, and a second pair of eyes on any of it. Until somebody
+The two books, `pool-payouts.jsonl` and the wallet's journal, are held against each other before every round;
+if one of them was lost or put back from an older copy, nothing is paid until a person has looked. One
+process works over a folder at a time. The pool hands out no work while it owes more than `--most-owed` or
+more than its wallet holds, and none to an address whose shares should long have found a block and did not.
+
+An independent reviewer (an AI agent that had not seen the code being written) read the pool at commit
+b4eac9b and found that a lost ledger, a second process or a lost wallet journal paid people twice, that
+nothing bounded what the pool owed, and that the miner searched the same nonces again. Those are mended
+here; nobody else has read the fixes. Still open from that review: stale shares credited for up to five
+seconds after a new block, a payout counted as paid after one block on a server's word, an HTTP server
+without bounds of its own (run it behind a proxy with `--trust-proxy`), and a cap that a stranger can close.
+
+Not built: a share target that follows the miner's speed and taking back credit for a block that left the chain. Until somebody
 else has read it, it must not run on the real network.
 
 ## Code and tests
@@ -203,7 +214,7 @@ library in `native/`, `pool.py` the pool, `payout.py` its payouts and `miner.py`
 
     TN_BIN=/path/to/bin python3 -B -m unittest discover -s tests -t .
 
-149 tests. Those in `test_wallet.py`, `test_cli_mcp.py`, `test_faucet_node.py` and `test_pool_node.py` run against the official
+152 tests. Those in `test_wallet.py`, `test_cli_mcp.py`, `test_faucet_node.py` and `test_pool_node.py` run against the official
 `truenorthd` on regtest
 and a stand-in for a Northbound server (`tests/standin`, copied from the Polarka Wallet's repository); they
 are skipped without the node programs. No test touches a real network.
