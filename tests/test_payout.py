@@ -39,6 +39,11 @@ class FakeWallet:
             raise RuntimeError("the machine fell after the wallet wrote the payment down")
         return dict(p)
 
+    def hand_again(self, txid):
+        p = next(p for p in self.made if p["id"] == txid)
+        p["state"] = self.state
+        return dict(p)
+
 
 class Rules(unittest.TestCase):
     def setUp(self):
@@ -71,7 +76,7 @@ class Rules(unittest.TestCase):
 
     def test_paid_is_what_the_pools_own_node_sees_deep_enough(self):
         deep = {}
-        pay = payout.Payouts(self.wallet, self.folder, minimum=N, depth=lambda txid: deep.get(txid, 0), deep=6)
+        pay = payout.Payouts(self.wallet, self.folder, minimum=N, depth=lambda txid, since=None: deep.get(txid, 0), deep=6)
         pay.run({A: 30 * N})
         self.wallet.made[0]["state"] = "in_block"                    # the wallet server's word
         self.assertEqual(pay.run({A: 30 * N})["state"], "on the way")       # the node does not see it
@@ -81,6 +86,11 @@ class Rules(unittest.TestCase):
         deep["tx1"] = 6
         self.assertEqual(pay.run({A: 30 * N})["state"], "nothing is due")
         self.assertEqual(pay.sums(), {A: (30 * N, 0)})
+
+    def test_who_is_held_is_not_paid(self):
+        done = self.pay.run({A: 30 * N, B: 5 * N}, held={A})
+        self.assertEqual(self.wallet.made[0]["outputs"], [(B, 5 * N)])
+        self.assertEqual(done["paid_now"], "5.00000000")
 
     def test_nothing_due_and_what_is_refused(self):
         self.assertEqual(self.pay.run({A: N - 1})["state"], "nothing is due")
@@ -95,12 +105,12 @@ class Rules(unittest.TestCase):
         self.wallet.spendable = 12 * N
         earned = {A: 30 * N, B: 9 * N, C: 2 * N}
         done = self.pay.run(earned)
-        self.assertEqual(self.wallet.made[0]["outputs"], [(A, 12 * N - payout.MARGIN)])    # who is owed most gets what there is
-        self.assertEqual(done["paid_now"], "11.99000000")
+        self.assertEqual(self.wallet.made[0]["outputs"], [(B, 9 * N), (C, 2 * N)])         # the small debts first
+        self.assertEqual(done["paid_now"], "11.00000000")
         self.wallet.made[0]["state"] = "in_block"
         self.wallet.spendable, self.wallet.per_payment = 1000 * N, 20 * N
         self.pay.run(earned)                                         # the owner's limit for one payment cuts the next round
-        self.assertEqual(self.wallet.made[1]["outputs"], [(A, 18 * N + payout.MARGIN), (B, 2 * N - 2 * payout.MARGIN)])
+        self.assertEqual(self.wallet.made[1]["outputs"], [(A, 20 * N - payout.MARGIN)])     # and A gets what there is
         self.wallet.made[1]["state"] = "in_block"
         self.wallet.per_payment = 1000 * N
         self.pay.run(earned)
@@ -134,13 +144,16 @@ class Rules(unittest.TestCase):
     def test_a_payment_that_did_not_go_through(self):
         self.wallet.state = "kept"
         self.pay.run({A: 30 * N})
-        self.wallet.state = "handed"
-        self.assertEqual(self.pay.run({A: 30 * N})["state"], "on the way")     # tried again through the wallet
-        self.assertEqual([p["memo"] for p in self.wallet.made], [self.pay.memo(1)] * 2)
-        self.assertEqual(self.pay.rounds[1]["txids"], ["tx1", "tx2"])
+        self.assertEqual(self.pay.run({A: 30 * N})["state"], "on the way")     # still not through: shown again, as it was
+        self.assertEqual((len(self.wallet.made), self.wallet.made[0]["state"]), (1, "kept"))
+        self.wallet.state = "unknown"                                # the server forgot it; it may remember it later
         self.pay.run({A: 30 * N})
-        self.assertEqual(len(self.wallet.made), 2)                   # the second one waits for a block: left alone
-        self.wallet.made[0]["state"], self.wallet.made[1]["state"] = "overtaken", "in_block"
+        self.wallet.state = "handed"
+        self.assertEqual(self.pay.run({A: 30 * N})["state"], "on the way")
+        self.pay.run({A: 30 * N})
+        self.assertEqual(len(self.wallet.made), 1)                   # never a second transaction for the round
+        self.assertEqual(self.pay.rounds[1]["txids"], ["tx1"])
+        self.wallet.made[0]["state"] = "in_block"
         self.pay.run({A: 30 * N})
         self.assertEqual(self.pay.sums(), {A: (30 * N, 0)})
 

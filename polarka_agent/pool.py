@@ -19,6 +19,7 @@ import hashlib
 import hmac
 import ipaddress
 import json
+import math
 import os
 import threading
 import time
@@ -42,6 +43,7 @@ MOST_JOBS = 50_000          # headers remembered for one tip; beyond that no new
 MOST = (1 << 256) - 1
 NODE_SILENCE = 30           # seconds without a template after which shares are no longer taken
 UNLUCKY = 0.001             # an address whose shares would have found more blocks with this certainty gets no more work
+UNLUCKY_POOL = 0.000001     # and the same for all the pool's shares together: then nobody gets work
 
 
 class PoolError(Exception):
@@ -52,11 +54,10 @@ class PoolError(Exception):
 
 def at_most(blocks, expected):
     """The chance of finding this few blocks or fewer when `expected` were due (Poisson)."""
-    term = total = pow(2.718281828459045, -expected)
-    for k in range(1, blocks + 1):
-        term *= expected / k
-        total += term
-    return total
+    if expected <= 0:
+        return 1.0
+    log = math.log(expected)
+    return min(1.0, sum(math.exp(k * log - expected - math.lgamma(k + 1)) for k in range(blocks + 1)))
 
 
 def north(value):
@@ -168,23 +169,25 @@ class Node:
         return answer.get("result")
 
 
-def depth_by(node, most=300):
-    """A function that says how many blocks deep a transaction is by this node's own chain (0: not in the last
-    `most` blocks). The node needs no index for it: the blocks are read from the tip back, each one once."""
+def depth_by(node, most=20000):
+    """A function that says how many blocks deep a transaction is by this node's own chain, or 0. The node needs
+    no index for it: the blocks are read from the tip back, each one once, as far as two hours before `since`
+    (the time the payment was made), or 300 blocks when no time is given."""
     seen = {}
 
-    def depth(txid):
-        tip = node.call("getbestblockhash")
-        at, steps = tip, 0
+    def depth(txid, since=None):
+        at, steps = node.call("getbestblockhash"), 0
         while at and steps < most:
             block = seen.get(at)
             if block is None:
                 got = node.call("getblock", at, 1)
-                block = seen[at] = (set(got["tx"]), got.get("previousblockhash"))
-                if len(seen) > 2 * most:
+                block = seen[at] = (set(got["tx"]), got.get("previousblockhash"), got["time"])
+                if len(seen) > most + 100:
                     seen.pop(next(iter(seen)))
             if txid in block[0]:
                 return steps + 1
+            if (since is None and steps >= 300) or (since is not None and block[2] < since - 7200):
+                break
             at, steps = block[1], steps + 1
         return 0
 
@@ -254,8 +257,9 @@ class Cap:
             if info is None:
                 block = self.node.call("getblock", at, 2)
                 first = block["tx"][0]
-                # the owner's blocks are known by what the coinbase pays first; anybody can add an output of nothing
-                ours = (self.is_ours is not None and self.is_ours(at)) or first["vout"][0]["scriptPubKey"].get("hex") in self.own
+                # the owner's blocks are known by who gets most of the reward; anybody can add an output of nothing
+                most = max(first["vout"], key=lambda o: o.get("value", 0))
+                ours = (self.is_ours is not None and self.is_ours(at)) or most["scriptPubKey"].get("hex") in self.own
                 info = (block["time"], ours, block.get("previousblockhash"))
                 if ours or now - block["time"] > 300:
                     self.blocks[at] = info      # "not ours" is kept only for a block old enough for the ledger to know it
@@ -366,7 +370,12 @@ class Pool:
         self.cap, self.guard, self.payouts = cap, guard, payouts
         self.folder, self.most_owed = folder, most_owed
         hold_folder(folder)
-        self.earned_total, self.paid_total, self.assets, self.template_good_at = 0, 0, None, None
+        self.earned_total, self.paid_total, self.flying_total, self.assets, self.template_good_at = 0, 0, 0, None, None
+        self.expected_total, self.found_total, self.last_payout = 0.0, 0, None
+        self.cleared = set()        # addresses the owner let back in by hand: luck-cleared.txt, one a line
+        if os.path.exists(os.path.join(folder, "luck-cleared.txt")):
+            with open(os.path.join(folder, "luck-cleared.txt")) as f:
+                self.cleared = {line.strip().lower() for line in f if line.strip()}
         self.secret = self._secret()
         self.ledger_path = os.path.join(folder, "pool-shares.jsonl")
         self.lock = threading.Lock()
@@ -378,6 +387,9 @@ class Pool:
             cap.is_ours = self.taken.__contains__
         self.boot, self.counter = int.from_bytes(os.urandom(4), "little"), 0
         self._replay()
+        if payouts is not None:     # what was paid is known from the ledger at once, not only after the first round
+            sums = payouts.sums().values()
+            self.paid_total, self.flying_total = sum(p for p, _ in sums), sum(f for _, f in sums)
 
     def _secret(self):
         path = os.path.join(self.folder, "pool.secret")
@@ -413,6 +425,8 @@ class Pool:
         account["earned"] += int(entry["value"])
         account["expected"] += 1.0 / max(int(entry.get("odds", self.ratio)), 1)
         account["blocks"] += 1 if entry.get("accepted") else 0
+        self.expected_total += 1.0 / max(int(entry.get("odds", self.ratio)), 1)
+        self.found_total += 1 if entry.get("accepted") else 0
         self.earned_total += int(entry["value"])
         if entry.get("block"):
             self.blocks.append({"height": entry["height"], "hash": entry["block"], "accepted": entry.get("accepted"),
@@ -449,13 +463,16 @@ class Pool:
         """Called with the lock held. The pool pays for shares whether or not blocks come of them, so it stops
         handing out work when it owes more than it may or more than it has, and to an address whose shares
         should long have found a block and did not."""
-        owed = self.earned_total - self.paid_total
+        owed = self.earned_total - self.paid_total - self.flying_total      # a round on the way has left the wallet already
+        if at_most(self.found_total, self.expected_total) < UNLUCKY_POOL:
+            raise PoolError("LUCK", "the pool's shares should have found %.1f blocks and found %d; somebody keeps blocks back, "
+                                    "and no work is handed out until a person has looked" % (self.expected_total, self.found_total), 503)
         if self.most_owed is not None and owed > self.most_owed:
             raise PoolError("FUNDS", "the pool owes as much as it allows itself to owe; no work until it has paid out", 503)
         if self.assets is not None and owed > self.assets:
             raise PoolError("FUNDS", "the pool owes more than its wallet holds; no work until blocks or coins come in", 503)
         account = self.accounts.get(address)
-        if account is not None and at_most(account["blocks"], account["expected"]) < UNLUCKY:
+        if account is not None and address not in self.cleared and at_most(account["blocks"], account["expected"]) < UNLUCKY:
             raise PoolError("LUCK", "the shares of this address should have found %.1f blocks and found %d; it gets no more work "
                                     "until a person has looked" % (account["expected"], account["blocks"]), 403)
 
@@ -522,6 +539,7 @@ class Pool:
                     # a share for a block that is no longer the tip is worth nothing: ask the node, not the clock
                     if self.node.call("getbestblockhash") != self.template["previousblockhash"]:
                         self.template_at = now - TEMPLATE_AGE
+                        self.jobs, self.job_of, self.seen = {}, {}, set()       # stale at once, whatever the node says next
                     self.tip_seen = now
                 self._fresh_template()
             except (PoolError, OSError):
@@ -575,17 +593,24 @@ class Pool:
             return {"round": None, "state": "this pool does not pay out"}
         with self.lock:
             earned = {a: account["earned"] for a, account in self.accounts.items()}
+            held = {a for a, account in self.accounts.items()
+                    if a not in self.cleared and at_most(account["blocks"], account["expected"]) < UNLUCKY}
         try:
-            return self.payouts.run(earned)
+            self.last_payout = self.payouts.run(earned, held)
+            return self.last_payout
+        except Exception as e:
+            self.last_payout = {"state": "stopped", "why": "%s: %s" % (type(e).__name__, str(e)[:200])}
+            raise
         finally:
-            paid = sum(p for p, _ in self.payouts.sums().values())
+            sums = self.payouts.sums().values()
+            paid, flying = sum(p for p, _ in sums), sum(f for _, f in sums)
             try:
                 held = self.payouts.wallet.balance()
                 assets = sum(int(held.get(k, 0)) for k in ("spendable", "set_aside", "unripe"))
             except Exception:
                 assets = self.assets        # no answer about the wallet: what was known stands
             with self.lock:
-                self.paid_total, self.assets = paid, assets
+                self.paid_total, self.flying_total, self.assets = paid, flying, assets
 
     def tip(self):
         with self.lock:
@@ -601,7 +626,7 @@ class Pool:
         with self.lock:
             shares = sum(a["shares"] for a in self.accounts.values())
             owed = sum(a["earned"] for a in self.accounts.values())
-        return {"service": "polarka-pool", "network": self.chain, "pays_out": self.payouts is not None,
+        return {"service": "polarka-pool", "network": self.chain, "pays_out": self.payouts is not None, "last_payout": self.last_payout,
                 "cap": None if self.cap is None else self.cap.shown(),
                 "pays": "for each share, the block reward without fees divided by share_ratio, less the fee",
                 "share_ratio": self.ratio, "fee_percent": self.fee, "coinbase_tag": TAG.decode(), "pays_blocks_to": self.pay_to,
@@ -721,12 +746,12 @@ def make_server(pool, listen, trust_proxy=False):
 
 def pay_for_ever(pool, every, sleep=time.sleep):
     while True:
-        sleep(every)
         try:
             done = pool.pay_round()
             _say("payout: %s" % json.dumps(done, sort_keys=True))
         except Exception as e:          # the next step looks at the ledgers again; nothing is assumed from this one
             _say("payout failed: %s: %s" % (type(e).__name__, str(e)[:300]))
+        sleep(every)
 
 
 def serve(pool, listen, trust_proxy=False, pay_every=0):

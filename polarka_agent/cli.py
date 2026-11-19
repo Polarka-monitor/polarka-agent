@@ -182,7 +182,7 @@ def run(argv=None, out=sys.stdout):
             cap = Cap(node, own, ((86400, a.cap, max(a.cap - 2, 0)), (3600, a.cap + 8, a.cap + 6))) if a.cap else None
             payouts = Payouts(wallet, folder, units(a.minimum), depth=depth_by(node), deep=a.deep) if a.pay_every else None
             return pool_serve(Pool(node, a.chain, pay_to, folder, a.ratio, a.fee, cap=cap, guard=Guard(), payouts=payouts,
-                                   most_owed=units(a.most_owed)),
+                                   most_owed=units(a.most_owed) if a.pay_every else None),
                               a.listen, a.trust_proxy, a.pay_every)
         wallet = Wallet(folder)
         if a.cmd == "mcp":
@@ -253,6 +253,8 @@ def run(argv=None, out=sys.stdout):
         return show({"error": e.kind, "message": str(e)}, 2)
     except BadInput as e:
         return show({"error": "INPUT", "message": str(e)}, 2)
+    except ValueError as e:     # a pool that does not start says why: a second process, a ledger that cannot be read
+        return show({"error": "REFUSED", "message": str(e)}, 2)
     except (NoLibrary, PoolSaid) as e:
         return show({"error": "POOL" if isinstance(e, PoolSaid) else "LIBRARY", "message": str(e)}, 2)
     except ServerError as e:

@@ -371,6 +371,19 @@ class Wallet:
 
     # ------------------------------------------------------------------------------------------ paying
 
+    def hand_again(self, txid):
+        """Shows a payment whose outcome is open to the server once more. Nothing new is signed: it is the
+        transaction that was written down, or none."""
+        with self:
+            payments = self._journal()
+            p = payments.get(txid)
+            if p is None:
+                raise Refused("NOT_OPEN", "there is no payment with this id")
+            self._settle(payments, self.look())
+            if p["state"] in OPEN:
+                self._hand_over(p)
+            return self._shown(p)
+
     def pay(self, outputs, memo=None, dry_run=False):
         """Pays [(address, amount in base units)] in one transaction, within the owner's limits.
         Returns what was done. With dry_run nothing is signed and nothing leaves the machine."""

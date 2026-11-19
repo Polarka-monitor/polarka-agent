@@ -170,6 +170,9 @@ class PoolRules(unittest.TestCase):
     def test_no_work_when_the_pool_owes_too_much_or_an_address_finds_no_blocks(self):
         self.assertAlmostEqual(pool.at_most(0, 7.0), 0.000912, places=5)
         self.assertAlmostEqual(pool.at_most(2, 3.0), 0.42319, places=4)
+        self.assertGreater(pool.at_most(900, 800.0), 0.99)           # large numbers: more found than due is no bad luck
+        self.assertLess(pool.at_most(600, 800.0), 1e-12)
+        self.assertEqual(pool.at_most(0, 0.0), 1.0)
         work = self.pool.work(ALICE)
         self.pool.share(work["job"], search(work, want_block=False))
         self.pool.most_owed = 30 * pool.UNITS                        # one share is 30.4
@@ -183,6 +186,10 @@ class PoolRules(unittest.TestCase):
         self.assertEqual(self.refused("LUCK", self.pool.work, ALICE).status, 403)
         self.pool.accounts[ALICE]["blocks"] = 1
         self.pool.work(ALICE)
+        self.pool.expected_total, self.pool.found_total = 14.0, 0    # all the pool's shares together found nothing
+        self.assertEqual(self.refused("LUCK", self.pool.work, BOB).status, 503)
+        self.pool.found_total = 3
+        self.pool.work(BOB)
 
     def test_a_share_for_a_tip_that_moved_is_stale_at_once(self):
         work = self.pool.work(ALICE)
@@ -272,9 +279,9 @@ class FakeChain:
             ago, whose = self.blocks[i]
             coinbase = "03b80b00" + (pool.TAG.hex() if whose == "pool" else "aa")
             script = "5220" + ("77" * 32 if whose == "own" else "88" * 32)
-            outs = [{"scriptPubKey": {"hex": script}}]
-            if whose == "framed":           # a stranger's block with an output of nothing to the owner's address
-                outs.append({"scriptPubKey": {"hex": "5220" + "77" * 32}})
+            outs = [{"value": 512, "scriptPubKey": {"hex": script}}]
+            if whose == "framed":           # a stranger's block with outputs of nothing to the owner's address
+                outs = [{"value": 0, "scriptPubKey": {"hex": "5220" + "77" * 32}}] + outs + [{"value": 0, "scriptPubKey": {"hex": "5220" + "77" * 32}}]
             block = {"time": self.now - ago, "tx": [{"vin": [{"coinbase": coinbase}], "vout": outs}]}
             if i:
                 block["previousblockhash"] = "h%d" % (i - 1)

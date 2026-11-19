@@ -8,9 +8,10 @@ One round is one transaction to many addresses. The rules that keep an address f
 - After a fall in the middle of a round, the wallet's own journal says what happened: the wallet writes a
   payment down before anything leaves the machine, under a note that names the round. A round with no such
   payment was never signed and is taken back; one with a payment goes on from where it stood.
-- A round whose payment did not go through is tried again through the wallet, which builds every new payment
-  on a coin of the one before, so that only one of them can ever be in a block. A payment that waits for a
-  block is left alone.
+- A round whose payment did not go through is shown to the server again as it was written down. No second
+  transaction is ever made for a round: a server that forgets a payment and remembers it later would
+  otherwise see two that do not stand against each other. A payment that never goes through stops the
+  payouts until its owner forgets it by hand (wallet forget), which takes the round back.
 - The two books must agree before anything is paid: every payment the ledger names must be in the wallet's
   journal, and every payment the wallet made for a round must be in the ledger. A ledger that was lost or
   put back from an older copy, or a wallet without its journal, stops the payouts; a person has to look.
@@ -177,27 +178,27 @@ class Payouts:
         if any(p["state"] == "in_block" for p in mine):
             # The wallet has a server's word for it. With a node of the pool's own, the round is paid when that
             # node sees the payment `deep` blocks down; until then it is on the way, also if a block was undone.
-            if self.depth is None or max(self.depth(p["id"]) for p in mine if p["state"] == "in_block") >= self.deep:
+            if self.depth is None or max(self.depth(p["id"], r["t"]) for p in mine if p["state"] == "in_block") >= self.deep:
                 self._write({"event": "paid", "round": number})
                 return None
             return number
         if any(p["state"] == "handed" for p in mine):
             return number                                   # it waits for a block: left alone
         if any(p["state"] in OPEN for p in mine):
-            try:
-                again = self.wallet.pay(sorted(r["pay"].items()), self.memo(number))
-                if again["id"] not in r["txids"]:
-                    self._write({"event": "sent", "round": number, "txid": again["id"]})
-            except Refused:
-                pass
+            for p in mine:
+                if p["state"] in OPEN:
+                    try:
+                        self.wallet.hand_again(p["id"])     # the same transaction once more, never a new one
+                    except Refused:
+                        pass
             return number
         # every payment of the round is overtaken or forgotten: none of them can be in a block any more
         self._write({"event": "void", "round": number, "why": "its payments are dead"})
         return None
 
-    def run(self, earned):
+    def run(self, earned, held=()):
         """One step: settles the round on the way, and if none is left on the way, makes the next one from
-        {address: earned units}. Returns what it did. One caller at a time."""
+        {address: earned units}. Addresses in `held` are not paid. Returns what it did. One caller at a time."""
         with self.lock:
             waiting = self._settle()
             if waiting is not None:
@@ -206,7 +207,8 @@ class Payouts:
             owed = {a: e - sum(sums.get(a, (0, 0))) for a, e in earned.items()}
             if any(v < 0 for v in owed.values()):
                 raise BooksDisagree("more was paid than was earned; the ledgers do not agree and nothing is paid")
-            due = sorted(((v, a) for a, v in owed.items() if v >= self.minimum), reverse=True)[:self.most_payees]
+            # the smallest debts first: when there is not enough for all, one large creditor does not take every round
+            due = sorted((v, a) for a, v in owed.items() if v >= self.minimum and a not in held)[:self.most_payees]
             if not due:
                 return {"round": None, "state": "nothing is due", "paid_now": north(0)}
             try:
