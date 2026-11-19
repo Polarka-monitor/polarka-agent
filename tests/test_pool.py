@@ -119,7 +119,7 @@ class PoolRules(unittest.TestCase):
         header, key, share = bytes.fromhex(work["header"]), bytes.fromhex(work["seed"]), int(work["share_target"], 16)
         low = next(n for n in range(10000) if int.from_bytes(hashlib.sha256(key + header + n.to_bytes(4, "little")).digest(), "little") > share)
         self.refused("LOW", self.pool.share, work["job"], low)
-        good = search(work)
+        good = search(work, want_block=False)
         job_id, mark = work["job"].split(".")
         self.refused("INPUT", self.pool.share, job_id + "." + "0" * len(mark), good)        # a mark that was made up
         self.refused("STALE", self.pool.share, "00" * 8 + "." + mark, good)                 # a job that never was
@@ -164,9 +164,9 @@ class PoolRules(unittest.TestCase):
 
     def test_the_ledger_is_what_the_pool_owes(self):
         work = self.pool.work(ALICE)
-        first = search(work)
+        first = search(work, want_block=False)
         self.pool.share(work["job"], first)
-        self.pool.share(work["job"], search(work, start=first + 1))
+        self.pool.share(work["job"], search(work, want_block=False, start=first + 1))
         again = self.make()
         self.assertEqual(again.account(ALICE)["earned"], self.pool.account(ALICE)["earned"])
         self.assertEqual(again.account(ALICE)["shares"], 2)
@@ -252,7 +252,9 @@ class CapRules(unittest.TestCase):
     def cap(self, blocks, **more):
         self.now = [100000.0]
         self.chain = FakeChain(self.now[0], blocks)
-        return pool.Cap(self.chain, [bytes.fromhex("5220" + "77" * 32)], clock=lambda: self.now[0], **more)
+        more.setdefault("stops", ((3600, 32, 30), (86400, 32, 30)))
+        return pool.Cap(self.chain, [bytes.fromhex("5220" + "77" * 32)], clock=lambda: self.now[0],
+                        is_ours=lambda h: self.chain.blocks[int(h[1:])][1] == "pool", **more)
 
     def test_the_pool_and_the_owner_count_together(self):
         day = [(90000, "x")] + [(80000 - i * 100, "x") for i in range(60)]        # one block older than a day, 60 within it
@@ -260,7 +262,14 @@ class CapRules(unittest.TestCase):
         cap = self.cap(day + hour)
         self.assertEqual(cap.measure(), {3600: (7, 20), 86400: (7, 80)})
         self.assertTrue(cap.is_closed())                              # 35 % of the last hour
-        self.assertEqual(cap.shown()["windows"]["3600"], {"ours": 7, "blocks": 20})
+        self.assertEqual(cap.shown()["windows"]["3600"], {"ours": 7, "blocks": 20, "stop_percent": 32, "resume_percent": 30})
+        # as the pool is started: 32 % is for the day, an hour stops it only at 40 %; and a tag alone is nobody's block
+        usual = pool.Cap(self.chain, [], clock=lambda: self.now[0])
+        self.assertEqual(usual.measure(), {86400: (0, 80), 3600: (0, 20)})
+        usual = self.cap(day + hour, stops=((86400, 32, 30), (3600, 40, 38)))
+        self.assertFalse(usual.is_closed())                           # 35 % of the hour, 9 % of the day
+        usual = self.cap(day + hour + [(50, "pool")] * 2, stops=((86400, 32, 30), (3600, 40, 38)))
+        self.assertTrue(usual.is_closed())                            # 9 of 22 in the hour
 
     def test_it_opens_again_only_below_the_lower_mark(self):
         cap = self.cap([(3000 - i * 100, w) for i, w in enumerate(["pool"] * 7 + ["x"] * 13)])
@@ -337,7 +346,7 @@ class GuardRules(unittest.TestCase):
         low = [n for n in range(10000) if int.from_bytes(hashlib.sha256(key + header + n.to_bytes(4, "little")).digest(), "little") > share][:3]
         for nonce in low:
             self.assertEqual(self.kind(self.pool.share, work["job"], nonce, "203.0.113.9"), "LOW")
-        good = search(work)
+        good = search(work, want_block=False)
         self.assertEqual(self.kind(self.pool.share, work["job"], good, "203.0.113.9"), "BANNED")
         self.assertEqual(self.kind(self.pool.work, ALICE, "203.0.113.9"), "BANNED")
         self.assertTrue(self.pool.share(work["job"], good, "203.0.113.10")["ok"])        # the share itself was good

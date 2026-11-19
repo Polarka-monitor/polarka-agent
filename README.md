@@ -182,8 +182,9 @@ wallet's own journal, so nobody is paid twice and nobody is forgotten. Block rew
 blocks, so a pool needs coins of its own to pay from before its first rewards are ripe, and whenever it has
 found fewer blocks than its shares were worth.
 
-The pool hands out no work while its blocks, counted together with those of the addresses in `--own-mining`,
-are 32 % or more of the blocks of the last hour or the last day, and starts again below 30 %. One place may
+The pool hands out no work while the blocks its node took from it, counted together with those of the
+addresses in `--own-mining`, are 32 % or more of the blocks of the last day, and starts again below 30 %. An
+hour's blocks stop it at 40 %: an hour is too few blocks to hold a pool to a third. One place may
 ask for work 120 times a minute and for 50 addresses in a block, and is not listened to for ten minutes
 after 20 wrong shares.
 

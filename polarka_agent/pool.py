@@ -186,14 +186,17 @@ def place(source):
 
 
 class Cap:
-    """Keeps the pool, counted together with the mining of whoever runs it, under a part of the network: when
-    that part of the blocks of the last hour or of the last day reaches `stop` percent, no work is handed out
-    until it is below `resume` in both. The pool's blocks are known by their tag, the owner's by the scripts
-    they pay. A window with fewer than `least` blocks says nothing."""
+    """Keeps the pool, counted together with the mining of whoever runs it, under a part of the network. `stops`
+    are (seconds of a window, percent at which no work is handed out, percent below which it is again): by
+    default 32 % of the blocks of a day, and 40 % of the blocks of an hour as a stop for a sudden rise (an
+    hour is some thirty blocks, and a pool with a quarter of the network has a third of them by chance in
+    one hour of five). The pool's blocks are the ones its own ledger says the node took, never the ones that
+    merely carry its tag, which anybody can write; the owner's are known by the scripts they pay. A window
+    with fewer than `least` blocks says nothing."""
 
-    def __init__(self, node, own_scripts=(), stop=32, resume=30, windows=(3600, 86400), least=10, every=60, clock=time.time):
-        self.node, self.own = node, {s.hex() for s in own_scripts}
-        self.stop, self.resume, self.windows, self.least, self.every, self.clock = stop, resume, windows, least, every, clock
+    def __init__(self, node, own_scripts=(), stops=((86400, 32, 30), (3600, 40, 38)), least=10, every=60, clock=time.time, is_ours=None):
+        self.node, self.own, self.is_ours = node, {s.hex() for s in own_scripts}, is_ours
+        self.stops, self.windows, self.least, self.every, self.clock = stops, [w for w, _, _ in stops], least, every, clock
         self.blocks, self.closed, self.checked, self.last = {}, False, None, {}
         self.lock = threading.Lock()
 
@@ -207,7 +210,7 @@ class Cap:
             if info is None:
                 block = self.node.call("getblock", at, 2)
                 first = block["tx"][0]
-                ours = TAG.hex() in first["vin"][0].get("coinbase", "") or any(o["scriptPubKey"].get("hex") in self.own for o in first["vout"])
+                ours = (self.is_ours is not None and self.is_ours(at)) or any(o["scriptPubKey"].get("hex") in self.own for o in first["vout"])
                 info = self.blocks[at] = (block["time"], ours, block.get("previousblockhash"))
             if info[0] < horizon:
                 break
@@ -225,16 +228,17 @@ class Cap:
                 except (OSError, KeyError, TypeError, IndexError):
                     return self.closed          # no answer: what was decided last stands
                 self.checked = now
-                parts = [100.0 * ours / total for ours, total in self.last.values() if total >= self.least]
-                if any(part >= self.stop for part in parts):
+                parts = [(100.0 * self.last[w][0] / self.last[w][1], stop, resume) for w, stop, resume in self.stops
+                         if self.last[w][1] >= self.least]
+                if any(part >= stop for part, stop, _ in parts):
                     self.closed = True
-                elif all(part < self.resume for part in parts):
+                elif all(part < resume for part, _, resume in parts):
                     self.closed = False
             return self.closed
 
     def shown(self):
-        return {"stop_percent": self.stop, "resume_percent": self.resume, "closed": self.closed,
-                "windows": {str(w): {"ours": o, "blocks": t} for w, (o, t) in self.last.items()}}
+        return {"closed": self.closed, "windows": {str(w): dict(zip(("ours", "blocks"), self.last.get(w, (None, None))),
+                                                                stop_percent=stop, resume_percent=resume) for w, stop, resume in self.stops}}
 
 
 class Guard:
@@ -317,7 +321,9 @@ class Pool:
         self.ledger_lock = threading.Lock()
         self.template, self.template_at, self.key, self.key_height = None, 0, None, None
         self.jobs, self.job_of, self.seen = {}, {}, set()
-        self.accounts, self.blocks = {}, []
+        self.accounts, self.blocks, self.taken = {}, [], set()
+        if cap is not None and cap.is_ours is None:
+            cap.is_ours = self.taken.__contains__
         self.boot, self.counter = int.from_bytes(os.urandom(4), "little"), 0
         self._replay()
 
@@ -356,6 +362,8 @@ class Pool:
         if entry.get("block"):
             self.blocks.append({"height": entry["height"], "hash": entry["block"], "accepted": entry.get("accepted"),
                                 "time": entry["t"]})
+            if entry.get("accepted"):
+                self.taken.add(entry["block"])
 
     def _write(self, entry):
         with self.ledger_lock:
@@ -394,8 +402,8 @@ class Pool:
             raise PoolError("ADDRESS", "that is not an address of this network that can be paid: %s" % e)
         address = address.lower()
         if self.cap is not None and self.cap.is_closed():
-            raise PoolError("CAP", "the pool has found %d %% of the network's blocks or more and hands out no work until it is "
-                                   "below %d %%; mine alone or elsewhere meanwhile" % (self.cap.stop, self.cap.resume), 503)
+            raise PoolError("CAP", "the pool has found as large a part of the network's blocks as it allows itself and hands out "
+                                   "no work until that part is smaller; mine alone or elsewhere meanwhile", 503)
         with self.lock:
             template = self._fresh_template()
             if self.guard is not None:

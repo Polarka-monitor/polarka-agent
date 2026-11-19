@@ -123,7 +123,7 @@ def run(argv=None, out=sys.stdout):
     c.add_argument("--pay-every", type=int, default=0, help="seconds between payout rounds from the wallet in --dir; 0: no payouts")
     c.add_argument("--minimum", default="1", help="NORTH owed from which an address is paid")
     c.add_argument("--own-mining", help="a file with the addresses the pool's owner mines to elsewhere, one a line; they count for the cap")
-    c.add_argument("--cap", type=int, default=32, help="percent of the network's blocks at which no work is handed out; 0: no cap")
+    c.add_argument("--cap", type=int, default=32, help="percent of a day's blocks at which no work is handed out (and 8 more of an hour's); 0: no cap")
     c.add_argument("--trust-proxy", action="store_true", help="take the asker's address from X-Forwarded-For")
     c.add_argument("--listen", default="127.0.0.1:8690")
     c.add_argument("--ratio", type=int, default=2048, help="shares in a block on average")
@@ -177,7 +177,7 @@ def run(argv=None, out=sys.stdout):
             if a.own_mining:
                 with open(os.path.expanduser(a.own_mining)) as f:
                     own = [script_for_address(a.chain, line.strip()) for line in f if line.strip()]
-            cap = Cap(node, own, a.cap, max(a.cap - 2, 0)) if a.cap else None
+            cap = Cap(node, own, ((86400, a.cap, max(a.cap - 2, 0)), (3600, a.cap + 8, a.cap + 6))) if a.cap else None
             payouts = Payouts(wallet, folder, units(a.minimum)) if a.pay_every else None
             return pool_serve(Pool(node, a.chain, pay_to, folder, a.ratio, a.fee, cap=cap, guard=Guard(), payouts=payouts),
                               a.listen, a.trust_proxy, a.pay_every)

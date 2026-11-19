@@ -151,7 +151,8 @@ class PayingOnRegtest(unittest.TestCase):
         self.node.mine(3, SINK)
         tagged = len(self.pool.blocks)
         height = self.node.cli("getblockcount")
-        cap = pool.Cap(self.rpc, [], least=1)
+        cap = pool.Cap(self.rpc, [], least=1, is_ours=self.pool.taken.__contains__)
+        self.assertEqual(pool.Cap(self.rpc, [], least=1).measure()[86400][0], 0)      # the tag alone counts for nothing
         ours, blocks = cap.measure()[86400]
         self.assertEqual((ours, blocks), (len([b for b in self.pool.blocks if b["accepted"]]), height))
         self.assertLessEqual(ours, tagged)
