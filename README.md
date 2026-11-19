@@ -153,17 +153,45 @@ The asker's side is `postage URL --most 0.05` (for an agent the tool `north_post
 quote, pays it from the wallet and shows the token. The owner's limits hold as for any payment, and nothing
 above `--most` is paid whatever the gate asks.
 
+## Mining for a pool (in work, regtest only)
+
+This branch holds the first stage of a pool that pays for each share, and a miner for it. It is not released
+and has run on regtest only; `pool-serve` refuses any other chain.
+
+    python3 -m polarka_agent build-rx --randomx /path/to/truenorth/src/randomx
+    python3 -m polarka_agent --dir POOL-FOLDER pool-serve --chain regtest --rpc-url http://127.0.0.1:PORT \
+        --rpc-cookie /path/to/.cookie --pay-to ADDRESS
+    python3 -m polarka_agent mine http://127.0.0.1:8690 --address ADDRESS --threads 4
+
+`build-rx` builds a small C library around RandomX as it stands in the TrueNorth sources (`native/`); it needs
+cmake and a C++ compiler, and nothing else in this package needs it. The wallet stays standard library only.
+
+The pool takes a block template from its own node, gives every asker a header of its own, checks the proof
+of work of each nonce sent back, and writes one line into `pool-shares.jsonl` for each share: that file is
+what the pool owes. A share is a header whose hash is at or below 2048 times the network's target, and is
+worth the block reward without fees divided by 2048, less the fee. A share that is also a block goes to the
+node. When the node does not answer, the pool hands out no work.
+
+The calls: `GET /v1/pool`, `GET /v1/work?address=`, `GET /v1/tip`, `POST /v1/share {"job", "nonce"}`,
+`GET /v1/account?address=`, `GET /v1/blocks`.
+
+Not built yet: paying out what is owed, the bound on the pool's part of the network (it is to stop handing
+out work above a third), limits on one asker, and a second pair of eyes on any of it. Until those exist it
+must not run on the real network.
+
 ## Code and tests
 
 Python 3.9 or later, standard library only. `polarka_agent/keys.py` and `tx.py` hold the keys, addresses, the
 signature hash and signing; they come from the cold address tool
 (github.com/severka-monitor/truenorth-cold-address) and are checked against its published P2QRH test vectors.
 `server.py` is the client for a wallet server, `wallet.py` the wallet, `cli.py` and `mcp.py` the two faces,
-`faucet.py` the faucet and its asker, `postage.py` the postage gate.
+`faucet.py` the faucet and its asker, `postage.py` the postage gate, `rx.py` the proof of work through the
+library in `native/`, `pool.py` the pool and `miner.py` its miner.
 
     TN_BIN=/path/to/bin python3 -B -m unittest discover -s tests -t .
 
-112 tests. Those in `test_wallet.py`, `test_cli_mcp.py` and `test_faucet_node.py` run against the official `truenorthd` on regtest
+130 tests. Those in `test_wallet.py`, `test_cli_mcp.py`, `test_faucet_node.py` and `test_pool_node.py` run against the official
+`truenorthd` on regtest
 and a stand-in for a Northbound server (`tests/standin`, copied from the Polarka Wallet's repository); they
 are skipped without the node programs. No test touches a real network.
 

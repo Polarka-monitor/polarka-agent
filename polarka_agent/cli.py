@@ -12,6 +12,8 @@ import time
 
 from . import __version__
 from .keys import BadInput
+from .miner import PoolSaid
+from .rx import NoLibrary
 from .server import ServerError
 from .wallet import Refused, Wallet, north, units
 
@@ -103,6 +105,24 @@ def run(argv=None, out=sys.stdout):
     c.add_argument("--bits", type=int, default=20, help="zero bits of work asked for when the faucet is quiet")
     c.add_argument("--trust-proxy", action="store_true", help="take the asker's address from X-Forwarded-For")
     c.add_argument("--per-source", type=int, default=2, help="payments one place (an IPv4 address or an IPv6 /48) may get in a day")
+    c = sub.add_parser("build-rx", help="build the proof-of-work library that mining and the pool need")
+    c.add_argument("--randomx", required=True, help="the folder src/randomx of the TrueNorth sources")
+    c.add_argument("--cmake", help="the cmake program, if it is not on the path")
+    c = sub.add_parser("mine", help="mine for a pool to an address; the wallet is not touched")
+    c.add_argument("url", help="the pool")
+    c.add_argument("--address", required=True, help="the address the pool writes the shares down for")
+    c.add_argument("--threads", type=int, default=1)
+    c.add_argument("--light", action="store_true", help="without the 2 GiB table: tens of hashes a second, for trying it out")
+    c.add_argument("--shares", type=int, help="stop after this many shares were taken")
+    c.add_argument("--seconds", type=int, help="stop after this many seconds")
+    c = sub.add_parser("pool-serve", help="be a pool that writes down shares (stage 1: regtest only, no payouts); --dir is its folder")
+    c.add_argument("--chain", required=True, choices=("main", "regtest"))
+    c.add_argument("--rpc-url", required=True, help="the pool's own node, for example http://127.0.0.1:9554")
+    c.add_argument("--rpc-cookie", required=True, help="the node's .cookie file")
+    c.add_argument("--pay-to", required=True, help="the address the blocks pay")
+    c.add_argument("--listen", default="127.0.0.1:8690")
+    c.add_argument("--ratio", type=int, default=2048, help="shares in a block on average")
+    c.add_argument("--fee", type=int, default=5, help="the pool's fee in percent")
     a = p.parse_args(argv)
     folder = os.path.expanduser(a.dir)
 
@@ -126,6 +146,22 @@ def run(argv=None, out=sys.stdout):
             return show({"folder": folder, "first_address": first, "words": made,
                          "note": "Write the words on paper now. They are the wallet. They are also in wallet.json, which only you may read; "
                                  "whoever reads that file can spend. The wallet pays nothing until you write limits.json."})
+        if a.cmd == "build-rx":
+            from .rx import build
+            return show({"built": build(a.randomx, a.cmake)})
+        if a.cmd == "mine":
+            from .miner import mine
+            if not 1 <= a.threads <= 256:
+                raise Refused("INPUT", "--threads is 1 to 256")
+            return show(mine(a.url, a.address, a.threads, not a.light, a.shares, a.seconds,
+                             say=lambda event: sys.stderr.write(json.dumps(event) + "\n")))
+        if a.cmd == "pool-serve":
+            from .pool import Node, Pool, serve as pool_serve
+            if a.chain != "regtest":
+                raise Refused("STAGE", "the pool is at stage 1 and has run on regtest only; it does not start on another chain")
+            if not 1 <= a.ratio <= 1 << 20 or not 0 <= a.fee <= 50:
+                raise Refused("INPUT", "--ratio is 1 to 1048576 and --fee 0 to 50")
+            return pool_serve(Pool(Node(a.rpc_url, os.path.expanduser(a.rpc_cookie)), a.chain, a.pay_to, folder, a.ratio, a.fee), a.listen)
         wallet = Wallet(folder)
         if a.cmd == "mcp":
             from .mcp import serve
@@ -195,6 +231,8 @@ def run(argv=None, out=sys.stdout):
         return show({"error": e.kind, "message": str(e)}, 2)
     except BadInput as e:
         return show({"error": "INPUT", "message": str(e)}, 2)
+    except (NoLibrary, PoolSaid) as e:
+        return show({"error": "POOL" if isinstance(e, PoolSaid) else "LIBRARY", "message": str(e)}, 2)
     except ServerError as e:
         shown = {"error": "SERVER", "status": e.status, "kind": e.kind, "message": str(e)}
         if e.said:
