@@ -153,10 +153,10 @@ The asker's side is `postage URL --most 0.05` (for an agent the tool `north_post
 quote, pays it from the wallet and shows the token. The owner's limits hold as for any payment, and nothing
 above `--most` is paid whatever the gate asks.
 
-## Mining for a pool (in work, regtest only)
+## Mining for a pool (in work)
 
-This branch holds a pool that pays for each share, and a miner for it. It is not released, nobody else has
-read it, and it has run on regtest only; `pool-serve` refuses any other chain.
+This branch holds a pool that pays for each share, and a miner for it. It is not released and no person outside
+has read it; it runs on main since 20 November 2026, first with its owner's miners only.
 
     python3 -m polarka_agent build-rx --randomx /path/to/truenorth/src/randomx
     python3 -m polarka_agent --dir POOL-WALLET pool-serve --chain regtest --rpc-url http://127.0.0.1:PORT \

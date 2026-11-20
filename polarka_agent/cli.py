@@ -115,7 +115,7 @@ def run(argv=None, out=sys.stdout):
     c.add_argument("--light", action="store_true", help="without the 2 GiB table: tens of hashes a second, for trying it out")
     c.add_argument("--shares", type=int, help="stop after this many shares were taken")
     c.add_argument("--seconds", type=int, help="stop after this many seconds")
-    c = sub.add_parser("pool-serve", help="be a pool that pays for shares (regtest only so far); --dir is its folder and its wallet")
+    c = sub.add_parser("pool-serve", help="be a pool that pays for shares; --dir is its folder and its wallet")
     c.add_argument("--chain", required=True, choices=("main", "regtest"))
     c.add_argument("--rpc-url", required=True, help="the pool's own node, for example http://127.0.0.1:9554")
     c.add_argument("--rpc-cookie", required=True, help="the node's .cookie file")
@@ -170,8 +170,6 @@ def run(argv=None, out=sys.stdout):
             from .keys import script_for_address
             from .payout import Payouts
             from .pool import Cap, Guard, Node, Pool, depth_by, serve as pool_serve
-            if a.chain != "regtest":
-                raise Refused("STAGE", "the pool has run on regtest only and nobody else has read it; it does not start on another chain")
             if not 1 <= a.ratio <= 1 << 20 or not 0 <= a.fee <= 50 or not 0 <= a.cap <= 50 or a.pay_every < 0:
                 raise Refused("INPUT", "--ratio is 1 to 1048576, --fee 0 to 50, --cap 0 to 50, --pay-every 0 or more")
             wallet = Wallet(folder) if a.pay_every or not a.pay_to else None

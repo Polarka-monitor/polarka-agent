@@ -5,7 +5,7 @@ the coinbase that nobody else gets), checks the proof of work of what comes back
 for it and hands a share that is also a block to the node. What it owes is paid out in rounds (payout.py).
 Cap keeps the pool under a part of the network, Guard bounds what one place may ask and send.
 
-It has run on regtest only and nobody else has read it; `pool-serve` refuses any other chain. Not here: a
+It runs on main since 20 November 2026, first with its owner's miners only; no person outside has read it yet. Not here: a
 share target that follows the miner's speed, anything against a miner who keeps back the blocks he finds,
 and taking back what was credited for a block that later left the chain.
 
