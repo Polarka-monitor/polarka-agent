@@ -253,6 +253,7 @@ def make_handler(gate, upstream, trust_proxy, routes=()):
     class H(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         server_version = "polarka-postage"
+        timeout = 60                # a client that announces a body and sends nothing does not hold a thread for ever
 
         def source(self):
             if trust_proxy:

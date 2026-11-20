@@ -224,29 +224,73 @@ class Stamps:
     def __init__(self, wallet, rpc, folder, every=600, most_waiting=2000, clock=time.time):
         self.wallet, self.rpc, self.every, self.most_waiting, self.clock = wallet, rpc, every, most_waiting, clock
         self.lock = threading.Lock()
+        # stamps.json keeps only what changes (the batches without their digests, the blocks read); the digests of a
+        # batch go once into batches/<number> when it is made, and what waits is appended to waiting.log, one line
+        # each, so that taking a digest no longer rewrites everything taken before it
         self.book = os.path.join(folder, "stamps.json")
+        self.shelf = os.path.join(folder, "batches")
+        self.log = os.path.join(folder, "waiting.log")
+        os.makedirs(self.shelf, mode=0o700, exist_ok=True)
         try:
             with open(self.book) as f:
                 self.state = json.load(f)
         except FileNotFoundError:
             self.state = {"waiting": [], "batches": [], "scanned": None, "last": 0}
+        moved = False
+        for i, b in enumerate(self.state["batches"]):          # the format before: digests inside stamps.json
+            if "digests" in b:
+                self._shelve(i, b.pop("digests"))
+                moved = True
         self.where = {}             # digest -> number of its batch
         for i, b in enumerate(self.state["batches"]):
             if not b.get("dead"):
-                for d in b["digests"]:
+                for d in self._digests(i):
                     self.where[d] = i
-        self.waiting = set(self.state["waiting"])
+        self.waiting = set(self.state.get("waiting", []))
+        try:
+            with open(self.log) as f:
+                for line in f:
+                    d = line.strip()
+                    if DIGEST.match(d):                        # a line torn by a crash is not a digest
+                        self.waiting.add(d)
+        except FileNotFoundError:
+            pass
+        self.waiting -= set(self.where)                        # a crash between a batch and the log's rewrite
         self.trees = {}             # number of a batch -> its paths, worked out once
+        if moved or self.state.get("waiting"):
+            self._rewrite_log()
+            self._save()
 
-    def _save(self):
-        self.state["waiting"] = sorted(self.waiting)
-        tmp = self.book + ".new"
+    @staticmethod
+    def _write(path, text):
+        tmp = path + ".new"
         with open(tmp, "w") as f:
-            json.dump(self.state, f, separators=(",", ":"))
+            f.write(text)
             f.flush()
             os.fsync(f.fileno())
         os.chmod(tmp, 0o600)
-        os.replace(tmp, self.book)
+        os.replace(tmp, path)
+
+    def _save(self):
+        self.state.pop("waiting", None)                        # kept in waiting.log
+        self._write(self.book, json.dumps(self.state, separators=(",", ":")))
+
+    def _shelve(self, i, digests):
+        self._write(os.path.join(self.shelf, str(i)), "".join(d + "\n" for d in digests))
+
+    def _digests(self, i):
+        with open(os.path.join(self.shelf, str(i))) as f:
+            return [line.strip() for line in f if line.strip()]
+
+    def _append(self, digest):
+        with open(self.log, "a") as f:
+            f.write(digest + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(self.log, 0o600)
+
+    def _rewrite_log(self):
+        self._write(self.log, "".join(d + "\n" for d in sorted(self.waiting)))
 
     def next_batch(self):
         return int(max(self.state["last"] + self.every, self.clock()))
@@ -260,8 +304,8 @@ class Stamps:
             if digest not in self.where and digest not in self.waiting:
                 if len(self.waiting) >= self.most_waiting:
                     raise Refused("BUSY", "the next batch is full; ask again after %d" % self.next_batch())
+                self._append(digest)
                 self.waiting.add(digest)
-                self._save()
             return self._status(digest)
 
     def _status(self, digest):
@@ -277,7 +321,7 @@ class Stamps:
         if paths is None:
             if len(self.trees) >= 32:
                 self.trees.pop(next(iter(self.trees)))
-            paths = self.trees[i] = tree([bytes.fromhex(d) for d in sorted(b["digests"])])[1]
+            paths = self.trees[i] = tree([bytes.fromhex(d) for d in sorted(self._digests(i))])[1]
         tip = self.state["scanned"] or b["block"]["height"]
         return {"version": VERSION, "digest": digest, "state": "stamped", "root": b["root"],
                 "path": [{"side": s, "hash": h.hex()} for s, h in paths[bytes.fromhex(digest)]],
@@ -310,14 +354,16 @@ class Stamps:
                 except Exception:
                     raw = None                                 # read with the block later
                 with self.lock:
-                    self.state["batches"].append({"root": root.hex(), "digests": due, "txid": done["id"], "transaction": raw,
-                                                  "made": int(now), "block": None})
-                    i = len(self.state["batches"]) - 1
+                    i = len(self.state["batches"])
+                    self._shelve(i, due)
+                    self.state["batches"].append({"root": root.hex(), "count": len(due), "txid": done["id"],
+                                                  "transaction": raw, "made": int(now), "block": None})
                     for d in due:
                         self.where.setdefault(d, i)
                         self.waiting.discard(d)
                     self.state["last"] = now
                     self._save()
+                    self._rewrite_log()
                 made = {"batch": i, "stamps": len(due), "txid": done["id"], "root": root.hex()}
                 sys.stderr.write("%s batch %d: %d stamps, %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), i, len(due), done["id"]))
         self._scan()
@@ -386,14 +432,17 @@ class Stamps:
             for i in dead:
                 b = self.state["batches"][i]
                 b["dead"] = True
-                for d in b["digests"]:
+                digests = self._digests(i)
+                for d in digests:
                     if self.where.get(d) == i:
                         del self.where[d]
                         self.waiting.add(d)
                 sys.stderr.write("%s batch %d: its transaction is gone, %d stamps wait again\n"
-                                 % (time.strftime("%Y-%m-%d %H:%M:%S"), i, len(b["digests"])))
+                                 % (time.strftime("%Y-%m-%d %H:%M:%S"), i, len(digests)))
             self.state["scanned"] = scanned
             self.state["recent"] = recent
+            if dead:
+                self._rewrite_log()
             self._save()
 
 
