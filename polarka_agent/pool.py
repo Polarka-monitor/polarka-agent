@@ -361,7 +361,7 @@ class Guard:
 
 class Pool:
     def __init__(self, node, chain, pay_to, folder, ratio=RATIO, fee_percent=5, hasher=None, clock=time.time,
-                 cap=None, guard=None, payouts=None, most_owed=None):
+                 cap=None, guard=None, payouts=None, most_owed=None, miners=None):
         if not 1 <= ratio <= 1 << 20 or not 0 <= fee_percent < 100:
             raise ValueError("ratio or fee out of range")
         self.node, self.chain, self.pay_to = node, chain, pay_to
@@ -372,6 +372,8 @@ class Pool:
         self.hasher = hasher or RxHasher()
         self.cap, self.guard, self.payouts = cap, guard, payouts
         self.folder, self.most_owed = folder, most_owed
+        # None: anybody may mine. A set of addresses: only these get work (a pool whose wallet may pay only some)
+        self.miners = None if miners is None else {a.strip().lower() for a in miners if a.strip()}
         hold_folder(folder)
         self.earned_total, self.paid_total, self.flying_total, self.assets, self.template_good_at = 0, 0, 0, None, None
         self.expected_total, self.found_total, self.last_payout = 0.0, 0, None
@@ -489,6 +491,8 @@ class Pool:
         except BadInput as e:
             raise PoolError("ADDRESS", "that is not an address of this network that can be paid: %s" % e)
         address = address.lower()
+        if self.miners is not None and address not in self.miners:
+            raise PoolError("CLOSED", "this pool takes only its owner's miners for now; it will open to others later", 403)
         if self.cap is not None and self.cap.is_closed():
             raise PoolError("CAP", "the pool has found as large a part of the network's blocks as it allows itself and hands out "
                                    "no work until that part is smaller; mine alone or elsewhere meanwhile", 503)

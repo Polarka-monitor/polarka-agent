@@ -191,6 +191,16 @@ class PoolRules(unittest.TestCase):
         self.pool.found_total = 3
         self.pool.work(BOB)
 
+    def test_a_pool_not_open_to_others_yet_gives_work_only_to_its_miners(self):
+        p = pool.Pool(self.node, "regtest", PAY, self.folder, ratio=16, hasher=FakeHash(), miners=[ALICE.upper() + "\n", ""])
+        p.work(ALICE)
+        p.work(ALICE.upper())
+        with self.assertRaises(pool.PoolError) as caught:
+            p.work(BOB)
+        self.assertEqual((caught.exception.kind, caught.exception.status), ("CLOSED", 403))
+        self.assertIsNone(self.pool.miners)                        # without the list anybody may mine
+        self.pool.work(BOB)
+
     def test_a_share_for_a_tip_that_moved_is_stale_at_once(self):
         work = self.pool.work(ALICE)
         good = search(work, want_block=False)

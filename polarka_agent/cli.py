@@ -122,6 +122,7 @@ def run(argv=None, out=sys.stdout):
     c.add_argument("--pay-to", help="the address the blocks pay (default: the first address of the wallet in --dir)")
     c.add_argument("--pay-every", type=int, default=0, help="seconds between payout rounds from the wallet in --dir; 0: no payouts")
     c.add_argument("--minimum", default="1", help="NORTH owed from which an address is paid")
+    c.add_argument("--miners", help="a file with the only addresses that get work, one a line (for a pool not open to others yet)")
     c.add_argument("--own-mining", help="a file with the addresses the pool's owner mines to elsewhere, one a line; they count for the cap")
     c.add_argument("--cap", type=int, default=32, help="percent of a day's blocks at which no work is handed out (and 8 more of an hour's); 0: no cap")
     c.add_argument("--trust-proxy", action="store_true", help="take the asker's address from X-Forwarded-For")
@@ -182,6 +183,12 @@ def run(argv=None, out=sys.stdout):
                 with open(os.path.expanduser(a.own_mining)) as f:
                     own = [script_for_address(a.chain, line.strip()) for line in f if line.strip()]
             cap = Cap(node, own, ((86400, a.cap, max(a.cap - 2, 0)), (3600, a.cap + 8, a.cap + 6))) if a.cap else None
+            miners = None
+            if a.miners:
+                with open(os.path.expanduser(a.miners)) as f:
+                    miners = [line.strip() for line in f if line.strip()]
+                for m in miners:
+                    script_for_address(a.chain, m)
             surplus = None
             if a.surplus_to:
                 if not a.pay_every:
@@ -194,7 +201,7 @@ def run(argv=None, out=sys.stdout):
                     raise Refused("INPUT", "--surplus-most is more than 0")
                 surplus = Surplus(a.surplus_to, units(a.keep), units(a.surplus_most), a.surplus_every)
             payouts = Payouts(wallet, folder, units(a.minimum), depth=depth_by(node), deep=a.deep, surplus=surplus) if a.pay_every else None
-            return pool_serve(Pool(node, a.chain, pay_to, folder, a.ratio, a.fee, cap=cap, guard=Guard(), payouts=payouts,
+            return pool_serve(Pool(node, a.chain, pay_to, folder, a.ratio, a.fee, cap=cap, guard=Guard(), payouts=payouts, miners=miners,
                                    most_owed=units(a.most_owed) if a.pay_every else None),
                               a.listen, a.trust_proxy, a.pay_every)
         wallet = Wallet(folder)
