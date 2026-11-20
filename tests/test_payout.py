@@ -8,7 +8,7 @@ import tempfile
 import unittest
 
 from polarka_agent import payout
-from polarka_agent.wallet import Refused
+from polarka_agent.wallet import OPEN, Refused
 
 N = payout.UNITS
 A, B, C = "rnorth1a", "rnorth1b", "rnorth1c"
@@ -17,13 +17,14 @@ A, B, C = "rnorth1a", "rnorth1b", "rnorth1c"
 class FakeWallet:
     def __init__(self):
         self.spendable, self.per_payment = 1000 * N, 500 * N
-        self.made, self.refuse, self.fall, self.state = [], None, False, "handed"
+        self.made, self.refuse, self.fall, self.state, self.now = [], None, False, "handed", 0
 
     def limits(self):
         return {"per_payment": self.per_payment, "per_day": 10 ** 6 * N}
 
     def balance(self):
-        return {"spendable": self.spendable}
+        return {"spendable": self.spendable, "set_aside": 0,
+                "open_payments": [dict(p) for p in self.made if p["state"] in OPEN + ("handed",)]}
 
     def payments(self):
         return [dict(p) for p in self.made]
@@ -33,7 +34,7 @@ class FakeWallet:
             raise Refused(self.refuse, "no")
         if dry_run:
             return {"state": "not made (a dry run)"}
-        p = {"id": "tx%d" % (len(self.made) + 1), "state": self.state, "memo": memo, "outputs": list(outputs)}
+        p = {"id": "tx%d" % (len(self.made) + 1), "state": self.state, "memo": memo, "outputs": list(outputs), "made": self.now}
         self.made.append(p)
         if self.fall:
             raise RuntimeError("the machine fell after the wallet wrote the payment down")
@@ -247,6 +248,68 @@ class Rules(unittest.TestCase):
             f.write(json.dumps({"event": "paid", "round": 9}) + "\n")
         with self.assertRaises(ValueError):
             self.make()
+
+
+class SurplusRules(unittest.TestCase):
+    """What the pool holds beyond its reserve and what it owes goes to its owner, a part at a time."""
+
+    def setUp(self):
+        self.folder = tempfile.mkdtemp(prefix="polarka-payout-test-")
+        self.wallet = FakeWallet()
+        self.now = [100000.0]
+        self.pay = payout.Payouts(self.wallet, self.folder, minimum=N, clock=lambda: self.now[0],
+                                  surplus=payout.Surplus(C, keep=100 * N, most=300 * N, every=3600, least=10 * N))
+
+    def tearDown(self):
+        shutil.rmtree(self.folder, ignore_errors=True)
+
+    def sent(self):
+        return [p for p in self.wallet.made if p["memo"] == payout.SURPLUS]
+
+    def test_above_the_reserve_and_the_debt_a_part_at_a_time(self):
+        self.wallet.now = self.now[0]                        # the wallet writes down when it made a payment
+        done = self.pay.sweep(200 * N)                      # 1000 held, 100 kept, 200 owed: 699.99 above, 300 at a time
+        self.assertEqual((done["surplus"], done["to"]), ("300.00000000", C))
+        self.assertEqual(self.sent()[0]["outputs"], [(C, 300 * N)])
+        self.now[0] += 3599
+        self.assertEqual(self.pay.sweep(200 * N)["why"], "sent not long ago")
+        self.now[0] += 1
+        self.assertEqual(self.pay.sweep(200 * N)["surplus"], "300.00000000")
+        self.assertEqual(len(self.sent()), 2)
+        self.assertEqual(self.pay.sums(), {})                # a surplus is nobody's payout
+
+    def test_nothing_below_the_least_and_never_into_the_reserve_or_the_debt(self):
+        self.wallet.spendable = 305 * N
+        self.assertEqual(self.pay.sweep(200 * N)["why"], "nothing above the reserve and what is owed")
+        self.wallet.spendable = 50 * N
+        self.assertEqual(self.pay.sweep(200 * N)["why"], "nothing above the reserve and what is owed")
+        self.wallet.spendable = 315 * N
+        self.assertEqual(self.pay.sweep(200 * N)["surplus"], "14.99000000")
+        self.assertEqual(self.sent()[0]["outputs"], [(C, 315 * N - 100 * N - 200 * N - payout.MARGIN)])
+
+    def test_within_the_limit_for_one_payment(self):
+        self.wallet.per_payment = 250 * N
+        self.assertEqual(self.pay.sweep(0)["surplus"], "249.99000000")
+
+    def test_not_while_a_payment_did_not_go_through_and_waiting_is_no_hindrance(self):
+        self.wallet.state = "unknown"
+        self.wallet.pay([(A, N)], "something open")
+        self.assertIn("did not go through", self.pay.sweep(0)["why"])
+        self.assertEqual(self.sent(), [])
+        self.wallet.made[0]["state"] = "handed"              # it waits for a block: its coins are set aside, the rest is free
+        self.wallet.state = "handed"
+        self.assertEqual(self.pay.sweep(0)["surplus"], "300.00000000")
+
+    def test_what_the_wallet_refuses(self):
+        self.wallet.refuse = "OVER_DAY"
+        self.assertEqual(self.pay.sweep(0)["why"], "OVER_DAY")
+        self.assertIsNone(payout.Payouts(self.wallet, self.folder, minimum=N).sweep(0))     # no Surplus: nothing to do
+
+    def test_the_rounds_do_not_mistake_it_for_theirs(self):
+        self.pay.sweep(0)
+        done = self.pay.run({A: 30 * N})
+        self.assertEqual((done["round"], done["paid_now"]), (1, "30.00000000"))
+        self.assertEqual(self.pay.run({A: 30 * N})["state"], "on the way")
 
 
 if __name__ == "__main__":

@@ -466,6 +466,33 @@ class Owed(unittest.TestCase):
         finally:
             shutil.rmtree(folder, ignore_errors=True)
 
+    def test_the_surplus_goes_with_the_rounds_and_never_when_one_is_refused(self):
+        from polarka_agent import payout
+        from tests.test_payout import FakeWallet
+        folder = tempfile.mkdtemp(prefix="polarka-pool-test-")
+        try:
+            wallet = FakeWallet()                                            # 1000 NORTH free, 500 a payment
+            surplus = payout.Surplus(PAY, keep=900 * pool.UNITS, most=500 * pool.UNITS, every=0, least=pool.UNITS)
+            p = pool.Pool(FakeNode(), "regtest", PAY, folder, ratio=16, hasher=FakeHash(),
+                          payouts=payout.Payouts(wallet, folder, minimum=pool.UNITS, surplus=surplus))
+            work = p.work(ALICE)
+            first = search(work, want_block=False)
+            p.share(work["job"], first)                                      # Alice is owed 30.4
+            wallet.refuse = "OVER_DAY"
+            done = p.pay_round()
+            self.assertEqual((done["state"], "surplus" in done), ("refused", False))
+            wallet.refuse = None
+            done = p.pay_round()                                             # her round, and then the surplus beside it
+            self.assertEqual((done["round"], done["paid_now"]), (1, "30.40000000"))
+            # 1000 free (the made-up wallet does not take the round off), 900 kept, nothing owed that is not on the way
+            self.assertEqual(done["surplus"]["surplus"], "99.99000000")
+            self.assertEqual([x["memo"] for x in wallet.made], [p.payouts.memo(1), payout.SURPLUS])
+            self.assertEqual(p.account(ALICE)["on_the_way"], "30.40000000")
+            p.share(work["job"], search(work, want_block=False, start=first + 1))     # owed again: 30.4 more is kept back
+            self.assertEqual(p.pay_round()["surplus"]["surplus"], "69.59000000")
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
     def test_what_is_on_the_way_is_not_owed_any_more_also_after_a_restart(self):
         """flying_total: a round on the way has left the wallet, so it does not count against the most the pool
         may owe; and a pool that starts again knows it from the ledger before its first round."""

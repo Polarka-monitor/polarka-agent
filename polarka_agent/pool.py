@@ -600,6 +600,12 @@ class Pool:
                     if a not in self.cleared and at_most(account["blocks"], account["expected"]) < UNLUCKY}
         try:
             self.last_payout = self.payouts.run(earned, held)
+            if self.payouts.surplus is not None and self.last_payout.get("state") != "refused":
+                # what the pool holds beyond what it owes and its reserve may go to its owner; not when a round
+                # was refused (by the limits, for coins), so that the surplus does not take what a round needs
+                sums = self.payouts.sums().values()
+                owed = sum(earned.values()) - sum(paid + flying for paid, flying in sums)
+                self.last_payout = dict(self.last_payout, surplus=self.payouts.sweep(owed))
             return self.last_payout
         except Exception as e:
             self.last_payout = {"state": "stopped", "why": "%s: %s" % (type(e).__name__, str(e)[:200])}

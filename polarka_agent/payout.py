@@ -36,6 +36,18 @@ UNITS = 100_000_000
 MOST_PAYEES = 200
 MARGIN = UNITS // 100           # left in the wallet for the round's fee when the round is cut to what is there
 NOTE = "polarka-pool round "
+SURPLUS = "polarka-pool surplus"   # the note of a payment that takes what the pool holds beyond its needs to its owner
+
+
+class Surplus:
+    """What the pool holds beyond what it owes and a reserve goes to its owner's address: at most `most` at a
+    time, and not sooner than `every` seconds after the last time. `least` keeps dust from being sent."""
+
+    def __init__(self, to, keep, most, every=6 * 3600, least=10 * UNITS):
+        if keep < 0 or most <= 0 or every < 0 or least <= 0:
+            raise ValueError("keep, most, every and least of the surplus out of range")
+        self.to, self.keep, self.most, self.every, self.least = to, int(keep), int(most), every, int(least)
+
 
 _held = {}
 _held_lock = threading.Lock()
@@ -85,9 +97,10 @@ def sync_folder(folder):
 
 
 class Payouts:
-    def __init__(self, wallet, folder, minimum=UNITS, most_payees=MOST_PAYEES, clock=time.time, depth=None, deep=6):
+    def __init__(self, wallet, folder, minimum=UNITS, most_payees=MOST_PAYEES, clock=time.time, depth=None, deep=6, surplus=None):
         hold_folder(folder)
         self.wallet, self.minimum, self.most_payees, self.clock = wallet, max(int(minimum), 1000), most_payees, clock
+        self.surplus = surplus          # a Surplus, or None: nothing is taken out beyond the rounds
         self.folder, self.path = folder, os.path.join(folder, "pool-payouts.jsonl")
         self.depth, self.deep = depth, deep     # depth(txid): blocks on top of it by the pool's own node
         self._spent_at = {}
@@ -264,3 +277,33 @@ class Payouts:
                 return {"round": number, "state": "refused", "why": e.kind, "paid_now": north(0)}
             self._write({"event": "sent", "round": number, "txid": made["id"]})
             return {"round": number, "state": made["state"], "id": made["id"], "payees": len(pay), "paid_now": north(total)}
+
+    def sweep(self, owed):
+        """
+        Sends the surplus to the owner (see Surplus), when there is one. `owed`: what the pool owes and has not
+        sent yet, all accounts together, in base units. Only from coins that are free: what a payment waiting for
+        a block spends is set aside, and coins that are not ripe are not counted. Never while the wallet has a
+        payment whose outcome is open: a new payment would have to stand against it, and a payout that did not
+        go through must not be taken back by a surplus. Returns what it did, or None without a Surplus.
+        """
+        s = self.surplus
+        if s is None:
+            return None
+        with self.lock:
+            try:
+                made = self.wallet.payments()
+                last = max((p["made"] for p in made if p.get("memo") == SURPLUS), default=None)
+                if last is not None and self.clock() - last < s.every:
+                    return {"surplus": None, "why": "sent not long ago"}
+                balance, limits = self.wallet.balance(), self.wallet.limits()
+                if limits is None:
+                    return {"surplus": None, "why": "NO_LIMITS"}
+                if any(p["state"] in OPEN for p in balance.get("open_payments", ())):
+                    return {"surplus": None, "why": "a payment of the wallet did not go through, and nothing may stand against it"}
+                amount = min(balance["spendable"] - s.keep - max(int(owed), 0) - MARGIN, s.most, limits["per_payment"] - MARGIN)
+                if amount < s.least:
+                    return {"surplus": None, "why": "nothing above the reserve and what is owed"}
+                done = self.wallet.pay([(s.to, amount)], SURPLUS)
+            except Refused as e:
+                return {"surplus": None, "why": e.kind, "message": str(e)[:200]}
+            return {"surplus": north(amount), "id": done["id"], "state": done["state"], "to": s.to}

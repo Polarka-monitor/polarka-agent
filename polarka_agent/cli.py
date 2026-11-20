@@ -130,6 +130,10 @@ def run(argv=None, out=sys.stdout):
     c.add_argument("--fee", type=int, default=5, help="the pool's fee in percent")
     c.add_argument("--most-owed", default="5000", help="NORTH the pool may owe at once; above it no work is handed out")
     c.add_argument("--deep", type=int, default=6, help="blocks on top of a payout, by the pool's own node, before it counts as paid")
+    c.add_argument("--surplus-to", help="the owner's address: what the wallet holds beyond what the pool owes and --keep goes there")
+    c.add_argument("--keep", default="5000", help="NORTH the wallet keeps as its reserve beyond what it owes (with --surplus-to)")
+    c.add_argument("--surplus-most", default="1000", help="NORTH sent to --surplus-to at a time, at most")
+    c.add_argument("--surplus-every", type=int, default=21600, help="seconds between two payments to --surplus-to, at least")
     a = p.parse_args(argv)
     folder = os.path.expanduser(a.dir)
 
@@ -180,7 +184,18 @@ def run(argv=None, out=sys.stdout):
                 with open(os.path.expanduser(a.own_mining)) as f:
                     own = [script_for_address(a.chain, line.strip()) for line in f if line.strip()]
             cap = Cap(node, own, ((86400, a.cap, max(a.cap - 2, 0)), (3600, a.cap + 8, a.cap + 6))) if a.cap else None
-            payouts = Payouts(wallet, folder, units(a.minimum), depth=depth_by(node), deep=a.deep) if a.pay_every else None
+            surplus = None
+            if a.surplus_to:
+                if not a.pay_every:
+                    raise Refused("INPUT", "--surplus-to needs --pay-every: the surplus is sent from the payout rounds")
+                if a.surplus_every < 0:
+                    raise Refused("INPUT", "--surplus-every is 0 or more")
+                script_for_address(a.chain, a.surplus_to)
+                from .payout import Surplus
+                if units(a.surplus_most) <= 0:
+                    raise Refused("INPUT", "--surplus-most is more than 0")
+                surplus = Surplus(a.surplus_to, units(a.keep), units(a.surplus_most), a.surplus_every)
+            payouts = Payouts(wallet, folder, units(a.minimum), depth=depth_by(node), deep=a.deep, surplus=surplus) if a.pay_every else None
             return pool_serve(Pool(node, a.chain, pay_to, folder, a.ratio, a.fee, cap=cap, guard=Guard(), payouts=payouts,
                                    most_owed=units(a.most_owed) if a.pay_every else None),
                               a.listen, a.trust_proxy, a.pay_every)

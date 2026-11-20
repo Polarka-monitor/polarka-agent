@@ -91,6 +91,36 @@ class PayoutsOnRegtest(unittest.TestCase):
         self.assertEqual(miner.balance()["spendable"], 7 * pool.UNITS)
         self.assertEqual(len([p for p in self.wallet.payments() if str(p.get("memo") or "").startswith(payout.NOTE)]), 1)
 
+    def test_the_surplus_reaches_the_owner_and_stands_against_no_payout(self):
+        owner = self.make("owner")
+        to, worker = owner.fresh_address(), self.miner.fresh_address()
+        wallet = self.make("pool-of-the-surplus")
+        with open(os.path.join(wallet.folder, "limits.json"), "w") as f:
+            json.dump({"per_payment_north": "100000", "per_day_north": "1000000", "allow": [to, worker]}, f)
+        wallet = Wallet(wallet.folder)
+        self.node.mine(2, wallet.fresh_address())
+        self.node.mine(100, SINK)
+        surplus = payout.Surplus(to, keep=0, most=1000 * pool.UNITS, every=3600, least=pool.UNITS)
+        books = payout.Payouts(wallet, os.path.join(self.tmp, "books-of-the-surplus"), minimum=pool.UNITS,
+                               depth=pool.depth_by(self.rpc), deep=6, surplus=surplus)
+        self.standin.set(hold=True)                                # a payout that does not go through ...
+        self.assertEqual(books.run({worker: 3 * pool.UNITS})["state"], "unknown")
+        self.assertIn("did not go through", books.sweep(0)["why"])  # ... is not stood against by a surplus
+        self.standin.set(hold=False)
+        self.assertEqual(books.run({worker: 3 * pool.UNITS})["state"], "on the way")
+        # beside a payout that waits for a block: from the coins it does not spend, 50 above the reserve
+        free = wallet.balance()["spendable"]
+        surplus.keep = free - 50 * pool.UNITS
+        done = books.sweep(0)
+        self.assertEqual((done["state"], done["surplus"]), ("handed", "49.99000000"), done)
+        self.assertIn(done["id"], self.node.cli("getrawmempool"))
+        self.assertEqual(books.sweep(0)["why"], "sent not long ago")
+        self.node.mine(6, SINK)
+        self.assertEqual(books.run({worker: 3 * pool.UNITS})["state"], "nothing is due")
+        self.assertEqual(books.sums(), {worker: (3 * pool.UNITS, 0)})
+        self.assertEqual(owner.balance()["spendable"], 4_999_000_000)
+        self.assertGreaterEqual(wallet.balance()["spendable"], surplus.keep)
+
     def test_hand_again_knows_only_the_wallets_own_payments(self):
         with self.assertRaises(Exception) as caught:
             self.wallet.hand_again("cd" * 32)
