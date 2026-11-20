@@ -435,6 +435,65 @@ class Owed(unittest.TestCase):
         finally:
             shutil.rmtree(folder, ignore_errors=True)
 
+    def make_paying(self, folder, wallet):
+        from polarka_agent import payout
+        return pool.Pool(FakeNode(), "regtest", PAY, folder, ratio=16, hasher=FakeHash(), payouts=payout.Payouts(wallet, folder, minimum=pool.UNITS))
+
+    def test_an_address_held_for_bad_luck_is_not_paid_until_a_person_lets_it_back(self):
+        """The pool decides who is held (pay_round), the payouts only leave them out: the two together."""
+        from tests.test_payout import FakeWallet
+        folder = tempfile.mkdtemp(prefix="polarka-pool-test-")
+        try:
+            wallet = FakeWallet()
+            p = self.make_paying(folder, wallet)
+            for who in (ALICE, BOB):
+                work = p.work(who)
+                p.share(work["job"], search(work, want_block=False))
+            p.accounts[ALICE]["expected"] = 7.0                          # seven blocks' worth of shares and no block
+            done = p.pay_round()
+            self.assertEqual((done["payees"], done["paid_now"]), (1, "30.40000000"))
+            self.assertEqual([a for a, _ in wallet.made[0]["outputs"]], [BOB])
+            self.assertEqual(p.account(ALICE)["owed"], "30.40000000")
+            wallet.made[0]["state"] = "in_block"
+            self.assertEqual(p.pay_round()["state"], "nothing is due")    # Alice is still held: nothing for her
+            self.assertEqual(len(wallet.made), 1)
+            with open(os.path.join(folder, "luck-cleared.txt"), "w") as f:
+                f.write(ALICE + "\n")                                     # the owner looked and let her back in
+            p = self.make_paying(folder, wallet)
+            done = p.pay_round()
+            self.assertEqual((done["payees"], done["paid_now"]), (1, "30.40000000"))
+            self.assertEqual([a for a, _ in wallet.made[1]["outputs"]], [ALICE])
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_what_is_on_the_way_is_not_owed_any_more_also_after_a_restart(self):
+        """flying_total: a round on the way has left the wallet, so it does not count against the most the pool
+        may owe; and a pool that starts again knows it from the ledger before its first round."""
+        from tests.test_payout import FakeWallet
+        folder = tempfile.mkdtemp(prefix="polarka-pool-test-")
+        try:
+            wallet = FakeWallet()
+            p = self.make_paying(folder, wallet)
+            work = p.work(ALICE)
+            p.share(work["job"], search(work, want_block=False))
+            p.most_owed = 30 * pool.UNITS                                 # one share is 30.4
+            with self.assertRaises(pool.PoolError) as caught:
+                p.work(BOB)
+            self.assertEqual(caught.exception.kind, "FUNDS")
+            self.assertEqual(p.pay_round()["paid_now"], "30.40000000")
+            self.assertEqual((p.flying_total, p.paid_total), (3_040_000_000, 0))
+            p.work(BOB)                                                   # nothing is owed: the round is on the way
+            again = self.make_paying(folder, wallet)
+            self.assertEqual((again.flying_total, again.paid_total), (3_040_000_000, 0))
+            again.most_owed = 30 * pool.UNITS
+            again.work(BOB)
+            wallet.made[0]["state"] = "in_block"
+            again.pay_round()
+            self.assertEqual((again.flying_total, again.paid_total), (0, 3_040_000_000))
+            again.work(BOB)
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main()
