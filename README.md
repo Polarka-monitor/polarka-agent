@@ -4,12 +4,13 @@ A wallet for TrueNorth (NORTH) that a program can use: a command line, a Python 
 agents that speak the Model Context Protocol (MCP). The keys stay on the machine it runs on. What its
 addresses hold it asks a wallet server with the Northbound API (github.com/nova9/northbound).
 
-**State: 0.1.3, an early version.** It was written with an AI model under its author's direction. An
-independent AI reviewer read it and found faults, the serious ones of which are mended (`REVIEW.md`); no
-human security expert has read it. On 17 November 2026 it made its first payments on the real network: two
-small payments went into blocks, and its owner's limits refused what they should (`NO_LIMITS`, `OVER_LIMIT`,
-`OVER_DAY`). That is all the real use it has had. Do not put into it what you cannot lose. It is an independent community project, not a product of the TrueNorth developers or of
-the Northbound project.
+**State: 0.2.0, an early version.** It was written with AI models under its author's direction, and its
+author read it. Independent AI reviewers that had not seen it being written read each part and found faults;
+the serious ones are mended, with tests (`REVIEW.md`, `docs/review-guide.md`). No human security expert has
+read it yet; a review by one is asked for. On the real network it pays since 17 November 2026, and since
+20 November it runs a pool, a gate of postage, an x402 facilitator and a stamps service at polarka.org. Do not
+put into it what you cannot lose. It is an independent community project, not a product of the TrueNorth
+developers or of the Northbound project.
 
 ## What it is for
 
@@ -60,15 +61,14 @@ under `server_said_untrusted`, for the owner.
     pip install polarka-agent
 
 That gives the command `polarka-agent`, which is the same as `python3 -m polarka_agent`. It needs Python 3.9
-or later on Linux or macOS and nothing besides; it does not run on Windows. The package on PyPI is built from
-this repository at the tag of its version; 0.1.1 and 0.1.2 were built and uploaded by the workflow in
-`.github/workflows/release.yml`. A version can be here before it is on PyPI. PyPI may still carry 0.1.2, whose
-faucet has the faults that `docs/faucet-review-0.1.2.md` names: whoever means to run a faucet installs this
-version from the project's own server,
+or later on Linux or macOS and nothing besides; it does not run on Windows. Versions are built from this
+repository at the tag of their version and uploaded by hand; 0.1.1 and 0.1.2 were built by a workflow that is
+no longer used. The same files are on the project's own server,
 
-    pip install https://polarka.org/download/src/polarka-agent-0.1.3.tar.gz
+    pip install https://polarka.org/download/src/polarka-agent-0.2.0.tar.gz
 
-and compares the file with `https://polarka.org/download/SHA256SUMS` first.
+and can be compared with `https://polarka.org/download/SHA256SUMS` first. Versions before 0.1.3 carry a
+faucet with the faults that `docs/faucet-review-0.1.2.md` names.
 
 ## Commands
 
@@ -79,6 +79,8 @@ and compares the file with `https://polarka.org/download/SHA256SUMS` first.
     python3 -m polarka_agent --dir FOLDER received ADDRESS | wait ADDRESS 1.5
     python3 -m polarka_agent --dir FOLDER stamp FILE | stamp --sha256 HEX
     python3 -m polarka_agent --dir FOLDER faucet URL | postage URL --most 0.05
+    python3 -m polarka_agent --dir FOLDER fetch URL --most 0.05
+    python3 -m polarka_agent stamp-verify PROOF.json
     python3 -m polarka_agent --dir FOLDER forget ID
     python3 -m polarka_agent --dir FOLDER mcp
 
@@ -91,7 +93,7 @@ rate is small: a stamp shows an order of events, it is not proof for a court.
 
 For an agent: start `python3 -m polarka_agent --dir FOLDER mcp` as an MCP server over standard input and
 output. Its tools are `north_balance`, `north_address`, `north_received`, `north_wait`, `north_pay`,
-`north_stamp`, `north_payments`, `north_history`, `north_limits`, `north_faucet` and `north_postage`.
+`north_stamp`, `north_payments`, `north_history`, `north_limits`, `north_faucet`, `north_postage` and `north_fetch`.
 
 ## A first coin: the faucet
 
@@ -153,10 +155,67 @@ The asker's side is `postage URL --most 0.05` (for an agent the tool `north_post
 quote, pays it from the wallet and shows the token. The owner's limits hold as for any payment, and nothing
 above `--most` is paid whatever the gate asks.
 
-## Mining for a pool (in work)
+## Paying any service: x402
 
-This branch holds a pool that pays for each share, and a miner for it. It is not released and no person outside
-has read it; it runs on main since 20 November 2026, first with its owner's miners only.
+x402 is an open standard for paying over HTTP: a service answers `402 Payment Required` with what it takes,
+the caller pays and asks again with the payment in a header. This package speaks x402 version 2 in NORTH,
+with the scheme `exact` on the network `bip122:470c8b8ae824c06575cfae0851282c49` (TrueNorth's main chain). The
+scheme is written down in `docs/x402-scheme-exact-bip122.md` and proposed to the x402 Foundation.
+
+    python3 -m polarka_agent --dir FOLDER fetch https://gate.polarka.org/v1/stamp/SHA256 --most 0.05
+
+`fetch` (for an agent the tool `north_fetch`) asks the URL; when it answers 402 in NORTH it pays no more than
+`--most` and the owner's limits allow, and asks again. The payment is kept in the wallet's folder before
+anybody sees it, so a later `fetch` of the same URL shows the same payment again and pays nothing more. It
+follows no redirect, and talks x402 only over https or on the same machine.
+
+The seller gives the payment to the network itself and takes it as paid when it is in a block
+(`--confirmations`, one by default): a payment that only waits in the mempool can still be replaced, and
+TrueNorth has full replace-by-fee. While the block is not there the seller answers `202` with
+`awaiting_confirmation`, and the buyer shows the same payment again. One payment buys one thing once, a copy
+of a payment seen in the mempool buys nothing, and a payment counts only for the resource it was made for.
+
+    python3 -m polarka_agent x402-facilitator --chain main --rpc-url http://127.0.0.1:9554 \
+        --rpc-cookie /path/to/.cookie --listen 127.0.0.1:9570
+
+is the facilitator, the part of a seller that checks payments and hands them to its node (`/supported`,
+`/verify`, `/settle`, as in the standard). It holds no keys and no coins. `postage-serve --x402-facilitator
+http://127.0.0.1:9570` makes the gate of postage take x402 as well as its own quotes: one x402 payment buys
+a lot of calls, and the gate says how many are left in `X-Postage-Calls-Left`.
+
+## A service to pay for: stamps
+
+A stamp shows that a file existed by a given block. The stamps service takes SHA-256s, puts those that came
+in during ten minutes into one tree of hashes, and writes the tree's root into the chain with one
+transaction. Each SHA-256 then gets a proof: its path to the root, the transaction, the block, and the node's
+proof that the transaction is in that block. Only the SHA-256 is sent, never the file.
+
+    GET https://gate.polarka.org/v1/stamp/<sha256>    (behind the gate: pay with x402 or postage)
+    python3 -m polarka_agent stamp-verify PROOF.json [--rpc-url URL --rpc-cookie FILE]
+
+The answer is `waiting` (with the time of the next batch), `written` (the transaction waits for a block) or
+`stamped` with the proof. `stamp-verify` checks the path, that the transaction carries the root, and that
+the proof of the block holds the transaction; with a node it also checks that the block is in the chain.
+Without a node it says that the block was not checked: everything else in a proof can be made up together
+with a block that was never mined.
+
+The tree: leaf = SHA-256(0x00 || digest), node = SHA-256(0x01 || left || right), the leaves sorted, an odd one
+at the end of a level goes up as it is. The transaction carries `OP_RETURN` `POLARKA` 0x01 || root.
+
+    python3 -m polarka_agent --dir STAMPS-WALLET stamps-serve --rpc-url http://127.0.0.1:9554 \
+        --rpc-cookie /path/to/credentials --listen 127.0.0.1:8681
+    python3 -m polarka_agent --dir GATE-WALLET postage-serve ... --route /v1/stamp=127.0.0.1:8681
+
+runs one; it belongs behind the gate, which takes the payment. Its wallet pays only the network fee of one
+transaction a batch. A batch whose transaction the node has lost for an hour goes back to waiting. The
+digests of a batch are written once into a file of their own, and a SHA-256 that waits is one line appended
+to `waiting.log`. The chain is young and its hash rate is small: a stamp shows an order of events, it is not
+proof for a court.
+
+## Mining for a pool
+
+This package holds a pool that pays for each share, and a miner for it. pool.polarka.org runs it on the
+main chain since 20 November 2026, at first with its owner's miners only.
 
     python3 -m polarka_agent build-rx --randomx /path/to/truenorth/src/randomx
     python3 -m polarka_agent --dir POOL-WALLET pool-serve --chain regtest --rpc-url http://127.0.0.1:PORT \
@@ -219,8 +278,8 @@ back from an older copy: it pays again what the copy does not know. The wallet s
 own. A miner who keeps back the blocks he finds can take the float before the pool notices, and no more
 than the float and the wallet's limit for a day. The share ledger grows without end.
 
-Not built: a share target that follows the miner's speed and taking back credit for a block that left the chain. Until somebody
-else has read it, it must not run on the real network.
+Not built: a share target that follows the miner's speed and taking back credit for a block that left the
+chain. Independent AI reviewers have read the pool several times; no person outside has yet.
 
 ## Code and tests
 
@@ -229,11 +288,12 @@ signature hash and signing; they come from the cold address tool
 (github.com/severka-monitor/truenorth-cold-address) and are checked against its published P2QRH test vectors.
 `server.py` is the client for a wallet server, `wallet.py` the wallet, `cli.py` and `mcp.py` the two faces,
 `faucet.py` the faucet and its asker, `postage.py` the postage gate, `rx.py` the proof of work through the
-library in `native/`, `pool.py` the pool, `payout.py` its payouts and `miner.py` its miner.
+library in `native/`, `pool.py` the pool, `payout.py` its payouts, `miner.py` its miner, `x402.py` the
+x402 buyer, paywall and facilitator, and `stamps.py` the stamps service and the check of a proof.
 
     TN_BIN=/path/to/bin python3 -B -m unittest discover -s tests -t .
 
-158 tests. Those in `test_wallet.py`, `test_cli_mcp.py`, `test_faucet_node.py` and `test_pool_node.py` run against the official
+209 tests. Those in `test_wallet.py`, `test_cli_mcp.py`, `test_faucet_node.py` and `test_pool_node.py` run against the official
 `truenorthd` on regtest
 and a stand-in for a Northbound server (`tests/standin`, copied from the Polarka Wallet's repository); they
 are skipped without the node programs. No test touches a real network.
@@ -245,17 +305,15 @@ in the owner's rules. It covers those rules only, not the keys, the signing or t
 
 ## What is missing
 
-- A review by a person. An independent AI reviewer read version 0.1.0.dev0 and found two serious faults (a
-  server that lies about a block could lift the day's limit; after two hundred addresses the wallet sent
-  change where it did not look). Both are mended here, with tests. Its other findings are listed in
-  `REVIEW.md` with what was done about each.
+- A review by a person. Independent AI reviewers read every part, and what they found is listed with what
+  was done about it (`REVIEW.md`, `docs/review-guide.md`). A human review is asked for and not yet done.
+- Use by anybody but its author: the pool, the gate and the stamps service have served nobody else yet.
 - More than two hundred addresses of a kind: beyond that the wallet hands out no new address and reuses
   its last change key.
-- More than a first try on the real network.
 - A way to replace a payment that was handed over and waits for a block without end.
-- A node of one's own in place of a wallet server.
+- A node of one's own in place of a wallet server, for the wallet.
 - A history that is exact for a wallet with more than a hundred addresses.
-- Checking a stamp without trusting a server or a node.
+- Checking the block of a stamp without a node.
 
 ## Licence
 
