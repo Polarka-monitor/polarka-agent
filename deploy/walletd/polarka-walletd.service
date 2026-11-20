@@ -1,0 +1,41 @@
+# walletd: a Northbound wallet server in front of the server's own TrueNorth node, for the pool's payouts.
+# Loopback only; nothing that faces the internet may point at it.
+[Unit]
+Description=walletd, the wallet server on the own TrueNorth node (127.0.0.1:9560)
+After=truenorthd.service
+Wants=truenorthd.service
+
+[Service]
+User=walletd
+Group=walletd
+SupplementaryGroups=truenorth
+ExecStart=/usr/bin/python3 -B /opt/polarka-walletd/walletd.py --chain main --rpc-url http://127.0.0.1:9554 --cookie /var/lib/truenorth/.cookie --listen 127.0.0.1:9560
+Restart=on-failure
+RestartSec=15
+# 2: the node runs another chain, or the command is wrong; starting again changes nothing
+RestartPreventExitStatus=2
+NoNewPrivileges=true
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+UMask=0077
+MemoryMax=768M
+
+[Install]
+WantedBy=multi-user.target
