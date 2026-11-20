@@ -225,10 +225,14 @@ class Facilitator:
         return {"success": True, "transaction": txid, "network": self.network, "payer": None}
 
     @staticmethod
-    def _resource(payment):
-        r = payment.get("resource")
-        url = r.get("url") if isinstance(r, dict) else None
-        return url[:2000] if isinstance(url, str) else None
+    def _resource(payment, wanted=None):
+        """What the payment buys: the resource the seller names in extra.resource, else the one the buyer's payload
+        names. Kept as a hash of the whole text."""
+        named = (wanted or {}).get("extra", {}).get("resource") if isinstance((wanted or {}).get("extra"), dict) else None
+        if not isinstance(named, str):
+            r = payment.get("resource")
+            named = r.get("url") if isinstance(r, dict) else None
+        return mark(named) if isinstance(named, str) else None
 
     def _owner(self, rec, claim):
         return claim is not None and rec.get("claim") is not None and rec["claim"] == mark(claim)
@@ -240,7 +244,7 @@ class Facilitator:
             if rec is not None:
                 if not self._owner(rec, claim) or (rec["state"] == DELIVERED and self.clock() - rec["at"] > self.redeliver):
                     why = "transaction_already_used"
-                elif rec.get("resource") != self._resource(payment):
+                elif rec.get("resource") != self._resource(payment, wanted):
                     why = "invalid_payment_requirements"
                 else:
                     why = self._matches(payment, decoded, rec["wanted"])[1] or self._covers(rec, wanted)
@@ -271,7 +275,7 @@ class Facilitator:
                 if not self._node_takes(raw):
                     return self._fail("transaction_refused_by_node", txid)
                 rec = {"txid": txid, "claim": mark(claim) if claim else None, "vout": vout, "need": need,
-                       "resource": self._resource(payment),
+                       "resource": self._resource(payment, wanted),
                        "wanted": {k: wanted[k] for k in KEYS}, "state": WAITING, "at": int(now)}
                 self._keep(rec)                         # kept before the node has it: never sold twice
                 try:
@@ -284,10 +288,12 @@ class Facilitator:
                     return self._fail("transaction_already_used", txid)
                 # shown again: it is held to what was asked when it was made, not to today's price
                 if (self._matches(payment, decoded, rec["wanted"])[1] is not None or self._covers(rec, wanted)
-                        or rec.get("resource") != self._resource(payment)):
+                        or rec.get("resource") != self._resource(payment, wanted)):
                     return self._fail("invalid_payment_requirements", txid)
                 if rec["state"] == DELIVERED:
-                    return self._ok(txid) if now - rec["at"] <= self.redeliver else self._fail("transaction_already_used", txid)
+                    if now - rec["at"] <= self.redeliver:
+                        return dict(self._ok(txid), redelivered=True)       # the same answer again, not a new sale
+                    return self._fail("transaction_already_used", txid)
             need = max(rec.get("need", 0), self._need(wanted))
             if need:
                 depth = self._depth(txid, rec["vout"])
@@ -486,7 +492,7 @@ def paywall(facilitator, price, pay_to, content, content_type="text/plain; chars
                 done = {"success": False, "errorReason": "invalid_payment_requirements", "transaction": "", "network": facilitator.network,
                         "payer": None}
                 return self.send(402, {}, {"Content-Type": "application/json", "PAYMENT-RESPONSE": b64json(done)})
-            done = facilitator.settle(payment, wanted)
+            done = facilitator.settle(payment, dict(wanted, extra=dict(wanted.get("extra") or {}, resource=self.path)))
             told = {"Content-Type": "application/json", "PAYMENT-RESPONSE": b64json(done)}
             if done.get("success"):
                 return self.send(200, content, dict(told, **{"Content-Type": content_type}))
@@ -530,6 +536,15 @@ def _keep_book(wallet, book):
         os.fsync(f.fileno())
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
+
+
+def _next_lot(book, origin):
+    spare = book.setdefault("spare", {}).get(origin) or []
+    if spare:
+        book["lots"][origin] = spare.pop(0)
+        book["spare"][origin] = spare
+    else:
+        book["lots"].pop(origin, None)
 
 
 def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.sleep, clock=time.time):
@@ -581,12 +596,12 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
             left = calls_left(headers)
             with BOOK:
                 book = _book(wallet)
-                if status == 402 or left == 0:
-                    book["lots"].pop(origin, None)          # used up, or the gate no longer knows it
+                if (status == 402 and left is None) or left == 0:
+                    _next_lot(book, origin)                 # used up, or the gate no longer knows it
                 elif left:
                     book["lots"][origin] = dict(lot, left=left)
                 _keep_book(wallet, book)
-            if status != 402:
+            if status != 402 or left is not None:           # the gate let the call through, whatever the service said
                 return {"status": status, "paid": None, "calls_left": left, "body": body,
                         "note": "a call of a lot paid for before"}
         if status != 402:
@@ -643,7 +658,13 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
             book["pending"].pop(url, None)
         left = calls_left(headers)
         if paid and left:                           # the lot is paid whatever the service behind the gate answered
-            book["lots"][origin] = {"claim": held["claim"], "left": left}
+            new, had = {"claim": held["claim"], "left": left}, book["lots"].get(origin)
+            if had and had.get("claim") != held["claim"]:  # a lot still in use: this one waits behind it
+                spare = book.setdefault("spare", {}).setdefault(origin, [])
+                if all(s.get("claim") != held["claim"] for s in spare):
+                    spare.append(new)
+            else:
+                book["lots"][origin] = new
         _keep_book(wallet, book)
     got = {"status": status, "paid": north(held["amount"]), "txid": held["txid"], "settlement": settled, "body": body}
     if again:

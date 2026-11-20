@@ -30,7 +30,7 @@ from .wallet import STAMP, Refused
 
 DIGEST = re.compile(r"^[0-9a-f]{64}$")
 VERSION = 1
-DEEP = 6            # blocks after which a batch is no longer looked at for a reorganization
+DEEP = 30           # blocks after which a batch is no longer looked at for a reorganization (as many as RECENT)
 RECENT = 30         # blocks whose hashes are kept, to find where a reorganization began
 DEAD = 3600         # seconds after which a batch whose transaction the node no longer has goes back to waiting
 
@@ -275,6 +275,8 @@ class Stamps:
                     "then": "the transaction waits for a block; ask again in a few minutes"}
         paths = self.trees.get(i)
         if paths is None:
+            if len(self.trees) >= 32:
+                self.trees.pop(next(iter(self.trees)))
             paths = self.trees[i] = tree([bytes.fromhex(d) for d in sorted(b["digests"])])[1]
         tip = self.state["scanned"] or b["block"]["height"]
         return {"version": VERSION, "digest": digest, "state": "stamped", "root": b["root"],
@@ -297,8 +299,8 @@ class Stamps:
             root = tree([bytes.fromhex(d) for d in due])[0]
             try:
                 done = self.wallet.stamp(root, memo="stamps batch %d (%d)" % (number, len(due)))
-            except Refused as e:
-                sys.stderr.write("%s batch refused: %s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), e.kind, str(e)[:200]))
+            except Exception as e:
+                sys.stderr.write("%s batch refused: %s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), getattr(e, "kind", type(e).__name__), str(e)[:200]))
                 with self.lock:
                     self.state["last"] = now                   # tried again after `every`
                     self._save()
@@ -371,8 +373,10 @@ class Stamps:
                     if self.clock() - b["made"] >= DEAD:
                         try:
                             self.rpc.call("getmempoolentry", txid)
-                        except Exception:
-                            dead.append(i)
+                        except Exception as e:
+                            # only the node's word that it does not have it: a node that did not answer says nothing
+                            if "not in mempool" in str(e).lower():
+                                dead.append(i)
         except Exception as e:
             sys.stderr.write("%s scan stopped: %s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), type(e).__name__, str(e)[:200]))
         with self.lock:

@@ -316,7 +316,13 @@ class X402Deep(X402OnRegtest):
         status, _, _ = self.ask(dict(payment, resource={"url": "/two"}), url=two)
         self.assertEqual(status, 402)
         self.assertEqual(self.ask(url=two, header=self.book()["pending"][one]["header"])[0], 402)
-        self.assertEqual(x402.fetch(one, self.buyer, units("1"), network=self.network, wait=0)["body"], b"one")
+        got = x402.fetch(one, self.buyer, units("1"), network=self.network, wait=0)
+        self.assertEqual(got["body"], b"one")
+        # the seller names the resource: the facilitator does not take the payment for another one, whatever the buyer wrote
+        wanted = dict(payment["accepted"], extra=dict(payment["accepted"].get("extra") or {}, resource="/two"))
+        self.assertEqual(self.patient.settle(payment, wanted)["errorReason"], "invalid_payment_requirements")
+        again = self.patient.settle(payment, dict(wanted, extra=dict(wanted["extra"], resource="/one")))
+        self.assertEqual((again["success"], again.get("redelivered")), (True, True))
 
     def test_a_payment_the_node_already_has_is_not_taken(self):
         _, offer = self.offer(self.deep_url)
