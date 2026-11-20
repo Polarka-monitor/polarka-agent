@@ -1,9 +1,10 @@
 """The proof of work of TrueNorth for this program: RandomX with the chain's salt, as it stands in the
 TrueNorth sources, behind a small C library (native/rxnorth.cpp).
 
-The library is not built when the package is installed. `polarka-agent build-rx --randomx DIR` builds it from
-the folder src/randomx of the TrueNorth sources and puts it into ~/.polarka-agent/lib. Without it mining and
-the pool do not start, and say why. The wallet itself never needs it.
+The packages for Linux (x86-64, arm64) and macOS (arm64) carry the library in polarka_agent/lib, so there
+`pip install polarka-agent` is all that mining needs. Elsewhere, or to use one's own build, `polarka-agent
+build-rx --randomx DIR` builds it from the folder src/randomx of the TrueNorth sources and puts it into
+~/.polarka-agent/lib. Without it mining and the pool do not start, and say why. The wallet never needs it.
 """
 import ctypes
 import os
@@ -36,7 +37,7 @@ def target_of(bits):
 
 
 def find_library():
-    for path in (os.environ.get("POLARKA_RX_LIB"), HOME_LIB, os.path.join(HERE, "native", "build", NAME)):
+    for path in (os.environ.get("POLARKA_RX_LIB"), os.path.join(HERE, "lib", NAME), HOME_LIB, os.path.join(HERE, "native", "build", NAME)):
         if path and os.path.isfile(path):
             return path
     return None

@@ -26,8 +26,8 @@ dependencies = []
 
 [project.urls]
 Homepage = "https://polarka.org"
-Source = "https://github.com/severka-monitor/polarka-agent"
-Issues = "https://github.com/severka-monitor/polarka-agent/issues"
+Source = "https://polarka.org/source/"
+Issues = "https://github.com/Polarka-monitor/polarka-agent/issues"
 
 [project.scripts]
 polarka-agent = "polarka_agent.cli:main"
@@ -38,9 +38,15 @@ path = "polarka_agent/__init__.py"
 [tool.hatch.build.targets.wheel]
 packages = ["polarka_agent"]
 core-metadata-version = "2.4"
+# the proof-of-work library, when tools/wheels has built it for one platform (it is not in git)
+artifacts = ["polarka_agent/lib/*"]
+
+[tool.hatch.build.targets.wheel.hooks.custom]
+path = "tools/wheels/hatch_build.py"
 
 [tool.hatch.build.targets.sdist]
 core-metadata-version = "2.4"
+exclude = ["/polarka_agent/lib"]
 include = [
     "/polarka_agent",
     "/tests",
@@ -52,4 +58,5 @@ include = [
     "/.github",
     "/docs",
     "/deploy",
+    "/tools",
 ]
