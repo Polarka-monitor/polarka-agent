@@ -306,7 +306,7 @@ def run(argv=None, out=sys.stdout):
             if not 0 <= a.confirmations <= 100 or a.redeliver < 0:
                 raise Refused("INPUT", "--confirmations is 0 to 100, --redeliver 0 or more")
             os.makedirs(folder, mode=0o700, exist_ok=True)
-            facilitator = Facilitator(RpcNode(a.rpc_url, os.path.expanduser(a.rpc_cookie)), a.chain, os.path.join(folder, "x402-used.jsonl"),
+            facilitator = Facilitator(RpcNode(a.rpc_url, os.path.expanduser(a.rpc_cookie), timeout=30), a.chain, os.path.join(folder, "x402-used.jsonl"),
                                       a.confirmations, units(a.instant_below), a.redeliver)
             if a.chain in NETWORKS and facilitator.network != NETWORKS[a.chain]:
                 raise Refused("CHAIN", "the node runs another chain than --chain")

@@ -55,6 +55,13 @@ CLAIM = re.compile(r"^[0-9a-f]{32,128}$")
 KEYS = ("scheme", "network", "amount", "asset", "payTo")
 WAITING, DELIVERED = "waiting", "delivered"
 AWAITING = "awaiting_confirmation"
+AGAIN = ("unexpected_settle_error", "settlement_failed")       # the facilitator failed, not the payment: ask again later
+LOCAL = ("127.0.0.1", "localhost", "::1")
+
+
+def local_or_https(url):
+    parts = urllib.parse.urlsplit(url)
+    return parts.scheme == "https" or (parts.scheme == "http" and parts.hostname in LOCAL)
 PENDING = "x402-pending.json"       # in the buyer's wallet folder: payments made and not yet answered, and lots of calls
 
 
@@ -135,8 +142,13 @@ class Facilitator:
                 "extensions": [], "signers": {}}
 
     def _keep(self, rec):
-        with open(self.used_path, "a") as f:
-            f.write(json.dumps(rec, separators=(",", ":")) + "\n")
+        with open(self.used_path, "a+b") as f:
+            f.seek(0, os.SEEK_END)
+            if f.tell():
+                f.seek(-1, os.SEEK_END)
+                if f.read(1) != b"\n":                      # a line cut short when the machine stopped
+                    f.write(b"\n")
+            f.write(json.dumps(rec, separators=(",", ":")).encode() + b"\n")
             f.flush()
             os.fsync(f.fileno())
         self.known[rec["txid"]] = rec
@@ -176,8 +188,24 @@ class Facilitator:
         return hits[0][0], None
 
     def _node_takes(self, raw):
-        verdict = self.node.call("testmempoolaccept", [raw])[0]
-        return verdict.get("allowed") or verdict.get("reject-reason") in ("txn-already-in-mempool", "txn-already-known")
+        """Only a transaction the node does not have yet: one it has (waiting or in a block) was sent by somebody
+        else, and whoever shows it now need not be who paid."""
+        return self.node.call("testmempoolaccept", [raw])[0].get("allowed") is True
+
+    def _need(self, wanted):
+        """Blocks a payment for these requirements must be in: what the seller asks in extra.confirmations, and
+        never fewer than this facilitator asks itself."""
+        asked = (wanted.get("extra") or {}).get("confirmations", 0) if isinstance(wanted.get("extra"), (dict, type(None))) else 0
+        asked = asked if type(asked) is int and 0 <= asked <= 100 else self.confirmations
+        return max(self.needed(wanted["amount"]), asked)
+
+    @staticmethod
+    def _covers(rec, wanted):
+        """A payment shown again pays for what is asked now: the same seller, chain and coin, and at least today's price."""
+        had = rec.get("wanted") or {}
+        if any(had.get(k) != wanted.get(k) for k in ("scheme", "network", "asset", "payTo")) or int(had.get("amount", 0)) < int(wanted["amount"]):
+            return "invalid_payment_requirements"
+        return None
 
     def _depth(self, txid, vout):
         """Blocks the payment is in (0: waiting in the node), or None when the node no longer knows it."""
@@ -207,10 +235,10 @@ class Facilitator:
                 if not self._owner(rec, claim) or (rec["state"] == DELIVERED and self.clock() - rec["at"] > self.redeliver):
                     why = "transaction_already_used"
                 else:
-                    why = self._matches(payment, decoded, rec["wanted"])[1]
+                    why = self._matches(payment, decoded, rec["wanted"])[1] or self._covers(rec, wanted)
             elif why is None:
                 why = self._matches(payment, decoded, wanted)[1]
-                if why is None and self.needed(wanted["amount"]) and claim is None:
+                if why is None and self._need(wanted) and claim is None:
                     why = "claim_required"
                 if why is None and not self._node_takes(raw):
                     why = "transaction_refused_by_node"
@@ -229,7 +257,7 @@ class Facilitator:
                 vout, why = self._matches(payment, decoded, wanted)
                 if why is not None:
                     return self._fail(why, txid)
-                need = self.needed(wanted["amount"])
+                need = self._need(wanted)
                 if need and claim is None:
                     return self._fail("claim_required", txid)
                 if not self._node_takes(raw):
@@ -246,11 +274,11 @@ class Facilitator:
                 if not self._owner(rec, claim):
                     return self._fail("transaction_already_used", txid)
                 # shown again: it is held to what was asked when it was made, not to today's price
-                if self._matches(payment, decoded, rec["wanted"])[1] is not None:
+                if self._matches(payment, decoded, rec["wanted"])[1] is not None or self._covers(rec, wanted):
                     return self._fail("invalid_payment_requirements", txid)
                 if rec["state"] == DELIVERED:
                     return self._ok(txid) if now - rec["at"] <= self.redeliver else self._fail("transaction_already_used", txid)
-            need = rec.get("need", 0)
+            need = max(rec.get("need", 0), self._need(wanted))
             if need:
                 depth = self._depth(txid, rec["vout"])
                 if depth is None:
@@ -272,7 +300,7 @@ class RemoteFacilitator:
 
     def __init__(self, url, timeout=30):
         self.url, self.timeout = url.rstrip("/"), timeout
-        if not self.url.startswith("https://") and not self.url.split("//", 1)[-1].startswith(("127.0.0.1", "localhost", "[::1]")):
+        if not local_or_https(self.url):
             raise Refused("X402", "a facilitator is reached over https (or on this machine)")
         kinds = [k for k in self._call("/supported").get("kinds", []) if isinstance(k, dict) and k.get("scheme") == "exact"
                  and str(k.get("network", "")).startswith("bip122:")]
@@ -450,6 +478,9 @@ def paywall(facilitator, price, pay_to, content, content_type="text/plain; chars
             if done.get("errorReason") == AWAITING:
                 return self.send(202, {"waiting": "the payment is not deep enough in the chain yet; send the same PAYMENT-SIGNATURE again"},
                                  dict(told, **{"Retry-After": "20"}))
+            if done.get("errorReason") in AGAIN:
+                return self.send(503, {"error": "the payment could not be settled just now; send the same PAYMENT-SIGNATURE again"},
+                                 dict(told, **{"Retry-After": "60"}))
             return self.send(402, {}, told)
 
     server = ThreadingHTTPServer(listen, Handler)
@@ -498,15 +529,20 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
     network = network or NETWORKS.get(wallet.chain)
     if network is None:
         raise Refused("X402", "x402 in NORTH on %s needs the network's name (network=)" % wallet.chain)
-    if not url.startswith("https://") and not url.split("//", 1)[-1].startswith(("127.0.0.1", "localhost", "[::1]")):
+    if not local_or_https(url):
         raise Refused("X402", "x402 is used over https (or on this machine)")
     parts = urllib.parse.urlsplit(url)
     origin = "%s://%s" % (parts.scheme, parts.netloc)
 
+    class Stay(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *a, **k):        # a payment and a lot token go to this url and nowhere else
+            return None
+    opener = urllib.request.build_opener(Stay)
+
     def get(headers):
         req = urllib.request.Request(url, headers=dict(headers, **{"User-Agent": "polarka-agent"}))
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with opener.open(req, timeout=timeout) as r:
                 return r.status, r.headers, r.read(2_000_000)          # headers are looked up whatever their case
         except urllib.error.HTTPError as e:
             return e.code, e.headers, e.read(2_000_000)
@@ -586,7 +622,8 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
         sleep(max(0, min(max(retry, 5), 60, left)))
     with BOOK:
         book = _book(wallet)
-        if status < 500:                            # answered, or refused for good; a server's failure is asked again later
+        final = status == 200 or status == 400 or (status == 402 and (settled is None or settled.get("errorReason") not in AGAIN + (AWAITING,)))
+        if final:                                   # answered, or refused for good; anything else is asked again later
             book["pending"].pop(url, None)
         left = calls_left(headers)
         if status == 200 and left:

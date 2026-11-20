@@ -209,7 +209,7 @@ class X402Deep(X402OnRegtest):
         self.assertEqual((got["status"], got["body"], got["txid"], got["settlement"]["success"]), (200, b"deep answer", done["txid"], True))
         self.assertIn("nothing more was paid", got["note"])
         self.assertEqual(len(self.buyer.payments()), made)
-        self.assertEqual(self.book()["pending"], {})
+        self.assertNotIn(self.deep_url, self.book()["pending"])
         # an answer lost on the way is given again for a while, then not
         self.assertEqual(self.ask(url=self.deep_url, header=header)[0], 200)
         type(self).skew = 601
@@ -290,6 +290,60 @@ class X402Deep(X402OnRegtest):
         self.assertEqual(len(self.buyer.payments()), made + 2)
         self.node.mine(1, SINK)
         self.assertEqual(x402.fetch(url, self.buyer, units("1"), network=self.network, wait=0)["status"], 200)
+
+    def test_a_cheap_payment_does_not_buy_a_dear_thing(self):
+        pay_to = self.seller.account.address(0, 3)
+        cheap = self.start(x402.paywall(self.patient, PRICE, pay_to, b"cheap")) + "/cheap"
+        dear = self.start(x402.paywall(self.patient, 2 * PRICE, pay_to, b"dear")) + "/dear"
+        self.assertEqual(x402.fetch(cheap, self.buyer, units("1"), network=self.network, wait=0)["status"], 202)
+        header = self.book()["pending"][cheap]["header"]
+        self.node.mine(1, SINK)
+        status, headers, _ = self.ask(url=dear, header=header)
+        self.assertEqual((status, x402.from_b64json(headers.get("PAYMENT-RESPONSE"))["errorReason"]), (402, "invalid_payment_requirements"))
+        status, _, body = self.ask(url=cheap, header=header)
+        self.assertEqual((status, body), (200, b"cheap"))
+
+    def test_a_payment_the_node_already_has_is_not_taken(self):
+        _, offer = self.offer(self.deep_url)
+        made = self.buyer.pay([(offer["payTo"], PRICE)], "paid straight, not over x402")
+        self.node.mine(1, SINK)
+        raw = self.node.cli("getrawtransaction", made["id"], "false", self.node.cli("getbestblockhash"))
+        status, headers, _ = self.ask({"x402Version": 2, "accepted": offer, "payload": {"transaction": raw, "claim": "cd" * 16}},
+                                      url=self.deep_url)
+        self.assertEqual((status, x402.from_b64json(headers.get("PAYMENT-RESPONSE"))["errorReason"]), (402, "transaction_refused_by_node"))
+
+    def test_the_seller_may_ask_for_more_blocks(self):
+        wanted = x402.requirements(self.network, PRICE, self.seller.account.address(0, 4), confirmations=2)
+        made = self.buyer.pay([(wanted["payTo"], PRICE)], "x402 test, two blocks", hand=False)
+        payment = {"x402Version": 2, "accepted": wanted, "payload": {"transaction": made["raw"], "claim": "ef" * 16}}
+        self.assertEqual(self.patient.settle(payment, wanted)["required"], 2)
+        self.node.mine(1, SINK)
+        self.assertEqual(self.patient.settle(payment, wanted)["errorReason"], "awaiting_confirmation")
+        self.node.mine(1, SINK)
+        self.assertTrue(self.patient.settle(payment, wanted)["success"])
+
+    def test_no_redirect_and_a_failing_facilitator_keeps_the_payment(self):
+        class Away(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                self.send_response(302)
+                self.send_header("Location", "http://127.0.0.1:9/elsewhere")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+        url = self.start(ThreadingHTTPServer(("127.0.0.1", 0), Away)) + "/x"
+        self.assertEqual(x402.fetch(url, self.buyer, units("1"), network=self.network, wait=0)["status"], 302)
+        with self.assertRaises(Refused):
+            x402.fetch("http://localhost.example.org/x", self.buyer, units("1"), network=self.network)
+        service = x402.facilitator_server(self.patient)
+        remote = x402.RemoteFacilitator(self.start(service))
+        wall = self.start(x402.paywall(remote, PRICE, self.seller.account.address(0, 5), b"later")) + "/later"
+        service.shutdown()
+        service.server_close()
+        got = x402.fetch(wall, self.buyer, units("1"), network=self.network, wait=0)
+        self.assertEqual(got["status"], 503)
+        self.assertIn(wall, self.book()["pending"])
 
     # the tests of the seller that takes a payment at once are not repeated here
     test_paid_once_and_only_once = test_too_little_and_requirements_changed_on_the_way = None

@@ -44,14 +44,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .keys import UNIT
 from .server import ServerError, reachable
 from .wallet import Refused, north, units as units_of
-from .x402 import AWAITING, CLAIM, VERSION as X402_VERSION, b64json, from_b64json, requirements
+from .x402 import AGAIN as X402_AGAIN, AWAITING, CLAIM, VERSION as X402_VERSION, b64json, from_b64json, requirements
 
 QUOTE_LIFE = 1800               # seconds an address waits for its payment
 PRICE_LIFE = 600                # seconds a price worked out from the network is kept
 PRICE_STALE = 6 * 3600          # when the server gives no template: a price older than this is not quoted
 MAX_BODY = 1 << 20              # the largest request passed on
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade",
-       "x-postage", "host", "content-length"}
+       "x-postage", "host", "content-length", "payment-signature"}
 
 
 def mark(token):
@@ -171,13 +171,13 @@ class Gate:
             return False
 
     def x402_wanted(self, amount=None):
-        """The requirements of x402 for one lot. A price asked in the last twenty minutes is still taken, so that a
+        """The requirements of x402 for one lot. A price asked in the last hour is still taken, so that a
         price that moved with the network does not refuse who paid the one before."""
         with self.lock:
             now = self.clock()
             price = self._price()
             self.offered = {p: until for p, until in self.offered.items() if until > now}
-            self.offered[price] = now + 2 * PRICE_LIFE
+            self.offered[price] = now + 6 * PRICE_LIFE
             try:
                 asked = int(amount) if amount is not None else None
             except (TypeError, ValueError):
@@ -301,6 +301,10 @@ def make_handler(gate, upstream, trust_proxy, routes=()):
                             outcome = "waiting"
                             return self.send(202, {"waiting": "the payment is not deep enough in the chain yet; send the same "
                                                               "PAYMENT-SIGNATURE again"}, dict(more, **{"Retry-After": "20"}))
+                        if done.get("errorReason") in X402_AGAIN:
+                            outcome = "x402 not now"
+                            return self.send(503, {"error": "NOT_NOW", "message": "the payment could not be settled just now; send the "
+                                                   "same PAYMENT-SIGNATURE again"}, dict(more, **{"Retry-After": "60"}))
                         outcome = "x402 %s" % str(done.get("errorReason"))[:40]
                         more["PAYMENT-REQUIRED"] = b64json(gate.x402_needed(self.path))
                         return self.send(402, gate.about(), more)
