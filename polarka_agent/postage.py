@@ -16,6 +16,11 @@ it was given.
     GET  /_postage/status             -> {"calls_left", "paid"}          (header X-Postage: token)
     any request with X-Postage: token -> passed on to the service while calls are left
 
+With a facilitator (--x402-facilitator), the same lot can be bought with x402 instead: the 402 also carries
+PAYMENT-REQUIRED, a request with PAYMENT-SIGNATURE pays for one lot, and once the payment is in a block that request
+passes and its claim (the secret in the payment's payload) is the token for the rest of the lot. Every call that
+passes on such a lot tells how many are left in X-Postage-Calls-Left.
+
 How a payment is told apart: every quote gets an address of the gate's wallet for itself, for half an hour.
 What arrives on that address in that time (and ten minutes more), in a block, belongs to that token. An address that was not paid is
 given to the next asker afterwards, so the wallet does not walk through its keys.
@@ -39,6 +44,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from .keys import UNIT
 from .server import ServerError, reachable
 from .wallet import Refused, north, units as units_of
+from .x402 import AWAITING, CLAIM, VERSION as X402_VERSION, b64json, from_b64json, requirements
 
 QUOTE_LIFE = 1800               # seconds an address waits for its payment
 PRICE_LIFE = 600                # seconds a price worked out from the network is kept
@@ -53,8 +59,10 @@ def mark(token):
 
 
 class Gate:
-    def __init__(self, wallet, price, calls, free=0, clock=time.time, look_every=20, hashes=0):
+    def __init__(self, wallet, price, calls, free=0, clock=time.time, look_every=20, hashes=0, x402=None):
         self.wallet, self.price, self.calls, self.free, self.clock, self.look_every = wallet, price, calls, free, clock, look_every
+        self.x402 = x402            # a facilitator: the lot may then be bought with x402 too
+        self.offered = {}           # a price asked over x402 -> until when a payment of it is taken
         self.hashes = hashes        # above nothing: the price of a lot is this much mining work, not a fixed amount
         self.priced = None          # (when, the price in base units, hashes for one NORTH)
         self.lock = threading.Lock()
@@ -67,6 +75,10 @@ class Gate:
                 self.state = json.load(f)
         except FileNotFoundError:
             self.state = {"tokens": {}, "addresses": {}}     # addresses: address -> the amount on it already counted
+        if x402 is not None and not self.state.get("x402_address"):
+            # one address for every payment over x402: such a payment is told apart by its transaction, not its address
+            self.state["x402_address"] = wallet.fresh_address()
+            self._save()
 
     def _save(self):
         tmp = self.book + ".new"
@@ -158,6 +170,55 @@ class Gate:
                     return True
             return False
 
+    def x402_wanted(self, amount=None):
+        """The requirements of x402 for one lot. A price asked in the last twenty minutes is still taken, so that a
+        price that moved with the network does not refuse who paid the one before."""
+        with self.lock:
+            now = self.clock()
+            price = self._price()
+            self.offered = {p: until for p, until in self.offered.items() if until > now}
+            self.offered[price] = now + 2 * PRICE_LIFE
+            try:
+                asked = int(amount) if amount is not None else None
+            except (TypeError, ValueError):
+                asked = None
+            if asked in self.offered:
+                price = asked
+        return requirements(self.x402.network, price, self.state["x402_address"], confirmations=self.x402.needed(price))
+
+    def x402_needed(self, path):
+        return {"x402Version": X402_VERSION, "error": "PAYMENT-SIGNATURE header is required",
+                "resource": {"url": path, "description": "postage for %d calls" % self.calls, "mimeType": "application/json"},
+                "accepts": [self.x402_wanted()]}
+
+    def x402_pay(self, payment):
+        """A payment of x402 for one lot. (what came of it, True when this call may pass)."""
+        body = payment.get("payload") if isinstance(payment, dict) else None
+        claim = body.get("claim") if isinstance(body, dict) else None
+        if not isinstance(claim, str) or not CLAIM.match(claim):
+            return {"success": False, "errorReason": "claim_required", "transaction": "", "network": self.x402.network, "payer": None}, False
+        with self.lock:
+            t = self.state["tokens"].get(mark(claim))
+        if t is not None:                   # the lot is paid already: the payment shown again is one more call of it
+            done = {"success": True, "transaction": t.get("txid", ""), "network": self.x402.network, "payer": None}
+            return done, self.spend(claim, None)
+        accepted = payment.get("accepted")
+        done = self.x402.settle(payment, self.x402_wanted(accepted.get("amount") if isinstance(accepted, dict) else None))
+        if not done.get("success"):
+            return done, False
+        with self.lock:
+            key = mark(claim)
+            if key not in self.state["tokens"]:
+                self.state["tokens"][key] = {"address": self.state["x402_address"], "expires": int(self.clock()) + QUOTE_LIFE, "paid": True,
+                                             "calls": self.calls, "price": int(accepted["amount"]), "txid": done.get("transaction", "")}
+                self._save()
+        return done, self.spend(claim, None)
+
+    def left(self, token):
+        with self.lock:
+            t = self.state["tokens"].get(mark(token or ""))
+            return t["calls"] if t is not None else None
+
     def about(self):
         with self.lock:
             price = self._price()
@@ -166,6 +227,10 @@ class Gate:
              "price": north(price), "for_calls": self.calls, "free_calls_a_day": self.free,
              "how": ["POST /_postage/quote", "pay the price to the address it names", "send the token in the header X-Postage"],
              "note": "postage is counted in calls and is not given back; NORTH has no market price"}
+        if self.x402 is not None:
+            a["x402"] = {"network": self.x402.network, "how": "or pay one lot with x402 (PAYMENT-REQUIRED is in this answer's headers); "
+                         "the claim in your payment's payload is then the token for the rest of the lot",
+                         "confirmations": self.x402.needed(price)}
         if self.hashes:
             a["price_in_hashes"], a["hashes_for_one_north"] = self.hashes, priced[2]
             a["note"] = ("the price is so many hashes of mining work, in NORTH at what the network needs for a block now, and moves with it; "
@@ -187,10 +252,12 @@ def make_handler(gate, upstream, trust_proxy):
                     return f.split(",")[-1].strip()
             return self.client_address[0]
 
-        def send(self, code, obj):
+        def send(self, code, obj, more=None):
             body = json.dumps(obj).encode()
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
+            for k, v in (more or {}).items():
+                self.send_header(k, v)
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
@@ -210,9 +277,34 @@ def make_handler(gate, upstream, trust_proxy):
                 if self.path == "/_postage/status":
                     what, outcome = "status", "ok"
                     return self.send(200, gate.status(self.headers.get("X-Postage")))
-                if not gate.spend(self.headers.get("X-Postage"), self.source()):
+                token, signed, more = self.headers.get("X-Postage"), self.headers.get("PAYMENT-SIGNATURE"), {}
+                if gate.x402 is not None and signed and not token:
+                    what = "x402"
+                    try:
+                        payment = from_b64json(signed)
+                    except Exception:
+                        outcome = "unreadable"
+                        return self.send(400, {"error": "INPUT", "message": "the payment cannot be read"})
+                    done, may = gate.x402_pay(payment)
+                    more["PAYMENT-RESPONSE"] = b64json(done)
+                    if not may:
+                        if done.get("errorReason") == AWAITING:
+                            outcome = "waiting"
+                            return self.send(202, {"waiting": "the payment is not deep enough in the chain yet; send the same "
+                                                              "PAYMENT-SIGNATURE again"}, dict(more, **{"Retry-After": "20"}))
+                        outcome = "x402 %s" % str(done.get("errorReason"))[:40]
+                        more["PAYMENT-REQUIRED"] = b64json(gate.x402_needed(self.path))
+                        return self.send(402, gate.about(), more)
+                    token = payment["payload"]["claim"]
+                elif not gate.spend(token, self.source()):
                     outcome = "402"
-                    return self.send(402, gate.about())
+                    if gate.x402 is not None:
+                        more["PAYMENT-REQUIRED"] = b64json(gate.x402_needed(self.path))
+                    return self.send(402, gate.about(), more)
+                if token:
+                    left = gate.left(token)
+                    if left is not None:
+                        more["X-Postage-Calls-Left"] = str(left)
                 c = http.client.HTTPConnection(host, int(port), timeout=60)
                 try:
                     headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP}
@@ -221,8 +313,10 @@ def make_handler(gate, upstream, trust_proxy):
                     answer = r.read(64 << 20)
                     self.send_response(r.status)
                     for k, v in r.getheaders():
-                        if k.lower() not in HOP:
+                        if k.lower() not in HOP and k.lower() not in ("payment-response", "x-postage-calls-left"):
                             self.send_header(k, v)
+                    for k, v in more.items():
+                        self.send_header(k, v)
                     self.send_header("Content-Length", str(len(answer)))
                     self.end_headers()
                     self.wfile.write(answer)
@@ -297,10 +391,12 @@ def buy(wallet, url, most, timeout=30):
             "then": "when the payment is in a block, send the token in the header X-Postage with each call"}
 
 
-def serve(wallet, upstream, price, calls, listen, free=0, trust_proxy=False, hashes=0):
+def serve(wallet, upstream, price, calls, listen, free=0, trust_proxy=False, hashes=0, x402=None):
     if (price <= 0) == (hashes <= 0) or calls <= 0 or free < 0:
         raise Refused("INPUT", "a price in NORTH or a price in hashes, one of the two, and a number of calls above nothing")
-    gate = Gate(wallet, price, calls, free, hashes=hashes)
+    if x402 is not None and getattr(x402, "chain", None) and x402.chain != wallet.chain:
+        raise Refused("CHAIN", "the facilitator settles another chain than the gate's wallet")
+    gate = Gate(wallet, price, calls, free, hashes=hashes, x402=x402)
     if hashes:
         try:
             price = units_of(gate.about()["price"])
@@ -309,6 +405,7 @@ def serve(wallet, upstream, price, calls, listen, free=0, trust_proxy=False, has
     host, port = listen.rsplit(":", 1)
     srv = ThreadingHTTPServer((host, int(port)), make_handler(gate, upstream, trust_proxy))
     srv.daemon_threads = True
-    sys.stderr.write("postage gate on %s before %s: %s NORTH for %d calls%s, %d free a day\n"
-                     % (listen, upstream, north(price), calls, " (%d hashes of work, at the network of this moment)" % hashes if hashes else "", free))
+    sys.stderr.write("postage gate on %s before %s: %s NORTH for %d calls%s, %d free a day%s\n"
+                     % (listen, upstream, north(price), calls, " (%d hashes of work, at the network of this moment)" % hashes if hashes else "", free,
+                        ", x402 on %s" % x402.network if x402 is not None else ""))
     srv.serve_forever()

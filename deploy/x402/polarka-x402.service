@@ -1,0 +1,29 @@
+# The x402 facilitator: checks payments in NORTH for sellers and hands them to the node beside it. It keeps
+# no coins and signs nothing. Loopback only; a web server with a certificate stands before it.
+[Unit]
+Description=Polarka x402 facilitator (polarka-agent x402-facilitator)
+After=network-online.target truenorthd.service
+Wants=network-online.target
+
+[Service]
+User=x402
+Group=x402
+SupplementaryGroups=truenorth
+ExecStart=/opt/polarka-x402/venv/bin/polarka-agent --dir /var/lib/polarka-x402 x402-facilitator --chain main --rpc-url http://127.0.0.1:9554 --rpc-cookie /var/lib/truenorth/.cookie --listen 127.0.0.1:9570 --confirmations 1
+Restart=on-failure
+RestartSec=10
+RestartPreventExitStatus=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+IPAddressDeny=any
+IPAddressAllow=localhost
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ReadWritePaths=/var/lib/polarka-x402
+MemoryMax=300M
+TasksMax=200
+
+[Install]
+WantedBy=multi-user.target

@@ -143,6 +143,19 @@ def run(argv=None, out=sys.stdout):
     c.add_argument("url")
     c.add_argument("--most", required=True, help="the most NORTH to pay for it")
     c.add_argument("--out", help="write what came back to this file (else up to 4000 characters of it are shown)")
+    c.add_argument("--wait", type=int, default=600, help="seconds to wait while the seller waits for a block (default 600); "
+                   "fetching the same url again later pays nothing more")
+    c = sub.add_parser("x402-facilitator", help="settle x402 payments in NORTH for sellers, with this machine's node; --dir keeps "
+                                                "what was taken")
+    c.add_argument("--chain", required=True, choices=("main", "regtest"))
+    c.add_argument("--rpc-url", required=True, help="the node, for example http://127.0.0.1:9554")
+    c.add_argument("--rpc-cookie", required=True, help="the node's .cookie file")
+    c.add_argument("--listen", default="127.0.0.1:9570", help="a loopback address; put a web server with a certificate before it")
+    c.add_argument("--confirmations", type=int, default=1, help="blocks a payment must be in before it is settled (default 1)")
+    c.add_argument("--instant-below", default="0", help="NORTH under which a payment is settled when the node takes it, before a "
+                   "block (default 0: never)")
+    c.add_argument("--redeliver", type=int, default=600, help="seconds after it was settled that the same payment and claim "
+                   "are settled again (an answer lost on the way)")
     c = sub.add_parser("postage-serve", help="be a gate before a web service that lets through who paid postage to this wallet")
     c.add_argument("--upstream", required=True, help="the service behind the gate, host:port")
     c.add_argument("--price", help="NORTH for one lot of calls")
@@ -152,6 +165,7 @@ def run(argv=None, out=sys.stdout):
     c.add_argument("--free", type=int, default=0, help="calls a day that one source may make without postage")
     c.add_argument("--listen", default="127.0.0.1:8670")
     c.add_argument("--trust-proxy", action="store_true", help="take the caller's address from X-Forwarded-For")
+    c.add_argument("--x402-facilitator", help="also sell the lot over x402, settled by this facilitator (http://127.0.0.1:9570)")
     c = sub.add_parser("faucet-serve", help="be a faucet: hand out a little from this wallet, within its limits.json")
     c.add_argument("--amount", required=True, help="NORTH given to one address")
     c.add_argument("--listen", default="127.0.0.1:8660")
@@ -259,6 +273,25 @@ def run(argv=None, out=sys.stdout):
             return pool_serve(Pool(node, a.chain, pay_to, folder, a.ratio, a.fee, cap=cap, guard=Guard(), payouts=payouts, miners=miners,
                                    most_owed=units(a.most_owed) if a.pay_every else None),
                               a.listen, a.trust_proxy, a.pay_every)
+        if a.cmd == "x402-facilitator":
+            from .walletd import Node as RpcNode, loopback
+            from .x402 import NETWORKS, Facilitator, facilitator_server
+            try:
+                host, port = loopback(a.listen)
+            except ValueError:
+                raise Refused("INPUT", "--listen is a loopback address with a port, for example 127.0.0.1:9570")
+            if not 0 <= a.confirmations <= 100 or a.redeliver < 0:
+                raise Refused("INPUT", "--confirmations is 0 to 100, --redeliver 0 or more")
+            os.makedirs(folder, mode=0o700, exist_ok=True)
+            facilitator = Facilitator(RpcNode(a.rpc_url, os.path.expanduser(a.rpc_cookie)), a.chain, os.path.join(folder, "x402-used.jsonl"),
+                                      a.confirmations, units(a.instant_below), a.redeliver)
+            if a.chain in NETWORKS and facilitator.network != NETWORKS[a.chain]:
+                raise Refused("CHAIN", "the node runs another chain than --chain")
+            server = facilitator_server(facilitator, (host, port))
+            sys.stderr.write("x402 facilitator on %s for %s: %d confirmations, at once below %s NORTH\n"
+                             % (a.listen, facilitator.network, a.confirmations, a.instant_below))
+            server.serve_forever()
+            return 0
         wallet = Wallet(folder)
         if a.cmd == "mcp":
             from .mcp import serve
@@ -275,7 +308,9 @@ def run(argv=None, out=sys.stdout):
             return show(buy(wallet, a.url, units(a.most)))
         if a.cmd == "fetch":
             from .x402 import fetch
-            got = fetch(a.url, wallet, units(a.most))
+            if a.wait < 0:
+                raise Refused("INPUT", "--wait is 0 or more")
+            got = fetch(a.url, wallet, units(a.most), wait=a.wait)
             body = got.pop("body")
             if a.out:
                 with open(os.path.expanduser(a.out), "wb") as f:
@@ -283,13 +318,17 @@ def run(argv=None, out=sys.stdout):
                 got["saved"] = {"file": a.out, "bytes": len(body)}
             else:
                 got["body"] = body[:4000].decode("utf-8", "replace")
-            return show(got, 0 if got["status"] == 200 else 2)
+            return show(got, 0 if got["status"] == 200 else 3 if got.get("pending") else 2)
         if a.cmd == "postage-serve":
             from .postage import serve as postage_serve
             if (a.price is None) == (a.price_hashes is None):
                 raise Refused("INPUT", "give --price or --price-hashes, one of the two")
+            facilitator = None
+            if a.x402_facilitator:
+                from .x402 import RemoteFacilitator
+                facilitator = RemoteFacilitator(a.x402_facilitator)
             return postage_serve(wallet, a.upstream, units(a.price) if a.price is not None else 0, a.calls, a.listen, a.free,
-                                 a.trust_proxy, a.price_hashes or 0)
+                                 a.trust_proxy, a.price_hashes or 0, facilitator)
         if a.cmd == "faucet-serve":
             from .faucet import serve as faucet_serve
             if not 10 <= a.bits <= 30:

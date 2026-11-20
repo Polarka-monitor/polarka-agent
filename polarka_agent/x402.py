@@ -4,28 +4,40 @@ again, the resource takes the payment and answers.
 x402 (github.com/x402-foundation/x402, specs/x402-specification-v2.md and specs/transports-v2/http.md) names its
 networks in CAIP-2. NORTH is a chain of the Bitcoin kind, so it is named as such chains are (CAIP-4, namespace
 bip122): the first 32 hexadecimal characters of the hash of its first block. x402 has no scheme for a chain of
-coins yet; this module uses "exact" in the plain way such a chain allows:
+coins yet; this module uses "exact" in the plain way such a chain allows (docs/x402-scheme-exact-bip122.md):
 
   requirements  {"scheme": "exact", "network": NETWORK, "amount": base units as text, "asset": "NORTH",
-                 "payTo": an address, "maxTimeoutSeconds": n}
-  payload       {"transaction": a signed transaction in hexadecimal that pays at least amount to payTo}
+                 "payTo": an address, "maxTimeoutSeconds": n, "extra": {"confirmations": k}}
+  payload       {"transaction": a signed transaction in hexadecimal with exactly one output to payTo, of at
+                 least amount, "claim": 32 to 128 hexadecimal characters the client chose and keeps to itself}
   verify        the transaction pays enough to payTo, the node would take it, it was not used before
-  settle        the node is given the transaction; its id is the "transaction" of the answer
+  settle        the node is given the transaction; once it is k blocks deep, the request is answered
 
-A transaction can buy one request only: the seller keeps the ids it took. The seller takes the payment as soon
-as its node takes the transaction, before any block (NORTH has no price; this is for keeping robots away, not
-for trade). The headers: PAYMENT-REQUIRED (402), PAYMENT-SIGNATURE (the client's payment), PAYMENT-RESPONSE
-(what came of it), each a JSON object in base64.
+Why a claim: a payment that has to wait for a block is public while it waits, and whoever copies it from the
+network could ask with it first. Only who made the payment knows its claim, so only they get what it bought.
+Showing the same payment and claim again is how the client asks while it waits, and how it gets an answer
+again that was lost on the way (for `redeliver` seconds after it was given).
 
-Not settled with x402's own people: that "exact" may be used so for a chain of coins, and that NORTH may be named
-so. Until then only clients that know this module pay in NORTH.
+How deep: `confirmations` blocks (1 unless the seller says otherwise), or none for an amount under
+`instant_below`, where the seller takes the payment as soon as its node does. With none, a payment can still be
+replaced before a block; that is a price only for keeping robots away, not for anything of value.
+
+The headers: PAYMENT-REQUIRED (402), PAYMENT-SIGNATURE (the client's payment), PAYMENT-RESPONSE (what came of it),
+each a JSON object in base64. While the payment waits for its block the seller answers 202 with Retry-After and a
+PAYMENT-RESPONSE whose errorReason is "awaiting_confirmation".
+
+Not settled with x402's own people: that "exact" may be used so for a chain of coins, the claim, the 202, and that
+NORTH may be named so. Until then only clients that know this module pay in NORTH.
 """
 import base64
+import hashlib
 import json
 import os
+import re
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -38,6 +50,12 @@ ASSET = "NORTH"
 NETWORKS = {"main": "bip122:470c8b8ae824c06575cfae0851282c49"}
 MAX_HEADER = 400_000                # a transaction of 200 kB, in hexadecimal and base64, and the rest
 MAX_TX_HEX = 200_000
+MAX_BODY = 1 << 20                  # the largest request the facilitator service reads
+CLAIM = re.compile(r"^[0-9a-f]{32,128}$")
+KEYS = ("scheme", "network", "amount", "asset", "payTo")
+WAITING, DELIVERED = "waiting", "delivered"
+AWAITING = "awaiting_confirmation"
+PENDING = "x402-pending.json"       # in the buyer's wallet folder: payments made and not yet answered, and lots of calls
 
 
 def b64json(obj):
@@ -53,91 +71,351 @@ def from_b64json(text):
     return obj
 
 
+def mark(text):
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
 def network_of(node):
     """The CAIP-2 name of the chain the node runs."""
     return "bip122:" + node.call("getblockhash", 0)[:32]
 
 
-def requirements(network, amount, pay_to, timeout=60):
-    return {"scheme": "exact", "network": network, "amount": str(int(amount)), "asset": ASSET, "payTo": pay_to,
-            "maxTimeoutSeconds": int(timeout)}
+def chain_of(network):
+    for chain, name in NETWORKS.items():
+        if name == network:
+            return chain
+    return None
+
+
+def requirements(network, amount, pay_to, timeout=60, confirmations=None):
+    r = {"scheme": "exact", "network": network, "amount": str(int(amount)), "asset": ASSET, "payTo": pay_to,
+         "maxTimeoutSeconds": int(timeout)}
+    if confirmations is not None:
+        r["extra"] = {"confirmations": int(confirmations)}
+    return r
 
 
 # ------------------------------------------------------------------------------------------------ the seller
 
 class Facilitator:
-    """Checks payments and gives them to the seller's own node (a walletd.Node, or anything with call()). The ids
-    of the transactions it took are kept in `used` (a file, one id a line), so that one cannot buy twice."""
+    """Checks payments and gives them to the seller's own node (a walletd.Node, or anything with call()). What it
+    took is kept in `used` (a file, one JSON line a change), so that one payment cannot buy twice, not even after a
+    start again."""
 
-    def __init__(self, node, chain, used):
+    def __init__(self, node, chain, used, confirmations=1, instant_below=0, redeliver=600, clock=time.time):
+        if not 0 <= confirmations <= 100 or instant_below < 0 or redeliver < 0:
+            raise ValueError("confirmations 0 to 100, instant_below and redeliver 0 or more")
         self.node, self.chain, self.used_path = node, chain, used
+        self.confirmations, self.instant_below, self.redeliver, self.clock = confirmations, instant_below, redeliver, clock
         self.lock = threading.Lock()
         self.network = network_of(node)
-        self.used = set()
+        self.known = {}             # txid -> the last word about it
         if os.path.exists(used):
             with open(used) as f:
-                self.used = {line.strip() for line in f if line.strip()}
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    if not line.startswith("{"):            # the first form of the file: one txid a line, given
+                        self.known[line] = {"txid": line, "claim": None, "state": DELIVERED, "at": 0}
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue                            # a line cut short when the machine stopped; the one before stands
+                    self.known[rec["txid"]] = rec
+
+    def needed(self, amount):
+        """Blocks a payment of this amount must be in before what it buys is given."""
+        return 0 if int(amount) < self.instant_below else self.confirmations
 
     def supported(self):
-        return {"kinds": [{"x402Version": VERSION, "scheme": "exact", "network": self.network}], "extensions": [], "signers": {}}
+        return {"kinds": [{"x402Version": VERSION, "scheme": "exact", "network": self.network,
+                           "extra": {"confirmations": self.confirmations, "instantBelow": str(self.instant_below)}}],
+                "extensions": [], "signers": {}}
 
-    def _check(self, payment, wanted):
-        """(txid, None) when the payment is good for the requirements, or (txid or None, reason)."""
+    def _keep(self, rec):
+        with open(self.used_path, "a") as f:
+            f.write(json.dumps(rec, separators=(",", ":")) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        self.known[rec["txid"]] = rec
+
+    def _read(self, payment):
+        """(txid, raw, claim, decoded, None), or with a reason in place of None."""
         if not isinstance(payment, dict) or payment.get("x402Version") != VERSION:
-            return None, "invalid_x402_version"
-        accepted = payment.get("accepted")
-        if not isinstance(accepted, dict) or any(accepted.get(k) != wanted[k] for k in ("scheme", "network", "amount", "asset", "payTo")):
-            return None, "invalid_payment_requirements"
+            return None, None, None, None, "invalid_x402_version"
         body = payment.get("payload")
         raw = body.get("transaction") if isinstance(body, dict) else None
+        claim = body.get("claim") if isinstance(body, dict) else None
         if not isinstance(raw, str) or not raw or len(raw) > MAX_TX_HEX or len(raw) % 2 or any(c not in "0123456789abcdefABCDEF" for c in raw):
-            return None, "invalid_payload"
+            return None, None, None, None, "invalid_payload"
+        if claim is not None and (not isinstance(claim, str) or not CLAIM.match(claim)):
+            return None, None, None, None, "invalid_payload"
         try:
             decoded = self.node.call("decoderawtransaction", raw)
         except Exception:
-            return None, "invalid_transaction"
-        txid = decoded["txid"]
-        if txid in self.used:
-            return txid, "transaction_already_used"
+            return None, None, None, None, "invalid_transaction"
+        return decoded["txid"], raw, claim, decoded, None
+
+    @staticmethod
+    def _matches(payment, decoded, wanted):
+        """(the output that pays, None), or (None, a reason): the client accepted these requirements, and the
+        transaction has exactly one output to payTo, of at least the amount."""
+        accepted = payment.get("accepted")
+        if not isinstance(accepted, dict) or any(accepted.get(k) != wanted.get(k) for k in KEYS):
+            return None, "invalid_payment_requirements"
         from .walletd import units
-        paid = sum(units(o["value"]) for o in decoded.get("vout", ()) if o.get("scriptPubKey", {}).get("address") == wanted["payTo"])
-        if paid < int(wanted["amount"]):
-            return txid, "insufficient_funds"
+        hits = [(o["n"], units(o["value"])) for o in decoded.get("vout", ()) if o.get("scriptPubKey", {}).get("address") == wanted["payTo"]]
+        if not hits:
+            return None, "insufficient_funds"
+        if len(hits) > 1:
+            return None, "invalid_payload"
+        if hits[0][1] < int(wanted["amount"]):
+            return None, "insufficient_funds"
+        return hits[0][0], None
+
+    def _node_takes(self, raw):
         verdict = self.node.call("testmempoolaccept", [raw])[0]
-        if not verdict.get("allowed") and verdict.get("reject-reason") not in ("txn-already-in-mempool", "txn-already-known"):
-            return txid, "transaction_refused_by_node"
-        return txid, None
+        return verdict.get("allowed") or verdict.get("reject-reason") in ("txn-already-in-mempool", "txn-already-known")
+
+    def _depth(self, txid, vout):
+        """Blocks the payment is in (0: waiting in the node), or None when the node no longer knows it."""
+        out = self.node.call("gettxout", txid, vout, True)
+        if out is not None:
+            return int(out.get("confirmations", 0))
+        try:
+            self.node.call("getmempoolentry", txid)
+            return 0
+        except Exception:
+            return None
+
+    def _fail(self, why, txid=None, **more):
+        return dict({"success": False, "errorReason": why, "transaction": txid or "", "network": self.network, "payer": None}, **more)
+
+    def _ok(self, txid):
+        return {"success": True, "transaction": txid, "network": self.network, "payer": None}
+
+    def _owner(self, rec, claim):
+        return claim is not None and rec.get("claim") is not None and rec["claim"] == mark(claim)
 
     def verify(self, payment, wanted):
         with self.lock:
-            txid, why = self._check(payment, wanted)
+            txid, raw, claim, decoded, why = self._read(payment)
+            rec = self.known.get(txid) if why is None else None
+            if rec is not None:
+                if not self._owner(rec, claim) or (rec["state"] == DELIVERED and self.clock() - rec["at"] > self.redeliver):
+                    why = "transaction_already_used"
+                else:
+                    why = self._matches(payment, decoded, rec["wanted"])[1]
+            elif why is None:
+                why = self._matches(payment, decoded, wanted)[1]
+                if why is None and self.needed(wanted["amount"]) and claim is None:
+                    why = "claim_required"
+                if why is None and not self._node_takes(raw):
+                    why = "transaction_refused_by_node"
         return {"isValid": why is None, "invalidReason": why, "payer": None}
 
     def settle(self, payment, wanted):
-        """Takes the payment: the transaction goes to the node and its id is kept, so that it buys nothing more."""
+        """Takes the payment. Gives success once it is deep enough; until then "awaiting_confirmation" with how deep
+        it is. The same payment with the same claim may be shown again as often as needed."""
         with self.lock:
-            txid, why = self._check(payment, wanted)
-            if why is None:
-                with open(self.used_path, "a") as f:            # kept before the node has it: never sold twice
-                    f.write(txid + "\n")
-                    f.flush()
-                    os.fsync(f.fileno())
-                self.used.add(txid)
+            txid, raw, claim, decoded, why = self._read(payment)
+            if why is not None:
+                return self._fail(why, txid)
+            now = self.clock()
+            rec = self.known.get(txid)
+            if rec is None:
+                vout, why = self._matches(payment, decoded, wanted)
+                if why is not None:
+                    return self._fail(why, txid)
+                need = self.needed(wanted["amount"])
+                if need and claim is None:
+                    return self._fail("claim_required", txid)
+                if not self._node_takes(raw):
+                    return self._fail("transaction_refused_by_node", txid)
+                rec = {"txid": txid, "claim": mark(claim) if claim else None, "vout": vout, "need": need,
+                       "wanted": {k: wanted[k] for k in KEYS}, "state": WAITING, "at": int(now)}
+                self._keep(rec)                         # kept before the node has it: never sold twice
                 try:
-                    self.node.call("sendrawtransaction", payment["payload"]["transaction"])
+                    self.node.call("sendrawtransaction", raw)
                 except Exception as e:
                     if "already" not in str(e).lower():
-                        return {"success": False, "errorReason": "settlement_failed", "transaction": txid, "network": self.network}
-        if why is not None:
-            return {"success": False, "errorReason": why, "transaction": "", "network": self.network}
-        return {"success": True, "transaction": txid, "network": self.network, "payer": None}
+                        return self._fail("settlement_failed", txid)
+            else:
+                if not self._owner(rec, claim):
+                    return self._fail("transaction_already_used", txid)
+                # shown again: it is held to what was asked when it was made, not to today's price
+                if self._matches(payment, decoded, rec["wanted"])[1] is not None:
+                    return self._fail("invalid_payment_requirements", txid)
+                if rec["state"] == DELIVERED:
+                    return self._ok(txid) if now - rec["at"] <= self.redeliver else self._fail("transaction_already_used", txid)
+            need = rec.get("need", 0)
+            if need:
+                depth = self._depth(txid, rec["vout"])
+                if depth is None:
+                    try:
+                        self.node.call("sendrawtransaction", raw)       # the node may have let it go; it is given again
+                    except Exception:
+                        pass
+                    depth = self._depth(txid, rec["vout"])
+                if depth is None:
+                    return self._fail("payment_not_found", txid)        # another transaction took its coins
+                if depth < need:
+                    return self._fail(AWAITING, txid, confirmations=depth, required=need)
+            self._keep(dict(rec, state=DELIVERED, at=int(now)))
+            return self._ok(txid)
+
+
+class RemoteFacilitator:
+    """A facilitator reached over HTTP (/supported, /verify, /settle), for a seller without a node of its own."""
+
+    def __init__(self, url, timeout=30):
+        self.url, self.timeout = url.rstrip("/"), timeout
+        if not self.url.startswith("https://") and not self.url.split("//", 1)[-1].startswith(("127.0.0.1", "localhost", "[::1]")):
+            raise Refused("X402", "a facilitator is reached over https (or on this machine)")
+        kinds = [k for k in self._call("/supported").get("kinds", []) if isinstance(k, dict) and k.get("scheme") == "exact"
+                 and str(k.get("network", "")).startswith("bip122:")]
+        if not kinds:
+            raise Refused("X402", "the facilitator does not settle NORTH")
+        extra = kinds[0].get("extra") or {}
+        self.network = kinds[0]["network"]
+        self.chain = chain_of(self.network)
+        self.confirmations, self.instant_below = int(extra.get("confirmations", 1)), int(extra.get("instantBelow", "0"))
+
+    def needed(self, amount):
+        return 0 if int(amount) < self.instant_below else self.confirmations
+
+    def _call(self, path, body=None):
+        data = None if body is None else json.dumps(body).encode()
+        req = urllib.request.Request(self.url + path, data, {"Content-Type": "application/json", "User-Agent": "polarka-agent"})
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                got = json.loads(r.read(MAX_BODY).decode())
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            raise Refused("X402", "the facilitator cannot be reached (%s)" % type(e).__name__)
+        if not isinstance(got, dict):
+            raise Refused("X402", "the facilitator sent something that is not an object")
+        return got
+
+    def verify(self, payment, wanted):
+        return self._call("/verify", {"x402Version": VERSION, "paymentPayload": payment, "paymentRequirements": wanted})
+
+    def settle(self, payment, wanted):
+        try:
+            return self._call("/settle", {"x402Version": VERSION, "paymentPayload": payment, "paymentRequirements": wanted})
+        except Refused:
+            return {"success": False, "errorReason": "unexpected_settle_error", "transaction": "", "network": self.network, "payer": None}
+
+
+class Bounded(ThreadingHTTPServer):
+    """An HTTP server that takes a set number of connections at once; one more is closed without an answer."""
+
+    daemon_threads = True
+
+    def __init__(self, address, handler, most=64):
+        self.slots = threading.BoundedSemaphore(most)
+        super().__init__(address, handler)
+
+    def process_request(self, request, client_address):
+        if not self.slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except Exception:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
+
+
+def facilitator_server(facilitator, listen=("127.0.0.1", 0), most=64):
+    """The facilitator as a service, as x402 names it: GET /supported, POST /verify and POST /settle with
+    {"x402Version": 2, "paymentPayload": ..., "paymentRequirements": ...}. It keeps no coins and signs nothing: it
+    checks a payment and hands it to its node. For sellers that have no node of their own."""
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+        timeout = 30
+
+        def log_message(self, *a):
+            pass
+
+        def send(self, status, obj):
+            data = json.dumps(obj).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):
+            if self.path == "/supported":
+                return self.send(200, facilitator.supported())
+            self.send(404, {"error": "there is /supported, /verify and /settle here"})
+
+        def do_POST(self):
+            settle = self.path == "/settle"
+            if self.path not in ("/verify", "/settle"):
+                self.close_connection = True
+                return self.send(404, {"error": "there is /supported, /verify and /settle here"})
+            if self.headers.get("Transfer-Encoding"):
+                self.close_connection = True
+                return self.send(411, {"error": "send Content-Length"})
+            try:
+                n = int(self.headers.get("Content-Length", ""))
+            except ValueError:
+                self.close_connection = True
+                return self.send(411, {"error": "send Content-Length"})
+            if not 0 < n <= MAX_BODY:
+                self.close_connection = True
+                return self.send(413, {"error": "the request is too large"})
+            try:
+                body = json.loads(self.rfile.read(n).decode())
+                payment, wanted = body["paymentPayload"], body["paymentRequirements"]
+                if not isinstance(payment, dict) or not isinstance(wanted, dict):
+                    raise ValueError
+            except (ValueError, KeyError, TypeError, UnicodeDecodeError):
+                return self.send(400, {"error": "a JSON object with paymentPayload and paymentRequirements"})
+            why = None
+            if wanted.get("scheme") != "exact" or wanted.get("asset") != ASSET:
+                why = "unsupported_scheme"
+            elif wanted.get("network") != facilitator.network:
+                why = "invalid_network"
+            else:
+                amount, pay_to = wanted.get("amount"), wanted.get("payTo")
+                try:
+                    if not isinstance(amount, str) or not amount.isdigit() or not 0 < int(amount) < 10 ** 17 or not isinstance(pay_to, str):
+                        raise BadInput("amount")
+                    script_for_address(facilitator.chain, pay_to)
+                except BadInput:
+                    why = "invalid_payment_requirements"
+            if why is not None:
+                answer = ({"success": False, "errorReason": why, "transaction": "", "network": facilitator.network, "payer": None}
+                          if settle else {"isValid": False, "invalidReason": why, "payer": None})
+                return self.send(200, answer)
+            try:
+                answer = facilitator.settle(payment, wanted) if settle else facilitator.verify(payment, wanted)
+            except Exception:
+                answer = ({"success": False, "errorReason": "unexpected_settle_error", "transaction": "", "network": facilitator.network,
+                           "payer": None} if settle else {"isValid": False, "invalidReason": "unexpected_verify_error", "payer": None})
+            self.send(200, answer)
+
+    return Bounded(listen, Handler, most)
 
 
 def paywall(facilitator, price, pay_to, content, content_type="text/plain; charset=utf-8", description="", listen=("127.0.0.1", 0)):
     """A small HTTP server whose one resource (any path) costs `price` base units, paid to `pay_to`. For trying x402
     in NORTH and for the tests; a real seller puts the same steps in front of its own resource."""
-    script_for_address(facilitator.chain, pay_to)
-    wanted = requirements(facilitator.network, price, pay_to)
+    if getattr(facilitator, "chain", None):
+        script_for_address(facilitator.chain, pay_to)
+    wanted = requirements(facilitator.network, price, pay_to, confirmations=facilitator.needed(price))
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -166,9 +444,13 @@ def paywall(facilitator, price, pay_to, content, content_type="text/plain; chars
             except Exception:
                 return self.send(400, {"error": "the payment cannot be read"}, {"Content-Type": "application/json"})
             done = facilitator.settle(payment, wanted)
-            if not done["success"]:
-                return self.send(402, {}, {"Content-Type": "application/json", "PAYMENT-RESPONSE": b64json(done)})
-            return self.send(200, content, {"Content-Type": content_type, "PAYMENT-RESPONSE": b64json(done)})
+            told = {"Content-Type": "application/json", "PAYMENT-RESPONSE": b64json(done)}
+            if done.get("success"):
+                return self.send(200, content, dict(told, **{"Content-Type": content_type}))
+            if done.get("errorReason") == AWAITING:
+                return self.send(202, {"waiting": "the payment is not deep enough in the chain yet; send the same PAYMENT-SIGNATURE again"},
+                                 dict(told, **{"Retry-After": "20"}))
+            return self.send(402, {}, told)
 
     server = ThreadingHTTPServer(listen, Handler)
     server.daemon_threads = True
@@ -177,13 +459,49 @@ def paywall(facilitator, price, pay_to, content, content_type="text/plain; chars
 
 # ------------------------------------------------------------------------------------------------ the buyer
 
-def fetch(url, wallet, most, timeout=60, network=None):
+BOOK = threading.Lock()
+
+
+def _book(wallet):
+    try:
+        with open(os.path.join(wallet.folder, PENDING)) as f:
+            book = json.load(f)
+    except (FileNotFoundError, ValueError):
+        book = {}
+    if not isinstance(book, dict):
+        book = {}
+    book.setdefault("pending", {})
+    book.setdefault("lots", {})
+    return book
+
+
+def _keep_book(wallet, book):
+    path = os.path.join(wallet.folder, PENDING)
+    tmp = path + ".new"
+    with open(tmp, "w") as f:
+        json.dump(book, f, separators=(",", ":"))
+        f.flush()
+        os.fsync(f.fileno())
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.sleep, clock=time.time):
     """GET url; when it answers 402 and takes NORTH on the wallet's chain for at most `most` base units, pays
-    within the owner's limits and asks again. Returns what came of it. The payment is handed to the seller, not to
-    a server: until a server shows it in a block or waiting, the wallet's next payment stands against it."""
+    within the owner's limits and asks again, while the seller waits for a block for up to `wait` seconds.
+
+    The payment is kept in the wallet's folder before anyone sees it, with its claim: a later fetch of the same url
+    shows the same payment again and pays nothing more, until the seller answers or refuses. The payment is handed to
+    the seller, not to a server: until a server shows it in a block or waiting, the wallet's next payment stands
+    against it. When a gate of postage answers that the payment bought a lot of calls (X-Postage-Calls-Left), the
+    rest of the lot is used for the next calls to the same place before anything is paid again."""
     network = network or NETWORKS.get(wallet.chain)
     if network is None:
         raise Refused("X402", "x402 in NORTH on %s needs the network's name (network=)" % wallet.chain)
+    if not url.startswith("https://") and not url.split("//", 1)[-1].startswith(("127.0.0.1", "localhost", "[::1]")):
+        raise Refused("X402", "x402 is used over https (or on this machine)")
+    parts = urllib.parse.urlsplit(url)
+    origin = "%s://%s" % (parts.scheme, parts.netloc)
 
     def get(headers):
         req = urllib.request.Request(url, headers=dict(headers, **{"User-Agent": "polarka-agent"}))
@@ -193,32 +511,90 @@ def fetch(url, wallet, most, timeout=60, network=None):
         except urllib.error.HTTPError as e:
             return e.code, e.headers, e.read(2_000_000)
 
-    if not url.startswith("https://") and not url.split("//", 1)[-1].startswith(("127.0.0.1", "localhost", "[::1]")):
-        raise Refused("X402", "x402 is used over https (or on this machine)")
-    status, headers, body = get({})
-    if status != 402:
-        return {"status": status, "paid": None, "body": body}
-    try:
-        needed = from_b64json(headers.get("PAYMENT-REQUIRED"))
-    except Exception:
-        raise Refused("X402", "the answer 402 has no PAYMENT-REQUIRED that can be read")
-    offers = [o for o in needed.get("accepts", []) if isinstance(o, dict) and o.get("scheme") == "exact"
-              and o.get("network") == network and o.get("asset") == ASSET]
-    if not offers:
-        raise Refused("X402", "the resource does not take NORTH on this chain (%s)" % network)
-    offer = offers[0]
-    try:
-        amount = int(offer["amount"])
-        script_for_address(wallet.chain, offer["payTo"])
-    except (KeyError, ValueError, TypeError, BadInput):
-        raise Refused("X402", "the resource asks for a payment that cannot be read")
-    if not 0 < amount <= most:
-        raise Refused("X402_TOO_MUCH", "the resource asks %s NORTH, more than the %s allowed for it" % (north(amount), north(most)))
-    made = wallet.pay([(offer["payTo"], amount)], "x402 " + url[:150], hand=False)
-    payment = {"x402Version": VERSION, "resource": needed.get("resource"), "accepted": offer, "payload": {"transaction": made["raw"]}}
-    status, headers, body = get({"PAYMENT-SIGNATURE": b64json(payment)})
-    try:
-        settled = from_b64json(headers.get("PAYMENT-RESPONSE"))
-    except Exception:
-        settled = None
-    return {"status": status, "paid": north(amount), "txid": made["id"], "settlement": settled, "body": body}
+    def told(headers):
+        try:
+            return from_b64json(headers.get("PAYMENT-RESPONSE"))
+        except Exception:
+            return None
+
+    def calls_left(headers):
+        left = headers.get("X-Postage-Calls-Left")
+        return int(left) if isinstance(left, str) and left.isdigit() else None
+
+    with BOOK:
+        book = _book(wallet)
+    held, lot = book["pending"].get(url), book["lots"].get(origin)
+    if held is None:
+        status, headers, body = get({"X-Postage": lot["claim"]} if lot else {})
+        if lot:
+            left = calls_left(headers)
+            with BOOK:
+                book = _book(wallet)
+                if status != 402 and left:
+                    book["lots"][origin] = dict(lot, left=left)
+                else:
+                    book["lots"].pop(origin, None)
+                _keep_book(wallet, book)
+            if status != 402:
+                return {"status": status, "paid": None, "calls_left": left, "body": body,
+                        "note": "a call of a lot paid for before"}
+        if status != 402:
+            return {"status": status, "paid": None, "body": body}
+        try:
+            needed = from_b64json(headers.get("PAYMENT-REQUIRED"))
+        except Exception:
+            raise Refused("X402", "the answer 402 has no PAYMENT-REQUIRED that can be read")
+        offers = [o for o in needed.get("accepts", []) if isinstance(o, dict) and o.get("scheme") == "exact"
+                  and o.get("network") == network and o.get("asset") == ASSET]
+        if not offers:
+            raise Refused("X402", "the resource does not take NORTH on this chain (%s)" % network)
+        offer = offers[0]
+        try:
+            amount = int(offer["amount"])
+            script_for_address(wallet.chain, offer["payTo"])
+        except (KeyError, ValueError, TypeError, BadInput):
+            raise Refused("X402", "the resource asks for a payment that cannot be read")
+        if not 0 < amount <= most:
+            raise Refused("X402_TOO_MUCH", "the resource asks %s NORTH, more than the %s allowed for it" % (north(amount), north(most)))
+        made = wallet.pay([(offer["payTo"], amount)], "x402 " + url[:150], hand=False)
+        claim = os.urandom(16).hex()
+        payment = {"x402Version": VERSION, "resource": needed.get("resource"), "accepted": offer,
+                   "payload": {"transaction": made["raw"], "claim": claim}}
+        held = {"header": b64json(payment), "txid": made["id"], "amount": amount, "claim": claim, "made": int(clock())}
+        with BOOK:                                  # kept before the seller sees it: one payment for one resource
+            book = _book(wallet)
+            book["pending"][url] = held
+            _keep_book(wallet, book)
+        again = False
+    else:
+        again = True
+    start = clock()
+    while True:
+        status, headers, body = get({"PAYMENT-SIGNATURE": held["header"]})
+        settled = told(headers)
+        if not (status == 202 and settled and settled.get("errorReason") == AWAITING):
+            break
+        left = wait - (clock() - start)
+        if left <= 0:
+            return {"status": 202, "paid": north(held["amount"]), "txid": held["txid"], "settlement": settled, "body": b"",
+                    "pending": True, "then": "the seller waits for the payment to be in a block; ask for the same url again "
+                                             "later, nothing is paid twice"}
+        try:
+            retry = int(headers.get("Retry-After", "20"))
+        except ValueError:
+            retry = 20
+        sleep(max(0, min(max(retry, 5), 60, left)))
+    with BOOK:
+        book = _book(wallet)
+        if status < 500:                            # answered, or refused for good; a server's failure is asked again later
+            book["pending"].pop(url, None)
+        left = calls_left(headers)
+        if status == 200 and left:
+            book["lots"][origin] = {"claim": held["claim"], "left": left}
+        _keep_book(wallet, book)
+    got = {"status": status, "paid": north(held["amount"]), "txid": held["txid"], "settlement": settled, "body": body}
+    if again:
+        got["note"] = "the payment made before was shown again; nothing more was paid"
+    if status == 200 and calls_left(headers):
+        got["calls_left"] = calls_left(headers)
+    return got
