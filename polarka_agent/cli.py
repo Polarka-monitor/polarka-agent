@@ -138,6 +138,11 @@ def run(argv=None, out=sys.stdout):
     c = sub.add_parser("postage", help="buy postage at a gate: ask it for a quote and pay it, within the limits")
     c.add_argument("url")
     c.add_argument("--most", required=True, help="the most NORTH to pay for one lot of calls")
+    c = sub.add_parser("fetch", help="get a resource that may answer 402 (x402): pay it in NORTH within the limits and never more "
+                                     "than --most, then get it")
+    c.add_argument("url")
+    c.add_argument("--most", required=True, help="the most NORTH to pay for it")
+    c.add_argument("--out", help="write what came back to this file (else up to 4000 characters of it are shown)")
     c = sub.add_parser("postage-serve", help="be a gate before a web service that lets through who paid postage to this wallet")
     c.add_argument("--upstream", required=True, help="the service behind the gate, host:port")
     c.add_argument("--price", help="NORTH for one lot of calls")
@@ -268,6 +273,17 @@ def run(argv=None, out=sys.stdout):
         if a.cmd == "postage":
             from .postage import buy
             return show(buy(wallet, a.url, units(a.most)))
+        if a.cmd == "fetch":
+            from .x402 import fetch
+            got = fetch(a.url, wallet, units(a.most))
+            body = got.pop("body")
+            if a.out:
+                with open(os.path.expanduser(a.out), "wb") as f:
+                    f.write(body)
+                got["saved"] = {"file": a.out, "bytes": len(body)}
+            else:
+                got["body"] = body[:4000].decode("utf-8", "replace")
+            return show(got, 0 if got["status"] == 200 else 2)
         if a.cmd == "postage-serve":
             from .postage import serve as postage_serve
             if (a.price is None) == (a.price_hashes is None):

@@ -397,14 +397,17 @@ class Wallet:
             p = self._journal().get(txid)
             return [] if p is None else [(t, n) for t, n, _ in p["inputs"]]
 
-    def pay(self, outputs, memo=None, dry_run=False):
+    def pay(self, outputs, memo=None, dry_run=False, hand=True):
         """Pays [(address, amount in base units)] in one transaction, within the owner's limits.
-        Returns what was done. With dry_run nothing is signed and nothing leaves the machine."""
+        Returns what was done. With dry_run nothing is signed and nothing leaves the machine. With hand=False the
+        payment is signed and written down but not shown to the wallet server: the answer carries it ("raw") for
+        whoever is to hand it over (the seller, in x402). Until a server shows it, it is a payment whose outcome
+        is open, and the next payment stands against it, so that the two can never both arrive."""
         try:
             named = [(keys.script_for_address(self.chain, a), v, a) for a, v in outputs]
         except keys.BadInput as e:
             raise Refused("ADDRESS", str(e))
-        return self._send(named, memo, dry_run)
+        return self._send(named, memo, dry_run, hand)
 
     def stamp(self, digest, memo=None, dry_run=False):
         """Writes a SHA-256 into the chain, in an output that carries data and nothing else."""
@@ -412,7 +415,7 @@ class Wallet:
             raise Refused("DIGEST", "a stamp takes a SHA-256, 32 bytes")
         return self._send([(tx.data_script(STAMP + bytes(digest)), 0, None)], memo, dry_run)
 
-    def _send(self, outputs, memo, dry_run):
+    def _send(self, outputs, memo, dry_run, hand=True):
         if memo is not None and (not isinstance(memo, str) or len(memo) > 200):
             raise Refused("MEMO", "a note is a text of at most 200 characters")
         with self:
@@ -469,6 +472,8 @@ class Wallet:
             if dry_run:
                 return dict(shown, state="not made (a dry run)", same_as=None if again is None else again["txid"])
             if again is not None:
+                if not hand:            # the same payment, given once more to whoever hands it over
+                    return dict(shown, id=again["txid"], state=again["state"], note=again["note"], same_as=again["txid"], raw=again["raw"])
                 self._hand_over(again)
                 return dict(shown, id=again["txid"], state=again["state"], note=again["note"], same_as=again["txid"])
             raw, txid = tx.sign(the_plan, lambda c: self.account.key(c.branch, c.index)[:2])
@@ -477,6 +482,9 @@ class Wallet:
                       "outputs": [[s.hex(), v] for s, v in the_plan.outputs], "to": shown["to"], "memo": memo}
             self._note(record)                          # written down before anything leaves this machine
             payment = dict(record, state="signed", note=None)
+            if not hand:
+                return dict(shown, id=txid, state="signed", note="signed and not handed over: whoever was given it hands it over",
+                            same_as=None, raw=raw)
             self._hand_over(payment)
             return dict(shown, id=txid, state=payment["state"], note=payment["note"], same_as=None)
 
