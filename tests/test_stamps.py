@@ -7,6 +7,7 @@ import shutil
 import tempfile
 import threading
 import unittest
+import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 
@@ -104,6 +105,13 @@ class StampsOnRegtest(unittest.TestCase):
         self.assertTrue(stamps.verify(again, self.rpc)["block"])
         with self.assertRaises(ValueError):
             stamps.verify(proof, self.rpc)                  # the old block is not in the chain any more
+        # a proof made up offline: everything consistent but the chain
+        forged = dict(again, txoutproof=again["txoutproof"][:-2] + "00")
+        with self.assertRaises(ValueError):
+            stamps.check(forged)
+        with self.assertRaises(ValueError):
+            stamps.check(dict(again, txid="00" * 32))
+        self.assertIn("not checked", stamps.verify(again)["block"])
         # after a start again, the same answers
         fresh = stamps.Stamps(self.wallet, self.rpc, self.wallet.folder, clock=lambda: self.now[0])
         self.assertEqual(fresh.take(ds[0])["root"], again["root"])
@@ -120,10 +128,16 @@ class StampsOnRegtest(unittest.TestCase):
             threading.Thread(target=s.serve_forever, daemon=True).start()
         try:
             url = "http://127.0.0.1:%d/v1/stamp/%s" % (front.server_address[1], digest(7).hex())
-            with urllib.request.urlopen(url, timeout=30) as r:
-                self.assertEqual(json.loads(r.read())["state"], "waiting")
-            with urllib.request.urlopen("http://127.0.0.1:%d/v1/stamp" % front.server_address[1], timeout=30) as r:
-                self.assertEqual(json.loads(r.read())["service"], "polarka-stamps")
+            with self.assertRaises(urllib.error.HTTPError) as caught:     # no calls for nothing behind a route
+                urllib.request.urlopen(url, timeout=30)
+            self.assertEqual(caught.exception.code, 402)
+            token = "ab" * 16
+            gate.state["tokens"][postage.mark(token)] = {"address": "x", "expires": 0, "paid": True, "calls": 5, "price": 1}
+            with urllib.request.urlopen(urllib.request.Request(url, headers={"X-Postage": token}), timeout=30) as r:
+                self.assertEqual((json.loads(r.read())["state"], r.headers["X-Postage-Calls-Left"]), ("waiting", "4"))
+            with self.assertRaises(urllib.error.HTTPError) as caught:    # a call for nothing to the service before the gate
+                urllib.request.urlopen("http://127.0.0.1:%d/v1/unit" % front.server_address[1], timeout=30)
+            self.assertEqual(caught.exception.code, 404)                   # answered by it (it has no /v1/unit), not 402
         finally:
             for s in (backend, facts, front):
                 s.shutdown()

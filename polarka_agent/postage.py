@@ -309,7 +309,8 @@ def make_handler(gate, upstream, trust_proxy, routes=()):
                         more["PAYMENT-REQUIRED"] = b64json(gate.x402_needed(self.path))
                         return self.send(402, gate.about(), more)
                     token = payment["payload"]["claim"]
-                elif not gate.spend(token, self.source()):
+                elif not gate.spend(token, self.source() if target(self.path) is default else None):
+                    # calls for nothing are for the service before the gate; what it routes elsewhere costs postage
                     outcome = "402"
                     if gate.x402 is not None:
                         more["PAYMENT-REQUIRED"] = b64json(gate.x402_needed(self.path))

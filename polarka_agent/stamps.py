@@ -31,6 +31,8 @@ from .wallet import STAMP, Refused
 DIGEST = re.compile(r"^[0-9a-f]{64}$")
 VERSION = 1
 DEEP = 6            # blocks after which a batch is no longer looked at for a reorganization
+RECENT = 30         # blocks whose hashes are kept, to find where a reorganization began
+DEAD = 3600         # seconds after which a batch whose transaction the node no longer has goes back to waiting
 
 
 def leaf(digest):
@@ -72,6 +74,100 @@ def climb(digest, path):
     return h
 
 
+def dsha(b):
+    return hashlib.sha256(hashlib.sha256(b).digest()).digest()
+
+
+class Reader:
+    def __init__(self, raw):
+        self.raw, self.at = raw, 0
+
+    def take(self, n):
+        if n < 0 or self.at + n > len(self.raw):
+            raise ValueError("cut short")
+        part = self.raw[self.at:self.at + n]
+        self.at += n
+        return part
+
+    def varint(self):
+        first = self.take(1)[0]
+        if first < 0xfd:
+            return first
+        return int.from_bytes(self.take({0xfd: 2, 0xfe: 4, 0xff: 8}[first]), "little")
+
+
+def parse_tx(raw):
+    """(txid as hex, [output scripts]) of a serialized transaction; the txid leaves the witness out."""
+    r = Reader(raw)
+    version = r.take(4)
+    segwit = raw[4:6] == b"\x00\x01"
+    if segwit:
+        r.take(2)
+    start = r.at
+    n_in = r.varint()
+    for _ in range(n_in):
+        r.take(36)
+        r.take(r.varint())
+        r.take(4)
+    scripts = []
+    for _ in range(r.varint()):
+        r.take(8)
+        scripts.append(r.take(r.varint()))
+    middle = raw[start:r.at]
+    if segwit:
+        for _ in range(n_in):
+            for _ in range(r.varint()):
+                r.take(r.varint())
+    locktime = r.take(4)
+    if r.at != len(raw):
+        raise ValueError("bytes after the transaction")
+    return dsha(version + middle + locktime)[::-1].hex(), scripts
+
+
+def parse_txoutproof(raw):
+    """(block hash as hex, [txids it proves, as hex]) of a merkle block (gettxoutproof): the partial tree must lead
+    to the merkle root of the header, or ValueError."""
+    r = Reader(raw)
+    header = r.take(80)
+    total = int.from_bytes(r.take(4), "little")
+    hashes = [r.take(32) for _ in range(r.varint())]
+    flags = r.take(r.varint())
+    if r.at != len(raw) or not 0 < total < 1 << 24:
+        raise ValueError("this is not a merkle block")
+    bits = [(flags[i // 8] >> (i % 8)) & 1 for i in range(len(flags) * 8)]
+    used = {"bits": 0, "hashes": 0}
+    matched = []
+
+    def width(h):
+        return (total + (1 << h) - 1) >> h
+
+    def walk(h, pos):
+        if used["bits"] >= len(bits):
+            raise ValueError("this is not a merkle block")
+        flag = bits[used["bits"]]
+        used["bits"] += 1
+        if h == 0 or not flag:
+            if used["hashes"] >= len(hashes):
+                raise ValueError("this is not a merkle block")
+            got = hashes[used["hashes"]]
+            used["hashes"] += 1
+            if h == 0 and flag:
+                matched.append(got)
+            return got
+        left = walk(h - 1, pos * 2)
+        right = walk(h - 1, pos * 2 + 1) if pos * 2 + 1 < width(h - 1) else left
+        if right is not left and right == left:
+            raise ValueError("this is not a merkle block")
+        return dsha(left + right)
+
+    height = 0
+    while width(height) > 1:
+        height += 1
+    if walk(height, 0) != header[36:68] or used["hashes"] != len(hashes):
+        raise ValueError("the merkle block does not lead to the root of its header")
+    return dsha(header)[::-1].hex(), [m[::-1].hex() for m in matched]
+
+
 def check(proof):
     """The parts of a proof that need nothing but the proof: the path leads to the root, and the transaction
     carries the root. Raises ValueError with what is wrong."""
@@ -86,11 +182,16 @@ def check(proof):
     if climb(digest, path) != root:
         raise ValueError("the path does not lead from the SHA-256 to the root")
     try:
-        raw = bytes.fromhex(tx_hex)
-    except (TypeError, ValueError):
-        raise ValueError("this is not a proof of a stamp")
-    if b"\x6a" + bytes([len(STAMP) + 32]) + STAMP + root not in raw:
+        txid, scripts = parse_tx(bytes.fromhex(tx_hex))
+        block, proven = parse_txoutproof(bytes.fromhex(proof["txoutproof"]))
+    except (KeyError, TypeError, ValueError):
+        raise ValueError("the transaction or the proof of its block cannot be read")
+    if txid != proof.get("txid"):
+        raise ValueError("the transaction is not the one named")
+    if b"\x6a" + bytes([len(STAMP) + 32]) + STAMP + root not in scripts:
         raise ValueError("the transaction does not carry the root")
+    if txid not in proven or block != proof.get("block_hash"):
+        raise ValueError("the proof of the block does not hold this transaction, or names another block")
     return True
 
 
@@ -98,9 +199,11 @@ def verify(proof, node_rpc=None):
     """check(), and with a node (anything with call()): the transaction is the one named, is in the named
     block, and that block is in the node's chain. Returns what was checked."""
     check(proof)
-    done = {"path": True, "root_in_transaction": True}
+    done = {"path": True, "root_in_transaction": True, "transaction_in_block": True}
     if node_rpc is None:
-        done["block"] = "not checked: give a node, or look up the transaction and its block in any explorer"
+        # all of the above can be made up together with a block that was never mined: only the chain says it was
+        done["block"] = ("not checked: give a node, or look up block %s at height %s in an explorer"
+                         % (proof.get("block_hash"), proof.get("block_height")))
         return done
     got = node_rpc.call("getrawtransaction", proof["txid"], True, proof["block_hash"])
     if got.get("hex") != proof["transaction"] and got.get("hex", "").lower() != str(proof["transaction"]).lower():
@@ -118,7 +221,7 @@ class Stamps:
     """The batches and what is waiting. `wallet` pays for the stamps (it needs coins and limits.json); `rpc` is the
     node (a walletd.Node) the service reads blocks from."""
 
-    def __init__(self, wallet, rpc, folder, every=600, most_waiting=10000, clock=time.time):
+    def __init__(self, wallet, rpc, folder, every=600, most_waiting=2000, clock=time.time):
         self.wallet, self.rpc, self.every, self.most_waiting, self.clock = wallet, rpc, every, most_waiting, clock
         self.lock = threading.Lock()
         self.book = os.path.join(folder, "stamps.json")
@@ -129,8 +232,9 @@ class Stamps:
             self.state = {"waiting": [], "batches": [], "scanned": None, "last": 0}
         self.where = {}             # digest -> number of its batch
         for i, b in enumerate(self.state["batches"]):
-            for d in b["digests"]:
-                self.where.setdefault(d, i)
+            if not b.get("dead"):
+                for d in b["digests"]:
+                    self.where[d] = i
         self.waiting = set(self.state["waiting"])
         self.trees = {}             # number of a batch -> its paths, worked out once
 
@@ -223,12 +327,25 @@ class Stamps:
         except Exception:
             return
         with self.lock:
-            batches = [(i, dict(b)) for i, b in enumerate(self.state["batches"]) if b["block"] is None or tip - b["block"]["height"] < DEEP]
+            batches = [(i, dict(b)) for i, b in enumerate(self.state["batches"])
+                       if not b.get("dead") and (b["block"] is None or tip - b["block"]["height"] < DEEP)]
             scanned = self.state["scanned"]
+            recent = [list(x) for x in self.state.get("recent", [])]
         if scanned is None:
             scanned = tip - 1
-        changes = {}
+        changes, dead = {}, []
         try:
+            # where the chain we read and the node's chain part: from there on everything is read again
+            common = None
+            for h, hh in reversed(recent):
+                if h <= tip and self.rpc.call("getblockhash", h) == hh:
+                    common = h
+                    break
+            if recent and common is None:
+                common = recent[0][0] - 1
+            if common is not None and common < scanned:
+                scanned = common
+            recent = [x for x in recent if common is None or x[0] <= common]
             for i, b in batches:                               # a block that left the chain takes its batches with it
                 if b["block"] is not None and (b["block"]["height"] > tip
                                                or self.rpc.call("getblockhash", b["block"]["height"]) != b["block"]["hash"]):
@@ -237,8 +354,9 @@ class Stamps:
             wanted = {b["txid"]: i for i, b in batches if b["block"] is None or i in changes}
             top = min(tip, scanned + most)
             for h in range(scanned + 1, top + 1):
+                bh = self.rpc.call("getblockhash", h)
+                recent = (recent + [[h, bh]])[-RECENT:]
                 if wanted:
-                    bh = self.rpc.call("getblockhash", h)
                     for txid in self.rpc.call("getblock", bh, 1)["tx"]:
                         if txid in wanted:
                             i = wanted.pop(txid)
@@ -246,13 +364,32 @@ class Stamps:
                             changes[i] = {"block": {"hash": bh, "height": h, "txoutproof": self.rpc.call("gettxoutproof", [txid], bh)},
                                           "transaction": raw}
                 scanned = h
+            # a transaction the node has lost for long is not waited for any more: its stamps go into the next batch
+            if scanned >= tip:
+                for txid, i in wanted.items():
+                    b = dict(batches)[i]
+                    if self.clock() - b["made"] >= DEAD:
+                        try:
+                            self.rpc.call("getmempoolentry", txid)
+                        except Exception:
+                            dead.append(i)
         except Exception as e:
             sys.stderr.write("%s scan stopped: %s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), type(e).__name__, str(e)[:200]))
         with self.lock:
             for i, change in changes.items():
                 self.state["batches"][i].update(change)
                 self.trees.pop(i, None)
+            for i in dead:
+                b = self.state["batches"][i]
+                b["dead"] = True
+                for d in b["digests"]:
+                    if self.where.get(d) == i:
+                        del self.where[d]
+                        self.waiting.add(d)
+                sys.stderr.write("%s batch %d: its transaction is gone, %d stamps wait again\n"
+                                 % (time.strftime("%Y-%m-%d %H:%M:%S"), i, len(b["digests"])))
             self.state["scanned"] = scanned
+            self.state["recent"] = recent
             self._save()
 
 

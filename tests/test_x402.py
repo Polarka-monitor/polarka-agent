@@ -12,6 +12,7 @@ import time
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from polarka_agent import postage, walletd, x402
@@ -74,6 +75,8 @@ class X402OnRegtest(unittest.TestCase):
         return "http://127.0.0.1:%d" % server.server_address[1]
 
     def ask(self, payment=None, url=None, header=None):
+        if payment is not None and "resource" not in payment:          # what a client copies from the 402
+            payment = dict(payment, resource={"url": urllib.parse.urlsplit(url or self.url).path})
         headers = {} if payment is None else {"PAYMENT-SIGNATURE": x402.b64json(payment)}
         if header is not None:
             headers = {"PAYMENT-SIGNATURE": header}
@@ -302,6 +305,18 @@ class X402Deep(X402OnRegtest):
         self.assertEqual((status, x402.from_b64json(headers.get("PAYMENT-RESPONSE"))["errorReason"]), (402, "invalid_payment_requirements"))
         status, _, body = self.ask(url=cheap, header=header)
         self.assertEqual((status, body), (200, b"cheap"))
+
+    def test_one_payment_buys_one_resource(self):
+        pay_to = self.seller.account.address(0, 6)
+        one = self.start(x402.paywall(self.patient, PRICE, pay_to, b"one")) + "/one"
+        two = self.start(x402.paywall(self.patient, PRICE, pay_to, b"two")) + "/two"
+        self.assertEqual(x402.fetch(one, self.buyer, units("1"), network=self.network, wait=0)["status"], 202)
+        payment = x402.from_b64json(self.book()["pending"][one]["header"])
+        self.node.mine(1, SINK)
+        status, _, _ = self.ask(dict(payment, resource={"url": "/two"}), url=two)
+        self.assertEqual(status, 402)
+        self.assertEqual(self.ask(url=two, header=self.book()["pending"][one]["header"])[0], 402)
+        self.assertEqual(x402.fetch(one, self.buyer, units("1"), network=self.network, wait=0)["body"], b"one")
 
     def test_a_payment_the_node_already_has_is_not_taken(self):
         _, offer = self.offer(self.deep_url)

@@ -293,7 +293,10 @@ def run(argv=None, out=sys.stdout):
                 from .walletd import Node as RpcNode
                 rpc = RpcNode(a.rpc_url, os.path.expanduser(a.rpc_cookie or "~/.truenorth/.cookie"))
             try:
-                return show(dict(verify(proof, rpc), valid=True, digest=proof.get("digest"), block_height=proof.get("block_height")))
+                done = verify(proof, rpc)
+                if rpc is None:      # consistent, but the chain was not asked: not "valid"
+                    return show(dict(done, valid=None, digest=proof.get("digest"), block_height=proof.get("block_height")), 3)
+                return show(dict(done, valid=True, digest=proof.get("digest"), block_height=proof.get("block_height")))
             except ValueError as e:
                 return show({"valid": False, "error": str(e)}, 2)
         if a.cmd == "x402-facilitator":
