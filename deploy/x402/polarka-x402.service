@@ -8,8 +8,7 @@ Wants=network-online.target
 [Service]
 User=x402
 Group=x402
-SupplementaryGroups=truenorth
-ExecStart=/opt/polarka-x402/venv/bin/polarka-agent --dir /var/lib/polarka-x402 x402-facilitator --chain main --rpc-url http://127.0.0.1:9554 --rpc-cookie /var/lib/truenorth/.cookie --listen 127.0.0.1:9570 --confirmations 1
+ExecStart=/opt/polarka-x402/venv/bin/polarka-agent --dir /var/lib/polarka-x402 x402-facilitator --chain main --rpc-url http://127.0.0.1:9554 --rpc-cookie /etc/polarka-rpc/x402 --listen 127.0.0.1:9570 --confirmations 1
 Restart=on-failure
 RestartSec=10
 RestartPreventExitStatus=2

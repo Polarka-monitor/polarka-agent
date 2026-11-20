@@ -6,6 +6,7 @@ It keeps no coins and signs nothing. What it took is kept in `x402-used.jsonl`, 
 
     useradd --system --home /var/lib/polarka-x402 --create-home --shell /usr/sbin/nologin x402
     python3 -m venv /opt/polarka-x402/venv && /opt/polarka-x402/venv/bin/pip install polarka-agent
+    # its own RPC user, allowed only the calls it makes: see ../rpc-users.md
     cp polarka-x402.service /etc/systemd/system/ && systemctl enable --now polarka-x402
     curl -s http://127.0.0.1:9570/supported
 

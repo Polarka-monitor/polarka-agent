@@ -8,8 +8,7 @@ Wants=network-online.target
 [Service]
 User=stamps
 Group=stamps
-SupplementaryGroups=truenorth
-ExecStart=/opt/polarka-x402/venv/bin/polarka-agent --dir /var/lib/polarka-stamps/wallet stamps-serve --rpc-url http://127.0.0.1:9554 --rpc-cookie /var/lib/truenorth/.cookie --listen 127.0.0.1:8681 --every 600
+ExecStart=/opt/polarka-x402/venv/bin/polarka-agent --dir /var/lib/polarka-stamps/wallet stamps-serve --rpc-url http://127.0.0.1:9554 --rpc-cookie /etc/polarka-rpc/stamps --listen 127.0.0.1:8681 --every 600
 Restart=on-failure
 RestartSec=10
 RestartPreventExitStatus=2

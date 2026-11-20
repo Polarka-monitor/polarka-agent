@@ -5,7 +5,7 @@ trusting us: `polarka-agent stamp-verify proof.json` (with `--rpc-url` and `--rp
 that the block is in the chain).
 
     useradd --system --home /var/lib/polarka-stamps --create-home --shell /usr/sbin/nologin stamps
-    usermod -aG truenorth stamps
+    # its own RPC user, allowed only the calls it makes: see ../rpc-users.md
     sudo -u stamps /opt/polarka-x402/venv/bin/polarka-agent --dir /var/lib/polarka-stamps/wallet new --chain main --server http://127.0.0.1:9560
     # write the words down; then limits.json, for example {"per_payment_north": "1", "per_day_north": "5"}, and a few NORTH
     cp polarka-stamps.service /etc/systemd/system/ && systemctl enable --now polarka-stamps
