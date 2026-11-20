@@ -191,6 +191,9 @@ def depth_by(node, most=20000):
             at, steps = block[1], steps + 1
         return 0
 
+    depth.unspent = lambda txid, n: node.call("gettxout", txid, n, False) is not None      # by the chain, not the mempool
+    depth.height = lambda: node.call("getblockcount")
+
     return depth
 
 

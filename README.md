@@ -206,9 +206,18 @@ the pool's shares together, the smallest debts are paid first, a round is looked
 time, and the pool no longer calls itself short of coins while a round is on the way. Nobody else has read
 these fixes either.
 
-Still open, and to be kept in mind by whoever runs it: a pool folder put back from an older copy pays
-again what the copy does not know (never restore it); a payment that sticks stops all payouts until its
-owner looks; the wallet server must be the owner's own; the share ledger grows without end.
+A third independent reviewer could not make it pay twice by any path of its own (also not with a wallet
+server that lies and a process that falls at every seam), but showed that the way out this page used to
+name, `forget`, did: a forgotten payment can still be passed on by whoever kept it. With a node of the
+pool's own, a round is now paid when that node sees its payment six blocks deep, whatever a server says,
+and taken back only when that node shows a coin of the payment spent by something else, as deep.
+
+For whoever runs it: a payment that sticks stops all payouts. Cancel it with a small payment from the
+pool's wallet to an address of its own (the wallet builds it on a coin of the stuck one); do not `forget`
+it. Use the wallet for nothing else. Keep the float in some ten coins, not one. Never put the pool's folder
+back from an older copy: it pays again what the copy does not know. The wallet server must be the owner's
+own. A miner who keeps back the blocks he finds can take the float before the pool notices, and no more
+than the float and the wallet's limit for a day. The share ledger grows without end.
 
 Not built: a share target that follows the miner's speed and taking back credit for a block that left the chain. Until somebody
 else has read it, it must not run on the real network.
@@ -224,7 +233,7 @@ library in `native/`, `pool.py` the pool, `payout.py` its payouts and `miner.py`
 
     TN_BIN=/path/to/bin python3 -B -m unittest discover -s tests -t .
 
-156 tests. Those in `test_wallet.py`, `test_cli_mcp.py`, `test_faucet_node.py` and `test_pool_node.py` run against the official
+158 tests. Those in `test_wallet.py`, `test_cli_mcp.py`, `test_faucet_node.py` and `test_pool_node.py` run against the official
 `truenorthd` on regtest
 and a stand-in for a Northbound server (`tests/standin`, copied from the Polarka Wallet's repository); they
 are skipped without the node programs. No test touches a real network.

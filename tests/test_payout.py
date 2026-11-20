@@ -92,6 +92,46 @@ class Rules(unittest.TestCase):
         self.assertEqual(self.wallet.made[0]["outputs"], [(B, 5 * N)])
         self.assertEqual(done["paid_now"], "5.00000000")
 
+    def test_with_a_node_a_round_is_taken_back_only_on_the_nodes_evidence(self):
+        deep, spent, height = {}, set(), [100]
+        depth = lambda txid, since=None: deep.get(txid, 0)
+        depth.unspent = lambda txid, n: (txid, n) not in spent
+        depth.height = lambda: height[0]
+        self.wallet.inputs_of = lambda txid: [("coin", 0)]
+        pay = payout.Payouts(self.wallet, self.folder, minimum=N, depth=depth, deep=6)
+        pay.run({A: 30 * N})
+        self.wallet.made[0]["state"] = "forgotten"                   # the owner forgot it; somebody may still pass it on
+        self.assertEqual(pay.run({A: 30 * N})["state"], "on the way")
+        self.assertEqual(len(self.wallet.made), 1)                   # nothing is paid again
+        deep["tx1"] = 8                                              # and it did come into a block
+        self.assertEqual(pay.run({A: 30 * N})["state"], "nothing is due")
+        self.assertEqual(pay.sums(), {A: (30 * N, 0)})
+        # another round: its coin is spent by something else, and only six blocks later is the round taken back
+        pay.run({A: 30 * N, B: 5 * N})
+        self.wallet.made[1]["state"] = "overtaken"
+        spent.add(("coin", 0))
+        self.assertEqual(pay.run({A: 30 * N, B: 5 * N})["state"], "on the way")
+        height[0] += 5
+        self.assertEqual(pay.run({A: 30 * N, B: 5 * N})["state"], "on the way")
+        height[0] += 1
+        done = pay.run({A: 30 * N, B: 5 * N})
+        self.assertEqual((pay.rounds[2]["state"], done["round"], done["paid_now"]), ("void", 3, "5.00000000"))
+
+    def test_a_payment_the_server_does_not_show_and_the_node_does(self):
+        deep = {"tx1": 0}
+        pay = payout.Payouts(self.wallet, self.folder, minimum=N, depth=lambda txid, since=None: deep[txid], deep=6)
+        self.wallet.state = "kept"
+        pay.run({A: 30 * N})
+        deep["tx1"] = 8                                              # the wallet still says "kept"; the node knows better
+        self.assertEqual(pay.run({A: 30 * N})["state"], "nothing is due")
+        self.assertEqual(pay.sums(), {A: (30 * N, 0)})
+        # and a payment the server calls "in a block" while the node does not see it is shown again, not paid twice
+        self.wallet.state = "in_block"
+        pay.run({A: 30 * N, B: 5 * N})
+        deep["tx2"] = 0
+        self.assertEqual(pay.run({A: 30 * N, B: 5 * N})["state"], "on the way")
+        self.assertEqual(len(self.wallet.made), 2)
+
     def test_nothing_due_and_what_is_refused(self):
         self.assertEqual(self.pay.run({A: N - 1})["state"], "nothing is due")
         self.wallet.refuse = "OVER_DAY"

@@ -193,7 +193,13 @@ class Wallet:
         with open(self._path("journal.jsonl"), "a") as f:
             f.write(json.dumps(event, separators=(",", ":")) + "\n")
             f.flush()
-            os.fsync(f.fileno())
+            if hasattr(fcntl, "F_FULLFSYNC"):       # macOS: fsync alone leaves the line in the drive's cache
+                try:
+                    fcntl.fcntl(f.fileno(), fcntl.F_FULLFSYNC)
+                except OSError:
+                    os.fsync(f.fileno())
+            else:
+                os.fsync(f.fileno())
 
     def _set(self, payment, state, note=None):
         if payment["state"] != state or payment.get("note") != note:
@@ -380,9 +386,16 @@ class Wallet:
             if p is None:
                 raise Refused("NOT_OPEN", "there is no payment with this id")
             self._settle(payments, self.look())
-            if p["state"] in OPEN:
+            if p["state"] in OPEN or p["state"] == "in_block":
+                # also one that a server called "in a block": whoever asks has a node that does not see it there
                 self._hand_over(p)
             return self._shown(p)
+
+    def inputs_of(self, txid):
+        """The coins a payment of this wallet spends, as (txid, number)."""
+        with self:
+            p = self._journal().get(txid)
+            return [] if p is None else [(t, n) for t, n, _ in p["inputs"]]
 
     def pay(self, outputs, memo=None, dry_run=False):
         """Pays [(address, amount in base units)] in one transaction, within the owner's limits.

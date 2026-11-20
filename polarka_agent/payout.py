@@ -10,8 +10,12 @@ One round is one transaction to many addresses. The rules that keep an address f
   payment was never signed and is taken back; one with a payment goes on from where it stood.
 - A round whose payment did not go through is shown to the server again as it was written down. No second
   transaction is ever made for a round: a server that forgets a payment and remembers it later would
-  otherwise see two that do not stand against each other. A payment that never goes through stops the
-  payouts until its owner forgets it by hand (wallet forget), which takes the round back.
+  otherwise see two that do not stand against each other.
+- With a node of the pool's own (depth), a round is paid when that node sees its payment deep enough, and
+  taken back only when that node shows a coin of the payment spent by something else, as deep. A payment that
+  never goes through therefore stops the payouts until its owner cancels it: a small payment from the pool's
+  wallet to an address of its own, which the wallet builds on a coin of the stuck one. Not `forget`: a
+  forgotten payment can still be passed on by whoever kept it.
 - The two books must agree before anything is paid: every payment the ledger names must be in the wallet's
   journal, and every payment the wallet made for a round must be in the ledger. A ledger that was lost or
   put back from an older copy, or a wallet without its journal, stops the payouts; a person has to look.
@@ -86,6 +90,7 @@ class Payouts:
         self.wallet, self.minimum, self.most_payees, self.clock = wallet, max(int(minimum), 1000), most_payees, clock
         self.folder, self.path = folder, os.path.join(folder, "pool-payouts.jsonl")
         self.depth, self.deep = depth, deep     # depth(txid): blocks on top of it by the pool's own node
+        self._spent_at = {}
         self.lock = threading.RLock()
         self.rounds = {}            # number -> {"pay": {address: units}, "txids": [...], "state": "open" | "paid" | "void", "mark"}
         if not os.path.exists(self.path):
@@ -175,26 +180,45 @@ class Payouts:
             # the wallet's journal is the one that knows the earlier rounds.)
             self._write({"event": "void", "round": number, "why": "never signed"})
             return None
-        if any(p["state"] == "in_block" for p in mine):
-            # The wallet has a server's word for it. With a node of the pool's own, the round is paid when that
-            # node sees the payment `deep` blocks down; until then it is on the way, also if a block was undone.
-            if self.depth is None or max(self.depth(p["id"], r["t"]) for p in mine if p["state"] == "in_block") >= self.deep:
+        if self.depth is not None:
+            # The pool's own node is asked before anything is decided. What a wallet server says about a payment
+            # is not enough to call a round paid, and never enough to take one back.
+            deepest = max(self.depth(p["id"], r["t"]) for p in mine)
+            if deepest >= self.deep:
                 self._write({"event": "paid", "round": number})
                 return None
+            if deepest > 0:
+                return number
+        elif any(p["state"] == "in_block" for p in mine):
+            self._write({"event": "paid", "round": number})
+            return None
+        again = [p for p in mine if p["state"] in OPEN or (p["state"] == "in_block" and self.depth is not None)]
+        if again:
+            for p in again:         # the same transaction once more, never a new one
+                try:
+                    self.wallet.hand_again(p["id"])
+                except Refused:
+                    pass
             return number
         if any(p["state"] == "handed" for p in mine):
             return number                                   # it waits for a block: left alone
-        if any(p["state"] in OPEN for p in mine):
-            for p in mine:
-                if p["state"] in OPEN:
-                    try:
-                        self.wallet.hand_again(p["id"])     # the same transaction once more, never a new one
-                    except Refused:
-                        pass
+        # By the wallet's books every payment of the round is overtaken or forgotten. With a node of the pool's
+        # own, the round is taken back only when that node shows that none of them can come into a block any
+        # more: a coin each of them spends was spent by something else, `deep` blocks ago or longer.
+        if self.depth is not None and not all(self._gone(p) for p in mine):
             return number
-        # every payment of the round is overtaken or forgotten: none of them can be in a block any more
         self._write({"event": "void", "round": number, "why": "its payments are dead"})
         return None
+
+    def _gone(self, p):
+        unspent, height = getattr(self.depth, "unspent", None), getattr(self.depth, "height", None)
+        inputs = getattr(self.wallet, "inputs_of", lambda txid: [])(p["id"])
+        if unspent is None or height is None or not inputs:
+            return False
+        if all(unspent(t, n) for t, n in inputs):
+            self._spent_at.pop(p["id"], None)
+            return False
+        return height() - self._spent_at.setdefault(p["id"], height()) >= self.deep
 
     def run(self, earned, held=()):
         """One step: settles the round on the way, and if none is left on the way, makes the next one from
