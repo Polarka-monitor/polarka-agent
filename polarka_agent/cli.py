@@ -18,6 +18,8 @@ from .server import ServerError
 from .wallet import Refused, Wallet, north, units
 
 DEFAULT_SERVER = "https://api.northboundwallet.org"     # the public server of the Northbound project; not run by this project
+DEFAULT_POOL = "https://pool.polarka.org"
+DEFAULT_FAUCET = "https://faucet.polarka.org"
 
 
 def _amounts(result):
@@ -45,6 +47,44 @@ def wait_for(wallet, address, amount, confirmations=1, timeout=600, every=15, sl
         sleep(every)
 
 
+def start(folder, a, say=lambda event: sys.stderr.write(json.dumps(event) + "\n")):
+    """The `start` command: what an agent needs to begin, each step said as it is done. Mining goes on until
+    --seconds or for ever; the summary comes when it ends."""
+    if not 1 <= a.threads <= 256:
+        raise Refused("INPUT", "--threads is 1 to 256")
+    made = not os.path.exists(os.path.join(folder, "wallet.json"))
+    if made:
+        Wallet.create(folder, "main", DEFAULT_SERVER)
+    wallet = Wallet(folder)
+    if wallet.chain != "main":
+        raise Refused("CHAIN", "the wallet in --dir is not of the main chain")
+    address = wallet.account.address(0, 0)      # one address the agent keeps, rather than a new one each time
+    done = {"folder": folder, "address": address, "wallet_made": made}
+    say({"event": "wallet", "made": made, "folder": folder, "address": address,
+         "note": "The recovery words are in wallet.json in that folder; whoever reads that file can spend. Keep a copy "
+                 "somewhere else. The wallet pays nothing until its owner writes limits.json."})
+    if not a.no_faucet:
+        from .faucet import ask
+        try:
+            done["faucet"] = ask(a.faucet, address)
+        except Refused as e:                     # a faucet that says no (once a day, empty) does not stop the start
+            done["faucet"] = {"error": e.kind, "message": str(e)}
+        say(dict(done["faucet"], event="faucet"))
+    if not a.no_mining:
+        from .miner import mine
+        from .rx import find_library
+        if not find_library():
+            raise NoLibrary("this package has no proof-of-work library for this platform; build it with `polarka-agent build-rx` "
+                            "(see `build-rx --help`), or start with --no-mining")
+        say({"event": "mining", "pool": a.pool, "address": address, "threads": a.threads,
+             "note": "The pool pays for each share. Mine only on a machine whose owner allows it."})
+        done["mining"] = mine(a.pool, address, a.threads, True, None, a.seconds, say=say)
+        for name in ("credited",):
+            if isinstance(done["mining"].get(name), int):
+                done["mining"][name] = north(done["mining"][name])
+    return done
+
+
 def run(argv=None, out=sys.stdout):
     p = argparse.ArgumentParser(prog="polarka-agent", description="A TrueNorth (NORTH) wallet that a program can use.")
     p.add_argument("--version", action="version", version=__version__)
@@ -55,6 +95,14 @@ def run(argv=None, out=sys.stdout):
     c.add_argument("--server", help="the wallet server (default on main: %s)" % DEFAULT_SERVER)
     c.add_argument("--words-file", help="a file with the 12 or 24 words of a wallet to bring back")
     c.add_argument("--twelve", action="store_true", help="12 words in place of 24")
+    c = sub.add_parser("start", help="begin in one go: a wallet on main (made when --dir has none), a first coin from the faucet, "
+                                     "then mining for the pool to the wallet's first address")
+    c.add_argument("--pool", default=DEFAULT_POOL)
+    c.add_argument("--faucet", default=DEFAULT_FAUCET)
+    c.add_argument("--threads", type=int, default=max(1, (os.cpu_count() or 2) // 2), help="default: half of the processors")
+    c.add_argument("--seconds", type=int, help="stop mining after this many seconds (default: never)")
+    c.add_argument("--no-faucet", action="store_true")
+    c.add_argument("--no-mining", action="store_true")
     sub.add_parser("address", help="a fresh address to be paid to")
     sub.add_parser("balance")
     sub.add_parser("history")
@@ -158,6 +206,8 @@ def run(argv=None, out=sys.stdout):
             return show({"folder": folder, "first_address": first, "words": made,
                          "note": "Write the words on paper now. They are the wallet. They are also in wallet.json, which only you may read; "
                                  "whoever reads that file can spend. The wallet pays nothing until you write limits.json."})
+        if a.cmd == "start":
+            return show(start(folder, a))
         if a.cmd == "build-rx":
             from .rx import build
             return show({"built": build(a.randomx, a.cmake)})
