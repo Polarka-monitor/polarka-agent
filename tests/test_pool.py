@@ -441,7 +441,10 @@ class Owed(unittest.TestCase):
             p.pay_round()
             account = p.account(ALICE)
             self.assertEqual((account["paid"], account["on_the_way"], account["owed"]), ("30.40000000", "30.40000000", "0.00000000"))
-            self.assertTrue(p.info()["pays_out"])
+            info = p.info()
+            self.assertTrue(info["pays_out"])
+            self.assertEqual((info["earned"], info["paid"], info["on_the_way"], info["owed"]),
+                             ("60.80000000", "30.40000000", "30.40000000", "0.00000000"))
         finally:
             shutil.rmtree(folder, ignore_errors=True)
 

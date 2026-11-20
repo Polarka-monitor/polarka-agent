@@ -638,12 +638,15 @@ class Pool:
             paused = True
         with self.lock:
             shares = sum(a["shares"] for a in self.accounts.values())
-            owed = sum(a["earned"] for a in self.accounts.values())
+            earned = sum(a["earned"] for a in self.accounts.values())
+            # what it owes is what was earned and is neither paid nor on the way (it read "earned" before 20 Nov 2026)
+            paid, flying = (self.paid_total, self.flying_total) if self.payouts is not None else (0, 0)
         return {"service": "polarka-pool", "network": self.chain, "pays_out": self.payouts is not None, "last_payout": self.last_payout,
                 "cap": None if self.cap is None else self.cap.shown(),
                 "pays": "for each share, the block reward without fees divided by share_ratio, less the fee",
                 "share_ratio": self.ratio, "fee_percent": self.fee, "coinbase_tag": TAG.decode(), "pays_blocks_to": self.pay_to,
-                "height": height, "paused": paused, "shares": shares, "owed": north(owed), "blocks": len(self.blocks),
+                "height": height, "paused": paused, "shares": shares, "earned": north(earned), "paid": north(paid),
+                "on_the_way": north(flying), "owed": north(earned - paid - flying), "blocks": len(self.blocks),
                 "how": ["GET /v1/work?address=YOURS", "look for a nonce whose hash is at or below share_target",
                         'POST /v1/share {"job", "nonce"}', "GET /v1/account?address=YOURS"]}
 
