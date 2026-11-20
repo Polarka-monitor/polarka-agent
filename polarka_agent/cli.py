@@ -166,6 +166,17 @@ def run(argv=None, out=sys.stdout):
     c.add_argument("--listen", default="127.0.0.1:8670")
     c.add_argument("--trust-proxy", action="store_true", help="take the caller's address from X-Forwarded-For")
     c.add_argument("--x402-facilitator", help="also sell the lot over x402, settled by this facilitator (http://127.0.0.1:9570)")
+    c.add_argument("--route", action="append", default=[], metavar="PREFIX=HOST:PORT",
+                   help="send paths that start with PREFIX to another service behind the gate (may be given more than once)")
+    c = sub.add_parser("stamps-serve", help="stamps as a service: many SHA-256s in one transaction of this wallet, a proof for each")
+    c.add_argument("--rpc-url", required=True, help="the node the blocks are read from, for example http://127.0.0.1:9554")
+    c.add_argument("--rpc-cookie", required=True, help="the node's .cookie file")
+    c.add_argument("--listen", default="127.0.0.1:8681")
+    c.add_argument("--every", type=int, default=600, help="seconds between two batches, at least (default 600)")
+    c = sub.add_parser("stamp-verify", help="check a proof of a stamp; with a node, also that its block is in the chain")
+    c.add_argument("file")
+    c.add_argument("--rpc-url")
+    c.add_argument("--rpc-cookie")
     c = sub.add_parser("faucet-serve", help="be a faucet: hand out a little from this wallet, within its limits.json")
     c.add_argument("--amount", required=True, help="NORTH given to one address")
     c.add_argument("--listen", default="127.0.0.1:8660")
@@ -273,6 +284,18 @@ def run(argv=None, out=sys.stdout):
             return pool_serve(Pool(node, a.chain, pay_to, folder, a.ratio, a.fee, cap=cap, guard=Guard(), payouts=payouts, miners=miners,
                                    most_owed=units(a.most_owed) if a.pay_every else None),
                               a.listen, a.trust_proxy, a.pay_every)
+        if a.cmd == "stamp-verify":
+            from .stamps import verify
+            with open(os.path.expanduser(a.file)) as f:
+                proof = json.load(f)
+            rpc = None
+            if a.rpc_url:
+                from .walletd import Node as RpcNode
+                rpc = RpcNode(a.rpc_url, os.path.expanduser(a.rpc_cookie or "~/.truenorth/.cookie"))
+            try:
+                return show(dict(verify(proof, rpc), valid=True, digest=proof.get("digest"), block_height=proof.get("block_height")))
+            except ValueError as e:
+                return show({"valid": False, "error": str(e)}, 2)
         if a.cmd == "x402-facilitator":
             from .walletd import Node as RpcNode, loopback
             from .x402 import NETWORKS, Facilitator, facilitator_server
@@ -327,8 +350,20 @@ def run(argv=None, out=sys.stdout):
             if a.x402_facilitator:
                 from .x402 import RemoteFacilitator
                 facilitator = RemoteFacilitator(a.x402_facilitator)
+            routes = []
+            for r in a.route:
+                prefix, eq, where = r.partition("=")
+                if not eq or not prefix.startswith("/") or ":" not in where:
+                    raise Refused("INPUT", "--route is PREFIX=HOST:PORT, for example /v1/stamp=127.0.0.1:8681")
+                routes.append((prefix, where))
             return postage_serve(wallet, a.upstream, units(a.price) if a.price is not None else 0, a.calls, a.listen, a.free,
-                                 a.trust_proxy, a.price_hashes or 0, facilitator)
+                                 a.trust_proxy, a.price_hashes or 0, facilitator, routes)
+        if a.cmd == "stamps-serve":
+            from .stamps import serve as stamps_serve
+            from .walletd import Node as RpcNode
+            if not 30 <= a.every <= 86400:
+                raise Refused("INPUT", "--every is 30 to 86400 seconds")
+            return stamps_serve(wallet, RpcNode(a.rpc_url, os.path.expanduser(a.rpc_cookie)), folder, a.listen, a.every)
         if a.cmd == "faucet-serve":
             from .faucet import serve as faucet_serve
             if not 10 <= a.bits <= 30:

@@ -238,8 +238,17 @@ class Gate:
         return a
 
 
-def make_handler(gate, upstream, trust_proxy):
-    host, port = upstream.rsplit(":", 1)
+def make_handler(gate, upstream, trust_proxy, routes=()):
+    """`routes`: (path prefix, host:port) pairs; a request whose path starts with a prefix goes there, the longest
+    prefix first, and anything else to `upstream`."""
+    targets = sorted(((prefix, where.rsplit(":", 1)) for prefix, where in routes), key=lambda r: -len(r[0]))
+    default = upstream.rsplit(":", 1)
+
+    def target(path):
+        for prefix, where in targets:
+            if path == prefix or path.startswith(prefix.rstrip("/") + "/") or path.startswith(prefix + "?"):
+                return where
+        return default
 
     class H(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -305,6 +314,7 @@ def make_handler(gate, upstream, trust_proxy):
                     left = gate.left(token)
                     if left is not None:
                         more["X-Postage-Calls-Left"] = str(left)
+                host, port = target(self.path)
                 c = http.client.HTTPConnection(host, int(port), timeout=60)
                 try:
                     headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP}
@@ -391,7 +401,7 @@ def buy(wallet, url, most, timeout=30):
             "then": "when the payment is in a block, send the token in the header X-Postage with each call"}
 
 
-def serve(wallet, upstream, price, calls, listen, free=0, trust_proxy=False, hashes=0, x402=None):
+def serve(wallet, upstream, price, calls, listen, free=0, trust_proxy=False, hashes=0, x402=None, routes=()):
     if (price <= 0) == (hashes <= 0) or calls <= 0 or free < 0:
         raise Refused("INPUT", "a price in NORTH or a price in hashes, one of the two, and a number of calls above nothing")
     if x402 is not None and getattr(x402, "chain", None) and x402.chain != wallet.chain:
@@ -403,7 +413,7 @@ def serve(wallet, upstream, price, calls, listen, free=0, trust_proxy=False, has
         except ServerError as e:
             raise Refused("NO_WORK", "the wallet server gives no block template (HTTP %s); a price in hashes needs a server with the mining routes of Northbound" % e.status)
     host, port = listen.rsplit(":", 1)
-    srv = ThreadingHTTPServer((host, int(port)), make_handler(gate, upstream, trust_proxy))
+    srv = ThreadingHTTPServer((host, int(port)), make_handler(gate, upstream, trust_proxy, routes))
     srv.daemon_threads = True
     sys.stderr.write("postage gate on %s before %s: %s NORTH for %d calls%s, %d free a day%s\n"
                      % (listen, upstream, north(price), calls, " (%d hashes of work, at the network of this moment)" % hashes if hashes else "", free,

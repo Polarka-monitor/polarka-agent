@@ -1,0 +1,29 @@
+# Stamps as a service, behind the postage gate. Its wallet pays only the fee of one transaction a batch;
+# limits.json beside it keeps that small. It reads blocks from the node beside it.
+[Unit]
+Description=Polarka stamps (polarka-agent stamps-serve)
+After=network-online.target truenorthd.service polarka-walletd.service
+Wants=network-online.target
+
+[Service]
+User=stamps
+Group=stamps
+SupplementaryGroups=truenorth
+ExecStart=/opt/polarka-x402/venv/bin/polarka-agent --dir /var/lib/polarka-stamps/wallet stamps-serve --rpc-url http://127.0.0.1:9554 --rpc-cookie /var/lib/truenorth/.cookie --listen 127.0.0.1:8681 --every 600
+Restart=on-failure
+RestartSec=10
+RestartPreventExitStatus=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+IPAddressDeny=any
+IPAddressAllow=localhost
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ReadWritePaths=/var/lib/polarka-stamps
+MemoryMax=300M
+TasksMax=100
+
+[Install]
+WantedBy=multi-user.target
