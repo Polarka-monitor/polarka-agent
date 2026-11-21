@@ -6,7 +6,7 @@ A wallet for TrueNorth (NORTH) that a program can use: a command line, a Python 
 agents that speak the Model Context Protocol (MCP). The keys stay on the machine it runs on. What its
 addresses hold it asks a wallet server with the Northbound API (github.com/nova9/northbound).
 
-**State: 0.2.0, an early version.** It was written with AI models under its author's direction, and its
+**State: 0.2.1, an early version.** It was written with AI models under its author's direction, and its
 author read it. Independent AI reviewers that had not seen it being written read each part and found faults;
 the serious ones are mended, with tests (`REVIEW.md`, `docs/review-guide.md`). No human security expert has
 read it yet; a review by one is asked for. On the real network it pays since 17 November 2026, and since
@@ -67,7 +67,7 @@ or later on Linux or macOS and nothing besides; it does not run on Windows. Vers
 repository at the tag of their version and uploaded by hand; 0.1.1 and 0.1.2 were built by a workflow that is
 no longer used. The same files are on the project's own server,
 
-    pip install https://polarka.org/download/src/polarka-agent-0.2.0.tar.gz
+    pip install https://polarka.org/download/src/polarka-agent-0.2.1.tar.gz
 
 and can be compared with `https://polarka.org/download/SHA256SUMS` first. Versions before 0.1.3 carry a
 faucet with the faults that `docs/faucet-review-0.1.2.md` names.
@@ -187,6 +187,20 @@ is the facilitator, the part of a seller that checks payments and hands them to 
 http://127.0.0.1:9570` makes the gate of postage take x402 as well as its own quotes: one x402 payment buys
 a lot of calls, and the gate says how many are left in `X-Postage-Calls-Left`.
 
+Being found: the bazaar extension of x402. With `--public-url https://HOST --offers FILE` the gate names its
+resources in full in the 402 and adds `extensions.bazaar` (what a route takes and gives, with a JSON schema) for
+the routes in FILE, a JSON list of objects such as
+
+    [{"prefix": "/v1/stamp", "route": "/v1/stamp/:sha256", "description": "Stamps a SHA-256 into the TrueNorth chain",
+      "pathParams": {"sha256": "..."}, "output": {"state": "stamped"}, "serviceName": "Polarka stamps", "tags": ["stamps"]}]
+
+and a facilitator started with `--bazaar-origin https://HOST` keeps a catalog of what was paid for there, at
+`GET /discovery/resources` and `GET /discovery/search?query=`, as the bazaar specification describes. A buyer
+echoes the extension (`fetch` does); the gate puts back its own resource and extension before the facilitator
+sees the payment, so a buyer cannot write something else into the catalog.
+
+An agent that pays for itself, from no coin to a stamped file: `examples/agent_that_pays_for_itself.py`.
+
 ## A service to pay for: stamps
 
 A stamp shows that a file existed by a given block. The stamps service takes SHA-256s, puts those that came
@@ -293,11 +307,12 @@ signature hash and signing; they come from the cold address tool
 `server.py` is the client for a wallet server, `wallet.py` the wallet, `cli.py` and `mcp.py` the two faces,
 `faucet.py` the faucet and its asker, `postage.py` the postage gate, `rx.py` the proof of work through the
 library in `native/`, `pool.py` the pool, `payout.py` its payouts, `miner.py` its miner, `x402.py` the
-x402 buyer, paywall and facilitator, and `stamps.py` the stamps service and the check of a proof.
+x402 buyer, paywall and facilitator, `bazaar.py` the catalog of the bazaar extension, and `stamps.py` the stamps
+service and the check of a proof.
 
     TN_BIN=/path/to/bin python3 -B -m unittest discover -s tests -t .
 
-210 tests. Those in `test_wallet.py`, `test_cli_mcp.py`, `test_faucet_node.py`, `test_pool_node.py`,
+218 tests. Those in `test_wallet.py`, `test_cli_mcp.py`, `test_faucet_node.py`, `test_pool_node.py`,
 `test_payout_node.py`, `test_walletd.py`, `test_x402.py` and `test_stamps.py` run against the official
 `truenorthd` on regtest and a stand-in for a Northbound server (`tests/standin`, copied from the Polarka Wallet's repository); they
 are skipped without the node programs. No test touches a real network.
