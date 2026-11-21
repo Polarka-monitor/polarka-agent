@@ -1,7 +1,7 @@
 """Keys, addresses and signatures for TrueNorth (NORTH). Python standard library only.
 
 The arithmetic, the derivation and the signature code are those of the cold address tool
-(github.com/severka-monitor/truenorth-cold-address), where they were checked against TrueNorth Core v30.5.4
+(github.com/Polarka-monitor/truenorth-cold-address), where they were checked against TrueNorth Core v30.5.4
 and against the published P2QRH test vectors. They are slow and not constant in time: fine for a wallet that
 signs a few times a minute on a machine its owner controls, not for a server that signs for strangers.
 

@@ -72,7 +72,7 @@ or later on Linux or macOS and nothing besides; it does not run on Windows. Vers
 repository at the tag of their version and uploaded by hand; 0.1.1 and 0.1.2 were built by a workflow that is
 no longer used. The same files are on the project's own server,
 
-    pip install https://polarka.org/download/src/polarka-agent-0.2.1.tar.gz
+    pip install https://polarka.org/download/polarka-agent-0.2.1/polarka_agent-0.2.1.tar.gz
 
 and can be compared with `https://polarka.org/download/SHA256SUMS` first. Versions before 0.1.3 carry a
 faucet with the faults that `docs/faucet-review-0.1.2.md` names.
@@ -309,7 +309,7 @@ chain. Independent AI reviewers have read the pool several times; no person outs
 
 Python 3.9 or later, standard library only. `polarka_agent/keys.py` and `tx.py` hold the keys, addresses, the
 signature hash and signing; they come from the cold address tool
-(github.com/severka-monitor/truenorth-cold-address) and are checked against its published P2QRH test vectors.
+(github.com/Polarka-monitor/truenorth-cold-address) and are checked against its published P2QRH test vectors.
 `server.py` is the client for a wallet server, `wallet.py` the wallet, `cli.py` and `mcp.py` the two faces,
 `faucet.py` the faucet and its asker, `postage.py` the postage gate, `rx.py` the proof of work through the
 library in `native/`, `pool.py` the pool, `payout.py` its payouts, `miner.py` its miner, `x402.py` the
