@@ -6,7 +6,7 @@ A wallet for TrueNorth (NORTH) that a program can use: a command line, a Python 
 agents that speak the Model Context Protocol (MCP). The keys stay on the machine it runs on. What its
 addresses hold it asks a wallet server with the Northbound API (github.com/nova9/northbound).
 
-**State: 0.2.1, beta.** This package and the services at polarka.org run as a beta until a security expert who
+**State: 0.2.2, beta.** This package and the services at polarka.org run as a beta until a security expert who
 is a person has reviewed them: any part may change, stop or be reset without notice, and nothing is promised.
 `docs/how-it-works.md` (also at https://polarka.org/how/) says what each part does, who holds what and who sees
 what. Faults: an issue at github.com/Polarka-monitor/polarka-agent, or @Polarka_monitor on X; if one puts coins
@@ -72,7 +72,7 @@ or later on Linux or macOS and nothing besides; it does not run on Windows. Vers
 repository at the tag of their version and uploaded by hand; 0.1.1 and 0.1.2 were built by a workflow that is
 no longer used. The same files are on the project's own server,
 
-    pip install https://polarka.org/download/polarka-agent-0.2.1/polarka_agent-0.2.1.tar.gz
+    pip install https://polarka.org/download/polarka-agent-0.2.2/polarka_agent-0.2.2.tar.gz
 
 and can be compared with `https://polarka.org/download/SHA256SUMS` first. Versions before 0.1.3 carry a
 faucet with the faults that `docs/faucet-review-0.1.2.md` names.
@@ -202,8 +202,8 @@ the routes in FILE, a JSON list of objects such as
 and a facilitator started with `--bazaar-origin https://HOST` keeps a catalog of what was paid for there, at
 `GET /discovery/resources` and `GET /discovery/search?query=`, as the bazaar specification describes. A buyer
 echoes the extension (`fetch` does); the gate puts back its own resource and extension before the facilitator
-sees the payment, so a buyer cannot write something else into the catalog. Ours is not served to the outside
-until a release with the fix of review 8, H1, runs on the server (`docs/how-it-works.md`).
+sees the payment, so a buyer cannot write something else into the catalog. Ours is at
+https://gate.polarka.org/x402/discovery/resources (`docs/how-it-works.md`).
 
 An agent that pays for itself, from no coin to a stamped file: `examples/agent_that_pays_for_itself.py`.
 
@@ -319,7 +319,7 @@ service and the check of a proof.
 
     TN_BIN=/path/to/bin python3 -B -m unittest discover -s tests -t .
 
-218 tests. Those in `test_wallet.py`, `test_cli_mcp.py`, `test_faucet_node.py`, `test_pool_node.py`,
+231 tests. Those in `test_wallet.py`, `test_cli_mcp.py`, `test_faucet_node.py`, `test_pool_node.py`,
 `test_payout_node.py`, `test_walletd.py`, `test_x402.py` and `test_stamps.py` run against the official
 `truenorthd` on regtest and a stand-in for a Northbound server (`tests/standin`, copied from the Polarka Wallet's repository); they
 are skipped without the node programs. No test touches a real network.

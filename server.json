@@ -2,19 +2,19 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "org.polarka/polarka-agent",
   "title": "Polarka Agent: a NORTH wallet for agents",
-  "description": "TrueNorth (NORTH) wallet for agents: pay within owner-set limits, pay x402 services, stamp files.",
+  "description": "Pays x402 in NORTH. Owner limits do not bind an agent with shell or file tools as the same user.",
   "websiteUrl": "https://polarka.org",
   "repository": {
     "url": "https://github.com/Polarka-monitor/polarka-agent",
     "source": "github"
   },
-  "version": "0.2.1",
+  "version": "0.2.2",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "polarka-agent",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"

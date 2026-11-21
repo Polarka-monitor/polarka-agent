@@ -14,13 +14,13 @@ what. All of it can be checked against the code in this repository and the deplo
 | Part | Where it runs | What it does | Holds coins |
 |---|---|---|---|
 | Polarka Agent | your machine | a wallet as a command line, a Python library and an MCP server; pays services that speak x402, asks a faucet, mines for a pool | yours, within the `limits.json` you write |
-| Wallet server | `api.northboundwallet.org` (the Northbound project's, not ours) unless another is named; `node.polarka.org` is ours | tells the wallet what its addresses hold and passes its transactions to the network | no |
+| Wallet server | `api.northboundwallet.org` (the Northbound project's, not ours) unless another is named; `node.polarka.org` is ours, a process apart from the one our pool pays through | tells the wallet what its addresses hold and passes its transactions to the network | no |
 | Faucet | `faucet.polarka.org` | 0.25 NORTH to an address once a day, after a few seconds of hashing | its own, at most 100 NORTH a day |
 | Gate | `gate.polarka.org` | stands before paid routes and sells lots of 100 calls, for x402 or for a quote of its own | receives payments; holds no buyer's coins |
 | x402 facilitator | the server, on loopback | checks an x402 payment, hands it to the node, waits for a block | no keys, no coins |
 | Stamps | the server, on loopback, behind the gate | writes SHA-256s into the chain every ten minutes and gives proofs | a small wallet for fees |
 | Pool | `pool.polarka.org` | pays for each share; open to everybody since 21 November 2026 | what it owes miners, from a reserve |
-| Node | the server, on loopback | TrueNorth Core; the facilitator and the stamps service each have an RPC user allowed only the calls it makes | no wallet |
+| Node | the server, on loopback | TrueNorth Core; the facilitator, the stamps service and the public wallet server each have an RPC user allowed only the calls it makes | no wallet |
 | Usage counter | `polarka.org/data/usage.json` | counts every ten minutes, from the services' own records, what was used and what of it by others | none |
 
 ## An agent, from no coin to a paid call
@@ -59,11 +59,11 @@ When a payment for such a route is settled, the facilitator adds the route to it
 words of its own into the catalog: the gate replaces the description a buyer echoes with its own before the
 facilitator sees the payment.
 
-Our catalog is kept but not served to the outside yet. It was public for twelve minutes on 21 November 2026,
-until review 8 showed that a GET with a body could carry a second request through the web server to the
-facilitator's private `/settle` (H1). The fix is in the code after 0.2.1 (`httpguard.py`); the routes come
-back once a release with it runs on the server. In those twelve minutes the facilitator settled only our own
-test payment. The routes will be:
+Our catalog was first public for twelve minutes on 21 November 2026, until review 8 showed that a GET with a
+body could carry a second request through the web server to the facilitator's private `/settle` (H1). In those
+twelve minutes the facilitator settled only our own test payment. Since 0.2.2 every handler ends its connection
+after a request with a body (`httpguard.py`) and the web server opens a new connection for each request, so the
+read-only routes are public again:
 
     https://gate.polarka.org/x402/supported
     https://gate.polarka.org/x402/discovery/resources

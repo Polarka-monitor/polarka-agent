@@ -7,7 +7,9 @@ sources (tag v0.1.0-rc.5 and the commits up to 07523b6 of 15 November 2026). Non
 run here, and where this program and the real server differ the real server is right.
 
 What it is for: a pool or a faucet pays through a wallet server, and that server should stand on the payer's
-own node, not on somebody else's. It is not meant to serve the public, and it is not a block explorer.
+own node, not on somebody else's. Strangers must not reach that instance, or they could take all its
+connections while a payout waits; to serve the public as well, run a second instance with a user, a port and
+an RPC user of its own (deploy/walletd/README.md). It is not a block explorer.
 
   python3 -m polarka_agent.walletd --chain main --rpc-url http://127.0.0.1:9554 --cookie /var/lib/truenorth/.cookie
                                    [--listen 127.0.0.1:9560]
@@ -764,7 +766,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="walletd", description="A Northbound wallet server (API version 1) in front of one's own TrueNorth Core node.")
     parser.add_argument("--chain", required=True, choices=("main", "regtest"), help="the chain the node must run")
     parser.add_argument("--rpc-url", required=True, help="the node's RPC address, for example http://127.0.0.1:9554")
-    parser.add_argument("--cookie", required=True, help="the node's cookie file")
+    parser.add_argument("--cookie", required=True, help="the node's cookie file, or a file with user:password of an RPC user allowed only the calls walletd makes")
     parser.add_argument("--listen", default=DEFAULT_LISTEN, help="a loopback address and port (default %s; port 0 takes a free one)" % DEFAULT_LISTEN)
     parser.add_argument("--max-tip-age", type=int, default=7200, help="on main: seconds without a new block after which wallet data is answered 503 (default 7200)")
     parser.add_argument("--idle", type=float, default=30.0, help="seconds a connection may send nothing before it is closed (default 30)")

@@ -1,0 +1,17 @@
+# node.polarka.org: the wallet server for the public (polarka-walletd-public, 127.0.0.1:9561), never the pool's
+# (127.0.0.1:9560). keepalive off: one connection per request, so that a body the program behind leaves unread is
+# never read as a next request (review 8, M1).
+# Check with `caddy validate --config /etc/caddy/Caddyfile` before reloading.
+node.polarka.org {
+	request_body {
+		max_size 256KB
+	}
+	reverse_proxy 127.0.0.1:9561 {
+		transport http {
+			keepalive off
+		}
+	}
+	log {
+		output discard
+	}
+}

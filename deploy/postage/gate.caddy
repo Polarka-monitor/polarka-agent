@@ -1,5 +1,5 @@
 # gate.polarka.org: the postage gate, and the read-only part of the x402 facilitator beside it.
-# Only with polarka-agent after 0.2.1 (httpguard.py): before it, a GET with a body carried a second request to
+# Only with polarka-agent 0.2.2 or later (httpguard.py): before it, a GET with a body carried a second request to
 # the facilitator's /settle (review 8, H1). keepalive off keeps any upstream from reading such bytes as a request.
 # Only GET of /x402/supported and /x402/discovery/{resources,search} reaches the facilitator, without the
 # /x402 in front; its /verify and /settle (POST) stay on loopback. Everything else goes to the gate.

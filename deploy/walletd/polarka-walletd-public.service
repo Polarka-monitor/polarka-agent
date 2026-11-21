@@ -1,0 +1,43 @@
+# walletd for the public, behind node.polarka.org: the same program as polarka-walletd, with a user, a port and an
+# RPC user of its own, so that strangers never reach the instance the pool and the stamps service pay through
+# (review 8, M2). It reads no cookie: /etc/polarka-rpc/walletpub holds user:password of an RPC user the node
+# allows only the calls walletd makes (deploy/rpc-users.md).
+[Unit]
+Description=walletd for the public (127.0.0.1:9561, node.polarka.org)
+After=truenorthd.service
+Wants=truenorthd.service
+
+[Service]
+User=walletpub
+Group=walletpub
+# at most 12 connections: the node serves 16 RPC calls at a time, and the pool's calls must find one free
+ExecStart=/usr/bin/python3 -B /opt/polarka-walletd/walletd.py --chain main --rpc-url http://127.0.0.1:9554 --cookie /etc/polarka-rpc/walletpub --listen 127.0.0.1:9561 --most-connections 12
+Restart=on-failure
+RestartSec=15
+# 2: the node runs another chain, or the command is wrong; starting again changes nothing
+RestartPreventExitStatus=2
+NoNewPrivileges=true
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+IPAddressDeny=any
+IPAddressAllow=localhost
+UMask=0077
+MemoryMax=768M
+
+[Install]
+WantedBy=multi-user.target
