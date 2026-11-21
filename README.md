@@ -319,7 +319,7 @@ service and the check of a proof.
 
     TN_BIN=/path/to/bin python3 -B -m unittest discover -s tests -t .
 
-235 tests. Those in `test_wallet.py`, `test_cli_mcp.py`, `test_faucet_node.py`, `test_pool_node.py`,
+239 tests. Those in `test_wallet.py`, `test_cli_mcp.py`, `test_faucet_node.py`, `test_pool_node.py`,
 `test_payout_node.py`, `test_walletd.py`, `test_x402.py` and `test_stamps.py` run against the official
 `truenorthd` on regtest and a stand-in for a Northbound server (`tests/standin`, copied from the Polarka Wallet's repository); they
 are skipped without the node programs. No test touches a real network.

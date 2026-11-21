@@ -1,6 +1,7 @@
 """A request that carries a body ends its connection (polarka_agent/httpguard.py). Review 8 showed that otherwise a
 GET with a body reaches what is behind a proxy as two requests (H1, M1); these tests send exactly that."""
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -119,6 +120,49 @@ class EveryServerHasIt(unittest.TestCase):
             self.assertEqual(bare, [], "%s has a handler without OneRequestWithBody" % name)
             handlers += len(re.findall(r"class \w+\(OneRequestWithBody, BaseHTTPRequestHandler\)", text))
         self.assertGreaterEqual(handlers, 7)
+
+    def test_and_the_servers_in_deploy(self):
+        found = 0
+        for folder, _, files in os.walk(os.path.join(os.path.dirname(PACKAGE), "deploy")):
+            for name in sorted(files):
+                if name.endswith(".py"):
+                    with open(os.path.join(folder, name), encoding="utf-8") as f:
+                        text = f.read()
+                    self.assertEqual(re.findall(r"class \w+\(BaseHTTPRequestHandler\)", text), [], name)
+                    found += len(re.findall(r"class \w+\(OneRequestWithBody, BaseHTTPRequestHandler\)", text))
+        self.assertGreaterEqual(found, 1)
+
+
+class TheFactsService(unittest.TestCase):
+    """Review 9, I2: the facts service the gate asks keeps the same rule."""
+
+    def test_a_get_with_a_body_is_one_request(self):
+        path = os.path.join(os.path.dirname(PACKAGE), "deploy", "postage", "chain_facts.py")
+        spec = importlib.util.spec_from_file_location("chain_facts", path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        class Facts:
+            def __init__(self):
+                self.asked = []
+
+            def get(self, name):
+                self.asked.append(name)
+                return {"name": name}
+
+        facts = Facts()
+        server = ThreadingHTTPServer(("127.0.0.1", 0), mod.make_handler(facts))
+        port = serve(server)
+        try:
+            inner = b"GET /v1/tip HTTP/1.1\r\nHost: x\r\n\r\n"
+            got = exchange(port, b"GET /v1/unit HTTP/1.1\r\nHost: x\r\nContent-Length: %d\r\n\r\n" % len(inner) + inner)
+            self.assertEqual(got.count(b"HTTP/1.1 "), 1)
+            self.assertIn(b"Connection: close", got)
+            self.assertIn(b"Server: polarka-facts", got)
+            self.assertEqual(facts.asked, ["unit"])
+        finally:
+            server.shutdown()
+            server.server_close()
 
 
 class FakeNode:

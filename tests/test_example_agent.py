@@ -1,5 +1,6 @@
-"""The example agent's stamping loop (review 8, L7): it pays for at most two lots in one run, gives up after an hour,
-and refuses an answer that is not a JSON object; a nonsense next_batch does not make it sleep for long."""
+"""The example agent's stamping loop (review 8, L7; review 9, I4): it pays for at most two lots in one run, gives up
+after an hour without waiting or pausing past it, and refuses an answer that is not a JSON object or a "stamped" that
+names no block; a nonsense next_batch does not make it sleep for long."""
 import importlib.util
 import json
 import os
@@ -30,11 +31,15 @@ class Clock:
 class Gate:
     """Answers like a gate that never gets the stamp done: each answer is a 402 paid for anew, or what it is given."""
 
-    def __init__(self, answers):
-        self.answers, self.asked = list(answers), []
+    def __init__(self, answers, clock=None, spends=0):
+        self.answers, self.asked, self.waits = list(answers), [], []
+        self.clock, self.spends = clock, spends
 
     def __call__(self, url, wallet, most, wait=600):
         self.asked.append(most)
+        if self.clock is not None:
+            self.waits.append((wait, self.clock.until - self.clock.t))
+            self.clock.t += max(0, wait - self.spends)       # a fetch that waits for a block nearly as long as allowed
         if not self.answers:
             raise AssertionError("asked once more than expected")
         a = self.answers.pop(0)
@@ -75,9 +80,32 @@ class ExampleAgentTest(unittest.TestCase):
 
     def test_returns_the_proof(self):
         clock = Clock()
-        done = {"status": 200, "paid": None, "calls_left": 97, "body": json.dumps({"state": "stamped", "txid": "t"}).encode()}
+        done = {"status": 200, "paid": None, "calls_left": 97,
+                "body": json.dumps({"state": "stamped", "txid": "t", "block_height": 5}).encode()}
         gate = Gate(["pay", done])
         self.assertEqual(example.stamp("u", None, fetch=gate, sleep=clock.sleep, clock=clock)["state"], "stamped")
+
+    def test_a_stamped_answer_must_name_its_block(self):
+        clock = Clock()
+        for said in ({"state": "stamped"}, {"state": "stamped", "txid": "t"}, {"state": "stamped", "block_height": True, "txid": "t"}):
+            gate = Gate([{"status": 200, "paid": None, "body": json.dumps(said).encode()}])
+            with self.assertRaises(SystemExit) as e:
+                example.stamp("u", None, fetch=gate, sleep=clock.sleep, clock=clock)
+            self.assertIn("names no block", str(e.exception))
+
+    def test_no_wait_or_pause_runs_past_the_hour(self):
+        clock = Clock()
+        clock.until = clock.t + example.HOUR
+        start = clock.t
+        waiting = {"status": 200, "paid": None, "calls_left": 90,
+                   "body": json.dumps({"state": "waiting", "next_batch": clock.t + 10 ** 9}).encode()}
+        gate = Gate([waiting] * 10, clock=clock, spends=7)
+        with self.assertRaises(SystemExit) as e:
+            example.stamp("u", None, fetch=gate, sleep=clock.sleep, clock=clock)
+        self.assertIn("within an hour", str(e.exception))
+        self.assertEqual(clock.t, start + example.HOUR)           # not a second past it
+        self.assertTrue(all(w <= max(1, left) for w, left in gate.waits), gate.waits)
+        self.assertEqual(clock.slept[-1], 35)                     # the last pause is cut to what is left
 
 
 if __name__ == "__main__":

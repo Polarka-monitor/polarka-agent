@@ -58,13 +58,15 @@ def first_coin(wallet, address, mine_seconds):
 
 def stamp(url, wallet, fetch=x402.fetch, sleep=time.sleep, clock=time.time):
     """Asks for the stamp at url until the proof is there: pays for at most LOTS lots of calls, never more than
-    MOST for one, and gives up after HOUR. Returns the gate's answer with the proof."""
+    MOST for one, and gives up after HOUR; no wait for a block and no pause runs past it. Returns the gate's
+    answer with the proof."""
     paid, until = set(), clock() + HOUR
     while True:
-        if clock() > until:
+        left = until - clock()
+        if left <= 0:
             raise SystemExit("no stamp within an hour; run this again later, the lot paid for is kept")
         try:
-            got = fetch(url, wallet, MOST if len(paid) < LOTS else 0, wait=600)
+            got = fetch(url, wallet, MOST if len(paid) < LOTS else 0, wait=max(1, min(600, int(left))))
         except Refused as e:
             if e.kind == "X402_TOO_MUCH" and len(paid) >= LOTS:
                 raise SystemExit("%d lots paid in this run and the gate asks for another; stopping" % len(paid))
@@ -80,6 +82,9 @@ def stamp(url, wallet, fetch=x402.fetch, sleep=time.sleep, clock=time.time):
             if not isinstance(answer, dict):
                 raise SystemExit("the gate's answer is not a JSON object")
             if answer.get("state") == "stamped":
+                height, txid = answer.get("block_height"), answer.get("txid")
+                if isinstance(height, bool) or not isinstance(height, int) or not isinstance(txid, str):
+                    raise SystemExit("the gate says stamped but names no block or transaction")
                 return answer
             now = clock()
             batch = answer.get("next_batch")
@@ -87,9 +92,9 @@ def stamp(url, wallet, fetch=x402.fetch, sleep=time.sleep, clock=time.time):
                 batch = now
             pause = min(900, max(60, int(batch) - int(now) + 150)) if answer.get("state") == "waiting" else 120
             say("waiting", state=answer.get("state"), next_ask_in_seconds=pause)
-            sleep(pause)
+            sleep(min(pause, max(0, until - clock())))
         elif got["status"] in (202, 503):
-            sleep(30)
+            sleep(min(30, max(0, until - clock())))
         else:
             raise SystemExit("the gate answered %s: %s" % (got["status"], str(got.get("body"))[:300]))
 

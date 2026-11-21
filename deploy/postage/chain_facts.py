@@ -16,6 +16,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from polarka_agent.httpguard import OneRequestWithBody
 from polarka_agent.keys import UNIT
 from polarka_agent.server import Server, ServerError
 
@@ -42,8 +43,9 @@ class Facts:
 
 
 def make_handler(facts):
-    class H(BaseHTTPRequestHandler):
+    class H(OneRequestWithBody, BaseHTTPRequestHandler):      # a request with a body ends its connection (review 9, I2)
         protocol_version = "HTTP/1.1"
+        server_version = "polarka-facts"
 
         def do_GET(self):
             name = {"/v1/unit": "unit", "/v1/tip": "tip"}.get(self.path.split("?", 1)[0])

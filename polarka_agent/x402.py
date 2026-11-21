@@ -400,6 +400,7 @@ def facilitator_server(facilitator, listen=("127.0.0.1", 0), most=64):
 
     class Handler(OneRequestWithBody, BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
+        server_version = "polarka-x402"
         timeout = 30
 
         def log_message(self, *a):
