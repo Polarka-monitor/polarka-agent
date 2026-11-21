@@ -41,6 +41,8 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from .httpguard import OneRequestWithBody
+
 from .keys import BadInput, script_for_address
 from .wallet import Refused, north
 
@@ -396,7 +398,7 @@ def facilitator_server(facilitator, listen=("127.0.0.1", 0), most=64):
     {"x402Version": 2, "paymentPayload": ..., "paymentRequirements": ...}. It keeps no coins and signs nothing: it
     checks a payment and hands it to its node. For sellers that have no node of their own."""
 
-    class Handler(BaseHTTPRequestHandler):
+    class Handler(OneRequestWithBody, BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         timeout = 30
 
@@ -488,7 +490,7 @@ def paywall(facilitator, price, pay_to, content, content_type="text/plain; chars
         script_for_address(facilitator.chain, pay_to)
     wanted = requirements(facilitator.network, price, pay_to, confirmations=facilitator.needed(price))
 
-    class Handler(BaseHTTPRequestHandler):
+    class Handler(OneRequestWithBody, BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
         def log_message(self, *a):

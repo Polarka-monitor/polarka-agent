@@ -36,7 +36,9 @@ what. All of it can be checked against the code in this repository and the deplo
    `bip122:470c8b8ae824c06575cfae0851282c49` (TrueNorth's main chain), the scheme `exact` and the address to pay.
 5. The wallet builds and signs a transaction and writes it into its journal before anybody sees it. It sends it
    in the header `PAYMENT-SIGNATURE`. It pays nothing above `--most` or above the owner's limits, and a second
-   fetch of the same URL shows the same payment again instead of paying anew.
+   fetch of the same URL shows the same payment again instead of paying anew. A seller that refuses a payment
+   after it has passed it to the network can still make the next fetch pay again; the owner's limits bound
+   that (review 8, L1, open).
 6. The seller's facilitator checks the transaction and hands it to its node. While it waits for a block the
    seller answers `202` with `awaiting_confirmation`, and the agent shows the same payment again. Once it is in
    a block the service answers, and the header `PAYMENT-RESPONSE` names the transaction.
@@ -53,16 +55,19 @@ is no `limits.json`.
 
 x402 has an extension, the bazaar, through which a facilitator keeps a catalog of what was paid for through it.
 The gate names each paid route in full and describes it (what it takes and what it gives, with a JSON schema).
-When a payment for such a route is settled, the facilitator adds the route to its catalog. The catalog can be
-read by anybody and written by nobody from outside:
+When a payment for such a route is settled, the facilitator adds the route to its catalog. A buyer cannot put
+words of its own into the catalog: the gate replaces the description a buyer echoes with its own before the
+facilitator sees the payment.
+
+Our catalog is kept but not served to the outside yet. It was public for twelve minutes on 21 November 2026,
+until review 8 showed that a GET with a body could carry a second request through the web server to the
+facilitator's private `/settle` (H1). The fix is in the code after 0.2.1 (`httpguard.py`); the routes come
+back once a release with it runs on the server. In those twelve minutes the facilitator settled only our own
+test payment. The routes will be:
 
     https://gate.polarka.org/x402/supported
     https://gate.polarka.org/x402/discovery/resources
     https://gate.polarka.org/x402/discovery/search?query=stamp
-
-The facilitator's `/verify` and `/settle` cannot be reached from outside. A buyer cannot put words of its own
-into the catalog: the gate replaces the description a buyer echoes with its own before the facilitator sees the
-payment.
 
 ## Mining for the pool
 

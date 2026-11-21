@@ -202,7 +202,8 @@ the routes in FILE, a JSON list of objects such as
 and a facilitator started with `--bazaar-origin https://HOST` keeps a catalog of what was paid for there, at
 `GET /discovery/resources` and `GET /discovery/search?query=`, as the bazaar specification describes. A buyer
 echoes the extension (`fetch` does); the gate puts back its own resource and extension before the facilitator
-sees the payment, so a buyer cannot write something else into the catalog.
+sees the payment, so a buyer cannot write something else into the catalog. Ours is not served to the outside
+until a release with the fix of review 8, H1, runs on the server (`docs/how-it-works.md`).
 
 An agent that pays for itself, from no coin to a stamped file: `examples/agent_that_pays_for_itself.py`.
 

@@ -26,6 +26,8 @@ import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+from .httpguard import OneRequestWithBody
 from urllib.parse import parse_qs, urlparse
 
 from . import rx as rxmod
@@ -658,7 +660,7 @@ def _say(text):
 
 
 def handler_for(pool, trust_proxy=False):
-    class Handler(BaseHTTPRequestHandler):
+    class Handler(OneRequestWithBody, BaseHTTPRequestHandler):
         server_version = "polarka-pool"
         protocol_version = "HTTP/1.1"
         timeout = 10

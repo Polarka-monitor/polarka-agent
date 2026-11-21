@@ -41,6 +41,8 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from .httpguard import OneRequestWithBody
+
 from .keys import UNIT
 from .server import ServerError, reachable
 from .wallet import Refused, north, units as units_of
@@ -289,7 +291,7 @@ def make_handler(gate, upstream, trust_proxy, routes=()):
                 return where
         return default
 
-    class H(BaseHTTPRequestHandler):
+    class H(OneRequestWithBody, BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         server_version = "polarka-postage"
         timeout = 60                # a client that announces a body and sends nothing does not hold a thread for ever
@@ -454,6 +456,11 @@ def load_offers(path):
     if not isinstance(offers, list) or not all(isinstance(o, dict) and isinstance(o.get("prefix"), str) and o["prefix"].startswith("/")
                                                and isinstance(o.get("description"), str) for o in offers):
         raise Refused("INPUT", "the offers file is a list of objects, each with a prefix (/...) and a description")
+    from .bazaar import route_template
+    for o in offers:
+        # without a route the payer's own path and query would go into a catalog, one entry for each (review 8, L2)
+        if not route_template(o.get("route")) or not o["route"].startswith(o["prefix"]):
+            raise Refused("INPUT", "every offer needs a route under its prefix, such as /v1/stamp/:sha256")
     return offers
 
 

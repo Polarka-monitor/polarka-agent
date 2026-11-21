@@ -33,6 +33,8 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from .httpguard import OneRequestWithBody
+
 from . import keys
 from .keys import BadInput
 from .server import ServerError, reachable
@@ -371,7 +373,7 @@ class Server(ThreadingHTTPServer):
 
 
 def make_handler(faucet, trust_proxy):
-    class H(BaseHTTPRequestHandler):
+    class H(OneRequestWithBody, BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         server_version = "polarka-faucet"
         sys_version = ""

@@ -20,6 +20,9 @@ and in the Caddyfile a second name beside the faucet's:
         }
     }
 
+Ours gives every `reverse_proxy` its own connection per request (`transport http { keepalive off }`, see
+`gate.caddy`), so that a body a program behind leaves unread is never taken for a next request.
+
 Trying it from another machine, with a wallet that has a coin and limits:
 
     curl -i https://gate.example.org/v1/unit                      # twenty times a day for nothing, then 402
@@ -30,7 +33,8 @@ Ours also takes x402 (`--x402-facilitator`, see `deploy/x402`) and passes `/v1/s
 (`deploy/stamps`), and since 0.2.1 it says what it sells in the bazaar extension of x402: `--public-url
 https://gate.polarka.org --offers /etc/polarka-gate/offers.json`, with `offers.json` from this folder. The
 facilitator, started with `--bazaar-origin https://gate.polarka.org`, lists what was paid for here, and
-`gate.caddy` lets only its read-only routes out:
+`gate.caddy` lets only its read-only routes out, and only with a release after 0.2.1 (review 8, H1; ours are
+off until such a release runs):
 
     curl https://gate.polarka.org/x402/supported
     curl https://gate.polarka.org/x402/discovery/resources

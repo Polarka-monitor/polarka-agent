@@ -42,6 +42,30 @@ import urllib.request
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+
+class OneRequestWithBody:
+    """The same as polarka_agent/httpguard.py, written out here because walletd runs as one file: a request that
+    carries a body ends its connection, so that bytes left unread are never taken for a next request."""
+
+    sys_version = ""
+
+    def parse_request(self):
+        self._body_closes = False
+        if not super().parse_request():
+            return False
+        length = (self.headers.get("Content-Length") or "").strip()
+        if self.headers.get("Transfer-Encoding") is not None or length not in ("", "0"):
+            self.close_connection = True
+            self._body_closes = True
+        return True
+
+    def end_headers(self):
+        if getattr(self, "_body_closes", False):
+            self._body_closes = False
+            self.send_header("Connection", "close")
+        super().end_headers()
+
+
 COIN = 100_000_000
 MAX_ADDRESSES = 100
 UTXO_PAGE = 1_000                 # coins on a page when the request names no limit
@@ -618,7 +642,7 @@ class App:
             raise
 
 
-class Handler(BaseHTTPRequestHandler):
+class Handler(OneRequestWithBody, BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "walletd"
     sys_version = ""

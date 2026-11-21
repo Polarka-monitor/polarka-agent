@@ -35,7 +35,7 @@ Specification draft for x402: `docs/x402-scheme-exact-bip122.md` (also open as x
 
 ## What has been checked, and by whom
 
-Three reviews by AI models that did not write the code (not by people):
+Four reviews by AI models that did not write the code (not by people):
 
 - review 5 (Claude Opus): 2 High, 4 Medium, 7 Low; High and Medium fixed in 1ea787c (M4 in part);
 - review 6 (Claude Fable): 1 High, 4 Medium, 9 Low; High and Medium fixed in 6ddc827;
@@ -43,9 +43,18 @@ Three reviews by AI models that did not write the code (not by people):
   buyer's word) and five Low fixed in the commit after 6ddc827, L7 (stamps.json rewritten whole on each new
   stamp) and L8 (the gate had no read timeout) in e9512fc. Open: L3 (a huge proof is slow to check), L6.
 
-Not yet read by anybody else: the fixes of L7 and L8, the wallet that the MCP server makes when it finds none,
-the bazaar extension (`bazaar.py` and its parts in `x402.py` and `postage.py`) and
-`examples/agent_that_pays_for_itself.py`.
+- review 8 (a fresh AI agent, 21 November 2026, of b7b2d68..ea557ab and of the deployment): 1 High, 5 Medium,
+  8 Low, 6 Info. H1: a GET with a body reached a handler as two requests, so the proposed public route to the
+  facilitator's discovery would have opened its `/settle`; the route was live for twelve minutes and is off.
+  M1: the same on pool.polarka.org and node.polarka.org. Fixed: every handler now ends a connection after a
+  request with a body (`httpguard.py`, `tests/test_http_guard.py`), and the web server opens one upstream
+  connection per request (`keepalive off`, tried against Caddy 2.11.9). Also fixed: M3 (a search costs little
+  whatever it asks), L2 (an offer needs a route), L3 (the filters), M5 and parts of L8 (texts). Open: M2
+  (walletd serves the public and the pool from one process), M4 (the bounds hold against MCP-only programs, and
+  most MCP hosts also give file tools; the texts now say so), L1 (a payment shown again after a gate restart can
+  be refused), L4 (stamps storage grows), L5 (least privilege of four services), L6 (the watcher), L7, I2 to I6.
+
+Nobody but its author has read the fixes of review 8.
 
 Their reports can be had on request. Low findings that are still open are listed in them. Earlier parts of the
 project (wallet, pool) went through four further AI reviews. No person outside has read the code.

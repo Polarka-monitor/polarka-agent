@@ -13,6 +13,7 @@ import ipaddress
 import json
 import os
 import re
+import socket
 import threading
 import urllib.parse
 
@@ -24,6 +25,7 @@ METHODS_BODY = ("POST", "PUT", "PATCH")
 PRINTABLE = re.compile(r"^[\x20-\x7e]+$")
 TEMPLATE = re.compile(r"^/[a-zA-Z0-9_/:.\-~%]+$")
 LOOPBACK = {"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"}
+SCHEMAS = {"https://json-schema.org/draft/2020-12/schema", "http://json-schema.org/draft-07/schema#", "https://json-schema.org/draft-07/schema#"}
 
 
 def service_name(value):
@@ -53,8 +55,13 @@ def icon_url(value):
         return None
     if u.scheme not in ("http", "https") or not host or "@" in u.netloc or host in LOOPBACK:
         return None
-    if host.isdigit() or re.match(r"^0x[0-9a-f]+$", host):
+    if host.isdigit() or re.match(r"^0x[0-9a-f]+$", host) or host.endswith(".") or host.endswith(".localhost"):
         return None
+    try:
+        socket.inet_aton(host)          # 127.1, 0177.0.0.1, 0x7f.0.0.1: what a browser reads as an address
+        return None
+    except OSError:
+        pass
     try:
         ipaddress.ip_address(host.strip("[]"))
         return None
@@ -66,14 +73,16 @@ def route_template(value):
     if not isinstance(value, str) or not value or not TEMPLATE.match(value):
         return None
     plain = urllib.parse.unquote(value)
-    return None if ".." in plain or "://" in plain else value
+    return None if ".." in plain or "://" in plain or plain.startswith("//") else value
 
 
 def _refs_inside(obj):
     """$ref and $id only as fragments of the same document."""
     if isinstance(obj, dict):
         for k, v in obj.items():
-            if k in ("$ref", "$id") and not (isinstance(v, str) and v.startswith("#")):
+            if k in ("$ref", "$id", "$dynamicRef", "$recursiveRef", "$anchor", "$dynamicAnchor") and not (isinstance(v, str) and v.startswith("#")):
+                return False
+            if k == "$schema" and not (isinstance(v, str) and v in SCHEMAS):
                 return False
             if not _refs_inside(v):
                 return False
@@ -238,17 +247,21 @@ class Catalog:
 
     def resources(self, params):
         items = self._chosen(params)
-        limit = self._number(params.get("limit"), 100, 1000)
+        limit = self._number(params.get("limit"), 100, 100)
         offset = self._number(params.get("offset"), 0, 10 ** 6)
         return {"x402Version": VERSION, "items": items[offset:offset + limit],
                 "pagination": {"limit": limit, "offset": offset, "total": len(items)}}
 
     def search(self, params):
-        words = [w for w in re.split(r"\W+", str(params.get("query") or "").lower()) if w]
+        words = []
+        for w in re.split(r"\W+", str(params.get("query") or "")[:200].lower()):
+            if w and w not in words:
+                words.append(w)
+        words = words[:8]
         items = self._chosen(params)
         def text(i):
             return " ".join([i["resource"], i.get("description", ""), i.get("serviceName", ""), " ".join(i.get("tags", [])),
                              str(i["extensions"]["bazaar"]["info"]["input"].get("description", ""))]).lower()
-        hits = [i for i in items if all(w in text(i) for w in words)] if words else items
+        hits = [i for i in items if (lambda t: all(w in t for w in words))(text(i))] if words else items
         limit = self._number(params.get("limit"), 20, 100)
         return {"x402Version": VERSION, "resources": hits[:limit], "partialResults": len(hits) > limit, "pagination": None}

@@ -26,6 +26,8 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from .httpguard import OneRequestWithBody
+
 from .wallet import STAMP, Refused
 
 DIGEST = re.compile(r"^[0-9a-f]{64}$")
@@ -453,7 +455,7 @@ ABOUT = {"service": "polarka-stamps", "what": "proof that a file existed by a gi
 
 
 def make_handler(stamps):
-    class H(BaseHTTPRequestHandler):
+    class H(OneRequestWithBody, BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         server_version = "polarka-stamps"
         timeout = 30
