@@ -9,9 +9,10 @@ What it does, one JSON line a step:
   2. a first coin: 0.25 NORTH from the faucet of polarka.org after a few seconds of hashing, or with --mine that
      long mining for the Polarka pool, which pays from 1 NORTH owed every ten minutes;
   3. waits until the coin is in a block;
-  4. pays the stamps service over x402 (HTTP 402) for the SHA-256 of FILE: never more than 0.05 NORTH, and within
-     FOLDER/limits.json, which only the owner writes;
-  5. asks again after the next batch and a block, from the lot of calls it paid for, until the proof is there;
+  4. pays the stamps service over x402 (HTTP 402) for the SHA-256 of FILE: never more than 0.05 NORTH for one lot
+     of 100 calls, at most two lots in one run, and within FOLDER/limits.json, which only the owner writes;
+  5. asks again after the next batch and a block, from the lot of calls it paid for, until the proof is there, for
+     an hour at most;
   6. checks the proof, and with a node (--rpc-url, --rpc-cookie) also that its block is in the chain.
 
 The file itself never leaves the machine, only its SHA-256. It takes some fifteen minutes, most of them waiting for
@@ -30,6 +31,8 @@ from polarka_agent.wallet import Refused, Wallet, north, units
 
 GATE = "https://gate.polarka.org/v1/stamp/"
 MOST = units("0.05")             # the most this agent pays for one lot of stamps
+LOTS = 2                         # the most lots it pays for in one run
+HOUR = 3600                      # the longest it keeps asking for one stamp
 LIMITS = '{"per_payment_north": "0.05", "per_day_north": "0.1"}'
 
 
@@ -51,6 +54,44 @@ def first_coin(wallet, address, mine_seconds):
     except Refused as e:
         say("faucet", refused=e.kind, message=str(e))
         raise SystemExit("no first coin today from the faucet; try --mine 300")
+
+
+def stamp(url, wallet, fetch=x402.fetch, sleep=time.sleep, clock=time.time):
+    """Asks for the stamp at url until the proof is there: pays for at most LOTS lots of calls, never more than
+    MOST for one, and gives up after HOUR. Returns the gate's answer with the proof."""
+    paid, until = set(), clock() + HOUR
+    while True:
+        if clock() > until:
+            raise SystemExit("no stamp within an hour; run this again later, the lot paid for is kept")
+        try:
+            got = fetch(url, wallet, MOST if len(paid) < LOTS else 0, wait=600)
+        except Refused as e:
+            if e.kind == "X402_TOO_MUCH" and len(paid) >= LOTS:
+                raise SystemExit("%d lots paid in this run and the gate asks for another; stopping" % len(paid))
+            raise
+        if got.get("paid"):
+            paid.add(got.get("txid") or len(paid))
+        say("paid" if got.get("paid") else "asked", status=got["status"], paid=got.get("paid"), calls_left=got.get("calls_left"))
+        if got["status"] == 200:
+            try:
+                answer = json.loads(got["body"])
+            except ValueError:
+                answer = None
+            if not isinstance(answer, dict):
+                raise SystemExit("the gate's answer is not a JSON object")
+            if answer.get("state") == "stamped":
+                return answer
+            now = clock()
+            batch = answer.get("next_batch")
+            if isinstance(batch, bool) or not isinstance(batch, (int, float)) or not now - 86400 < batch < now + 86400:
+                batch = now
+            pause = min(900, max(60, int(batch) - int(now) + 150)) if answer.get("state") == "waiting" else 120
+            say("waiting", state=answer.get("state"), next_ask_in_seconds=pause)
+            sleep(pause)
+        elif got["status"] in (202, 503):
+            sleep(30)
+        else:
+            raise SystemExit("the gate answered %s: %s" % (got["status"], str(got.get("body"))[:300]))
 
 
 def main():
@@ -84,21 +125,7 @@ def main():
             note="the owner writes this file, no program does; then run this again")
         raise SystemExit(2)
 
-    url = GATE + digest
-    while True:
-        got = x402.fetch(url, wallet, MOST, wait=600)
-        say("paid" if got.get("paid") else "asked", status=got["status"], paid=got.get("paid"), calls_left=got.get("calls_left"))
-        if got["status"] == 200:
-            answer = json.loads(got["body"])
-            if answer.get("state") == "stamped":
-                break
-            pause = max(60, int(answer.get("next_batch", time.time())) - int(time.time()) + 150) if answer.get("state") == "waiting" else 120
-            say("waiting", state=answer.get("state"), next_ask_in_seconds=pause)
-            time.sleep(pause)
-        elif got["status"] in (202, 503):
-            time.sleep(30)
-        else:
-            raise SystemExit("the gate answered %s: %s" % (got["status"], str(got.get("body"))[:300]))
+    answer = stamp(GATE + digest, wallet)
 
     proof_path = a.file + ".stamp.json"
     with open(proof_path, "w") as f:

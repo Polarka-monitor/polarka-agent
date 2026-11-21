@@ -1,22 +1,36 @@
 # The small service that stands behind the gate. It listens on this machine only.
+# It runs as a user of its own (DynamicUser), not as the gate's: it talks to a server on the internet
+# (api.northboundwallet.org) and must not be able to read the gate's wallet (review 8, L5).
 [Unit]
 Description=Polarka chain facts (behind the postage gate)
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-User=gate
-Group=gate
+DynamicUser=yes
 ExecStart=/opt/polarka-faucet/venv/bin/python /opt/polarka-faucet/chain_facts.py --server https://api.northboundwallet.org --listen 127.0.0.1:8680
 Restart=on-failure
 RestartSec=10
-# exit 2 is a refusal to start (limits, journal): starting again changes nothing, a person has to look
+# exit 2: the command line is wrong; starting again changes nothing, a person has to look
 RestartPreventExitStatus=2
 NoNewPrivileges=true
+CapabilityBoundingSet=
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+InaccessiblePaths=-/var/lib/polarka-gate -/var/lib/polarka-pool -/var/lib/polarka-faucet -/var/lib/polarka-stamps -/var/lib/polarka-x402 -/etc/polarka-rpc
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 MemoryMax=200M
 

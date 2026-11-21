@@ -1,6 +1,7 @@
 # The postage gate. Its wallet only receives; it has no limits.json and so can pay nothing.
 # --public-url and --offers: the 402 names the resource in full and describes the routes in offers.json
 # (the bazaar extension of x402), so that the facilitator can list what was paid for here.
+# No IPAddressDeny: for --price-hashes the gate asks api.northboundwallet.org how hard the network is to mine.
 [Unit]
 Description=Polarka postage gate (polarka-agent postage-serve)
 After=network-online.target polarka-facts.service polarka-x402.service polarka-stamps.service

@@ -53,8 +53,11 @@ Four reviews by AI models that did not write the code (not by people):
   deployment M2 (node.polarka.org has a walletd of its own, with an RPC user allowed only its calls). All of it is
   in 0.2.2. Open: M4 (the bounds hold against MCP-only programs, and most MCP hosts also give file tools; the
   texts and the registry entry say so), L1 (a payment shown again after a gate restart can be refused), L4 (stamps
-  storage grows), L5 (least privilege; since 21 November the pool and its wallet server no longer hold the node's
-  cookie, the rest is open), L6 (the watcher), L7, I2 to I6.
+  storage grows), I2 to I6. Fixed later on 21 November: L5 (the pool and its wallet server have RPC users of their
+  own; the facts service runs as a user of its own; polarka-usage keeps only the right to read and opens no record
+  through a link, as does polarka-status; under the web root only the pages are the refresh job's), L6 (the
+  watcher passes on only known units, states by pattern and numbers, and reports its own faults), L7 (the example
+  agent pays for at most two lots and asks for an hour at most).
 
 Nobody but its author has read the fixes of review 8.
 
@@ -65,7 +68,7 @@ project (wallet, pool) went through four further AI reviews. No person outside h
 
     git clone https://github.com/Polarka-monitor/polarka-agent && cd polarka-agent   # or the copy you were given
     # a TrueNorth Core build (truenorthd, truenorth-cli) in a folder; tests start their own regtest node
-    TN_BIN=/path/to/bin python3 -m unittest discover -s tests -t .      # about 5 minutes, 231 tests
+    TN_BIN=/path/to/bin python3 -m unittest discover -s tests -t .      # about 5 minutes, 235 tests
 
 Without `TN_BIN` the tests that need a node are skipped. To check a stamp from the main chain:
 
