@@ -9,7 +9,7 @@ It is one file with nothing but the standard library, so it is copied on its own
 
 ```
 adduser --system --group --no-create-home walletd
-adduser walletd truenorth                     # reads the node's cookie
+# /etc/polarka-rpc/walletd: an RPC user of its own, allowed only its calls (deploy/rpc-users.md)
 install -d -m 0755 /opt/polarka-walletd
 install -m 0644 polarka_agent/walletd.py /opt/polarka-walletd/walletd.py
 install -m 0644 deploy/walletd/polarka-walletd.service /etc/systemd/system/

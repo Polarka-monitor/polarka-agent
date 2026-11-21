@@ -1,5 +1,6 @@
 # walletd: a Northbound wallet server in front of the server's own TrueNorth node, for the pool's payouts.
-# Loopback only; nothing that faces the internet may point at it.
+# Loopback only; nothing that faces the internet may point at it. It reads no cookie: /etc/polarka-rpc/walletd
+# holds user:password of an RPC user the node allows only the calls walletd makes (deploy/rpc-users.md).
 [Unit]
 Description=walletd, the wallet server on the own TrueNorth node (127.0.0.1:9560)
 After=truenorthd.service
@@ -8,8 +9,7 @@ Wants=truenorthd.service
 [Service]
 User=walletd
 Group=walletd
-SupplementaryGroups=truenorth
-ExecStart=/usr/bin/python3 -B /opt/polarka-walletd/walletd.py --chain main --rpc-url http://127.0.0.1:9554 --cookie /var/lib/truenorth/.cookie --listen 127.0.0.1:9560
+ExecStart=/usr/bin/python3 -B /opt/polarka-walletd/walletd.py --chain main --rpc-url http://127.0.0.1:9554 --cookie /etc/polarka-rpc/walletd --listen 127.0.0.1:9560
 Restart=on-failure
 RestartSec=15
 # 2: the node runs another chain, or the command is wrong; starting again changes nothing

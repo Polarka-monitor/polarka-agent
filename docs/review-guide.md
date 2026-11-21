@@ -53,7 +53,8 @@ Four reviews by AI models that did not write the code (not by people):
   deployment M2 (node.polarka.org has a walletd of its own, with an RPC user allowed only its calls). All of it is
   in 0.2.2. Open: M4 (the bounds hold against MCP-only programs, and most MCP hosts also give file tools; the
   texts and the registry entry say so), L1 (a payment shown again after a gate restart can be refused), L4 (stamps
-  storage grows), L5 (least privilege of four services), L6 (the watcher), L7, I2 to I6.
+  storage grows), L5 (least privilege; since 21 November the pool and its wallet server no longer hold the node's
+  cookie, the rest is open), L6 (the watcher), L7, I2 to I6.
 
 Nobody but its author has read the fixes of review 8.
 

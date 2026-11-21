@@ -20,7 +20,7 @@ what. All of it can be checked against the code in this repository and the deplo
 | x402 facilitator | the server, on loopback | checks an x402 payment, hands it to the node, waits for a block | no keys, no coins |
 | Stamps | the server, on loopback, behind the gate | writes SHA-256s into the chain every ten minutes and gives proofs | a small wallet for fees |
 | Pool | `pool.polarka.org` | pays for each share; open to everybody since 21 November 2026 | what it owes miners, from a reserve |
-| Node | the server, on loopback | TrueNorth Core; the facilitator, the stamps service and the public wallet server each have an RPC user allowed only the calls it makes | no wallet |
+| Node | the server, on loopback | TrueNorth Core; every service that talks to it (the facilitator, the stamps service, the pool and both wallet servers) has an RPC user allowed only the calls it makes | no wallet |
 | Usage counter | `polarka.org/data/usage.json` | counts every ten minutes, from the services' own records, what was used and what of it by others | none |
 
 ## An agent, from no coin to a paid call
