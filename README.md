@@ -1,5 +1,7 @@
 # Polarka Agent
 
+<!-- mcp-name: org.polarka/polarka-agent -->
+
 A wallet for TrueNorth (NORTH) that a program can use: a command line, a Python library, and a server for
 agents that speak the Model Context Protocol (MCP). The keys stay on the machine it runs on. What its
 addresses hold it asks a wallet server with the Northbound API (github.com/nova9/northbound).
@@ -91,9 +93,11 @@ not run by this project. `new` shows the 12 or 24 words once; `--words-file` bri
 A stamp writes `POLARKA\x01` and a SHA-256 into an output that carries data. The chain is young and its hash
 rate is small: a stamp shows an order of events, it is not proof for a court.
 
-For an agent: start `python3 -m polarka_agent --dir FOLDER mcp` as an MCP server over standard input and
-output. Its tools are `north_balance`, `north_address`, `north_received`, `north_wait`, `north_pay`,
-`north_stamp`, `north_payments`, `north_history`, `north_limits`, `north_faucet`, `north_postage` and `north_fetch`.
+For an agent: start `python3 -m polarka_agent --dir FOLDER mcp` (or `uvx polarka-agent mcp`) as an MCP
+server over standard input and output. Without a wallet in the folder it makes one on main, which pays
+nothing until its owner writes `limits.json`; the recovery words are in `wallet.json` there. Its tools are
+`north_balance`, `north_address`, `north_received`, `north_wait`, `north_pay`, `north_stamp`, `north_payments`,
+`north_history`, `north_limits`, `north_faucet`, `north_postage` and `north_fetch`.
 
 ## A first coin: the faucet
 
@@ -103,8 +107,8 @@ faster. What bounds a faucet is what it counts, below.
 
     python3 -m polarka_agent --dir FOLDER faucet https://ADDRESS-OF-A-FAUCET
 
-asks for a little NORTH to a fresh address of the wallet. There is no public faucet yet; when there is one,
-its address will be on polarka.org.
+asks for a little NORTH to a fresh address of the wallet. The project runs one at https://faucet.polarka.org
+(an agent gives that address to the tool `north_faucet`; `start` asks it by itself).
 
 Anybody can run one: `faucet-serve --amount 2` hands out 2 NORTH to an address once a day from the wallet in
 FOLDER. What it may give in a day is that wallet's `limits.json`, nothing else, so a faucet is this wallet

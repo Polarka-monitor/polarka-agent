@@ -318,6 +318,13 @@ def run(argv=None, out=sys.stdout):
                              % (a.listen, facilitator.network, a.confirmations, a.instant_below))
             server.serve_forever()
             return 0
+        if a.cmd == "mcp" and not os.path.exists(os.path.join(folder, "wallet.json")):
+            # an agent that is given this server from a registry starts with no wallet: it gets one on main, which
+            # pays nothing until its owner writes limits.json, as `start` does
+            Wallet.create(folder, "main", DEFAULT_SERVER)
+            sys.stderr.write(json.dumps({"event": "wallet", "made": True, "folder": folder,
+                                         "note": "The recovery words are in wallet.json in that folder; whoever reads that "
+                                                 "file can spend. The wallet pays nothing until its owner writes limits.json."}) + "\n")
         wallet = Wallet(folder)
         if a.cmd == "mcp":
             from .mcp import serve
