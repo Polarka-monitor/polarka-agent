@@ -294,6 +294,50 @@ class X402Deep(X402OnRegtest):
         self.node.mine(1, SINK)
         self.assertEqual(x402.fetch(url, self.buyer, units("1"), network=self.network, wait=0)["status"], 200)
 
+    def test_what_is_paid_for_through_the_gate_can_be_found(self):
+        from polarka_agent import bazaar
+
+        class Up(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", "7")
+                self.end_headers()
+                self.wfile.write(b"stamped")
+        up = self.start(ThreadingHTTPServer(("127.0.0.1", 0), Up))
+        catalog = bazaar.Catalog(os.path.join(self.tmp, "bazaar.json"), ["https://gate.example.org"])
+        keeper = x402.Facilitator(self.rpc, "regtest", os.path.join(self.tmp, "used-bazaar.jsonl"), confirmations=1, catalog=catalog)
+        self.assertEqual(keeper.supported()["extensions"], ["bazaar"])
+        base = self.start(x402.facilitator_server(keeper))
+        remote = x402.RemoteFacilitator(base)
+        offers = [{"prefix": "/v1/stamp", "description": "Stamps a SHA-256", "route": "/v1/stamp/:sha256",
+                   "pathParams": {"sha256": "ab" * 32}, "output": {"state": "stamped"}, "serviceName": "Polarka stamps"}]
+        gate = postage.Gate(self.make("gate-bazaar"), PRICE, 3, x402=remote, public_url="https://gate.example.org", offers=offers)
+        url = self.start(ThreadingHTTPServer(("127.0.0.1", 0), postage.make_handler(gate, up.split("//")[1], False))) + "/v1/stamp/" + "ab" * 32
+        needed, _ = self.offer(url)
+        self.assertEqual(needed["extensions"]["bazaar"]["routeTemplate"], "/v1/stamp/:sha256")
+        self.assertEqual(x402.fetch(url, self.buyer, units("1"), network=self.network, wait=0)["status"], 202)
+        self.assertEqual(json.loads(urllib.request.urlopen(base + "/discovery/resources", timeout=10).read())["items"], [])
+        self.node.mine(1, SINK)
+        got = x402.fetch(url, self.buyer, units("1"), network=self.network, wait=0)
+        self.assertEqual((got["status"], got["body"]), (200, b"stamped"))
+        listed = json.loads(urllib.request.urlopen(base + "/discovery/resources?type=http", timeout=10).read())
+        self.assertEqual(listed["pagination"]["total"], 1)
+        item = listed["items"][0]
+        self.assertEqual((item["resource"], item["serviceName"]), ("https://gate.example.org/v1/stamp/:sha256", "Polarka stamps"))
+        self.assertEqual(item["accepts"][0]["payTo"], gate.state["x402_address"])
+        found = json.loads(urllib.request.urlopen(base + "/discovery/search?query=stamps", timeout=10).read())
+        self.assertEqual(len(found["resources"]), 1)
+        try:
+            urllib.request.urlopen(base + "/discovery/search", timeout=10)
+            self.fail("a search without a query")
+        except urllib.error.HTTPError as e:
+            self.assertEqual(e.code, 400)
+
     def test_a_cheap_payment_does_not_buy_a_dear_thing(self):
         pay_to = self.seller.account.address(0, 3)
         cheap = self.start(x402.paywall(self.patient, PRICE, pay_to, b"cheap")) + "/cheap"

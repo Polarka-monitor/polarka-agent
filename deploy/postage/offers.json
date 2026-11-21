@@ -1,0 +1,9 @@
+[
+ {"prefix": "/v1/stamp",
+  "route": "/v1/stamp/:sha256",
+  "description": "Stamps the SHA-256 of a file into the TrueNorth chain, many in one transaction every ten minutes, and gives back a proof that it existed by that block (check it with polarka-agent stamp-verify)",
+  "pathParams": {"sha256": "32c5fa379499a6bc0fcc706d12b528218d093af01f0b6073fbe0c351454cf480"},
+  "output": {"state": "stamped", "digest": "32c5fa37...", "root": "...", "path": [], "txid": "...", "block_height": 29174, "txoutproof": "..."},
+  "serviceName": "Polarka stamps",
+  "tags": ["stamps", "timestamp", "proof", "sha256", "north"]}
+]

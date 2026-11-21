@@ -156,6 +156,9 @@ def run(argv=None, out=sys.stdout):
                    "block (default 0: never)")
     c.add_argument("--redeliver", type=int, default=600, help="seconds after it was settled that the same payment and claim "
                    "are settled again (an answer lost on the way)")
+    c.add_argument("--bazaar-origin", action="append", default=[], metavar="https://HOST",
+                   help="keep a bazaar catalog (GET /discovery/resources, /discovery/search) of the resources of this origin "
+                   "that were paid for (may be given more than once; none: no catalog)")
     c = sub.add_parser("postage-serve", help="be a gate before a web service that lets through who paid postage to this wallet")
     c.add_argument("--upstream", required=True, help="the service behind the gate, host:port")
     c.add_argument("--price", help="NORTH for one lot of calls")
@@ -168,6 +171,8 @@ def run(argv=None, out=sys.stdout):
     c.add_argument("--x402-facilitator", help="also sell the lot over x402, settled by this facilitator (http://127.0.0.1:9570)")
     c.add_argument("--route", action="append", default=[], metavar="PREFIX=HOST:PORT",
                    help="send paths that start with PREFIX to another service behind the gate (may be given more than once)")
+    c.add_argument("--public-url", help="the https:// address the gate is seen at; the 402 then names its resources in full")
+    c.add_argument("--offers", help="a JSON file of what the gate lets be found in an x402 bazaar (with --public-url)")
     c = sub.add_parser("stamps-serve", help="stamps as a service: many SHA-256s in one transaction of this wallet, a proof for each")
     c.add_argument("--rpc-url", required=True, help="the node the blocks are read from, for example http://127.0.0.1:9554")
     c.add_argument("--rpc-cookie", required=True, help="the node's .cookie file")
@@ -309,13 +314,20 @@ def run(argv=None, out=sys.stdout):
             if not 0 <= a.confirmations <= 100 or a.redeliver < 0:
                 raise Refused("INPUT", "--confirmations is 0 to 100, --redeliver 0 or more")
             os.makedirs(folder, mode=0o700, exist_ok=True)
+            catalog = None
+            if a.bazaar_origin:
+                from .bazaar import Catalog, origin
+                if not all(o.startswith("https://") and origin(o) for o in a.bazaar_origin):
+                    raise Refused("INPUT", "--bazaar-origin is an https:// origin, for example https://gate.polarka.org")
+                catalog = Catalog(os.path.join(folder, "x402-bazaar.json"), a.bazaar_origin)
             facilitator = Facilitator(RpcNode(a.rpc_url, os.path.expanduser(a.rpc_cookie), timeout=30), a.chain, os.path.join(folder, "x402-used.jsonl"),
-                                      a.confirmations, units(a.instant_below), a.redeliver)
+                                      a.confirmations, units(a.instant_below), a.redeliver, catalog=catalog)
             if a.chain in NETWORKS and facilitator.network != NETWORKS[a.chain]:
                 raise Refused("CHAIN", "the node runs another chain than --chain")
             server = facilitator_server(facilitator, (host, port))
-            sys.stderr.write("x402 facilitator on %s for %s: %d confirmations, at once below %s NORTH\n"
-                             % (a.listen, facilitator.network, a.confirmations, a.instant_below))
+            sys.stderr.write("x402 facilitator on %s for %s: %d confirmations, at once below %s NORTH%s\n"
+                             % (a.listen, facilitator.network, a.confirmations, a.instant_below,
+                                ", a bazaar catalog of %s" % " ".join(a.bazaar_origin) if catalog is not None else ""))
             server.serve_forever()
             return 0
         if a.cmd == "mcp" and not os.path.exists(os.path.join(folder, "wallet.json")):
@@ -366,8 +378,12 @@ def run(argv=None, out=sys.stdout):
                 if not eq or not prefix.startswith("/") or ":" not in where:
                     raise Refused("INPUT", "--route is PREFIX=HOST:PORT, for example /v1/stamp=127.0.0.1:8681")
                 routes.append((prefix, where))
+            offers = ()
+            if a.offers:
+                from .postage import load_offers
+                offers = load_offers(a.offers)
             return postage_serve(wallet, a.upstream, units(a.price) if a.price is not None else 0, a.calls, a.listen, a.free,
-                                 a.trust_proxy, a.price_hashes or 0, facilitator, routes)
+                                 a.trust_proxy, a.price_hashes or 0, facilitator, routes, a.public_url, offers)
         if a.cmd == "stamps-serve":
             from .stamps import serve as stamps_serve
             from .walletd import Node as RpcNode

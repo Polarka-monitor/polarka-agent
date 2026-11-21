@@ -59,9 +59,13 @@ def mark(token):
 
 
 class Gate:
-    def __init__(self, wallet, price, calls, free=0, clock=time.time, look_every=20, hashes=0, x402=None):
+    def __init__(self, wallet, price, calls, free=0, clock=time.time, look_every=20, hashes=0, x402=None, public_url=None, offers=()):
         self.wallet, self.price, self.calls, self.free, self.clock, self.look_every = wallet, price, calls, free, clock, look_every
         self.x402 = x402            # a facilitator: the lot may then be bought with x402 too
+        # where the gate is seen from outside (https://...), and what it lets be found in a bazaar: a list of
+        # {"prefix", "description", "method", "route", "pathParams", "queryParams", "output", "serviceName", "tags", "iconUrl"}
+        self.public_url = public_url.rstrip("/") if public_url else None
+        self.offers = sorted((dict(o) for o in offers), key=lambda o: -len(o["prefix"]))
         self.offered = {}           # a price asked over x402 -> until when a payment of it is taken
         self.hashes = hashes        # above nothing: the price of a lot is this much mining work, not a fixed amount
         self.priced = None          # (when, the price in base units, hashes for one NORTH)
@@ -186,13 +190,48 @@ class Gate:
                 price = asked
         return requirements(self.x402.network, price, self.state["x402_address"], confirmations=self.x402.needed(price))
 
-    def x402_needed(self, path):
-        return {"x402Version": X402_VERSION, "error": "PAYMENT-SIGNATURE header is required",
-                "resource": {"url": path, "description": "postage for %d calls" % self.calls, "mimeType": "application/json"},
-                "accepts": [self.x402_wanted()]}
+    def _offer(self, path):
+        for o in self.offers:
+            if path == o["prefix"] or path.startswith(o["prefix"].rstrip("/") + "/") or path.startswith(o["prefix"] + "?"):
+                return o
+        return None
 
-    def x402_pay(self, payment):
-        """A payment of x402 for one lot. (what came of it, True when this call may pass)."""
+    def described(self, path):
+        """(resource, extensions) as the gate itself states them for a call to `path`: the seller says what it sells."""
+        resource = {"url": (self.public_url or "") + path, "description": "postage for %d calls" % self.calls,
+                    "mimeType": "application/json"}
+        o = self._offer(path)
+        if o is None:
+            return resource, None
+        resource["description"] = "%s (one payment buys %d calls)" % (o["description"], self.calls)
+        resource["mimeType"] = o.get("mimeType", "application/json")
+        for k in ("serviceName", "tags", "iconUrl"):
+            if o.get(k):
+                resource[k] = o[k]
+        if not self.public_url:
+            return resource, None               # a catalog takes only absolute URLs
+        from .bazaar import declaration
+        ext = declaration(o.get("method", "GET"), o.get("pathParams"), o.get("queryParams"), o.get("output"), o.get("route"))
+        return resource, {"bazaar": ext}
+
+    def x402_needed(self, path):
+        resource, ext = self.described(path)
+        needed = {"x402Version": X402_VERSION, "error": "PAYMENT-SIGNATURE header is required", "resource": resource,
+                  "accepts": [self.x402_wanted()]}
+        if ext:
+            needed["extensions"] = ext
+        return needed
+
+    def x402_pay(self, payment, path=None):
+        """A payment of x402 for one lot. (what came of it, True when this call may pass). What the payment says it
+        buys (resource, extensions) is put back to what the gate states for `path`, so that a buyer cannot have the
+        facilitator write something else into its catalog."""
+        if isinstance(payment, dict) and path is not None:
+            resource, ext = self.described(path)
+            payment = dict(payment, resource=resource)
+            payment.pop("extensions", None)
+            if ext:
+                payment["extensions"] = ext
         body = payment.get("payload") if isinstance(payment, dict) else None
         claim = body.get("claim") if isinstance(body, dict) else None
         if not isinstance(claim, str) or not CLAIM.match(claim):
@@ -295,7 +334,7 @@ def make_handler(gate, upstream, trust_proxy, routes=()):
                     except Exception:
                         outcome = "unreadable"
                         return self.send(400, {"error": "INPUT", "message": "the payment cannot be read"})
-                    done, may = gate.x402_pay(payment)
+                    done, may = gate.x402_pay(payment, self.path)
                     more["PAYMENT-RESPONSE"] = b64json(done)
                     if not may:
                         if done.get("errorReason") == AWAITING:
@@ -407,12 +446,25 @@ def buy(wallet, url, most, timeout=30):
             "then": "when the payment is in a block, send the token in the header X-Postage with each call"}
 
 
-def serve(wallet, upstream, price, calls, listen, free=0, trust_proxy=False, hashes=0, x402=None, routes=()):
+def load_offers(path):
+    """What the gate lets be found in a bazaar, from a JSON file: a list of objects with at least prefix and
+    description (see Gate)."""
+    with open(path) as f:
+        offers = json.load(f)
+    if not isinstance(offers, list) or not all(isinstance(o, dict) and isinstance(o.get("prefix"), str) and o["prefix"].startswith("/")
+                                               and isinstance(o.get("description"), str) for o in offers):
+        raise Refused("INPUT", "the offers file is a list of objects, each with a prefix (/...) and a description")
+    return offers
+
+
+def serve(wallet, upstream, price, calls, listen, free=0, trust_proxy=False, hashes=0, x402=None, routes=(), public_url=None, offers=()):
     if (price <= 0) == (hashes <= 0) or calls <= 0 or free < 0:
         raise Refused("INPUT", "a price in NORTH or a price in hashes, one of the two, and a number of calls above nothing")
     if x402 is not None and getattr(x402, "chain", None) and x402.chain != wallet.chain:
         raise Refused("CHAIN", "the facilitator settles another chain than the gate's wallet")
-    gate = Gate(wallet, price, calls, free, hashes=hashes, x402=x402)
+    if public_url is not None and not public_url.startswith("https://"):
+        raise Refused("INPUT", "--public-url is the https:// address the gate is seen at")
+    gate = Gate(wallet, price, calls, free, hashes=hashes, x402=x402, public_url=public_url, offers=offers)
     if hashes:
         try:
             price = units_of(gate.about()["price"])

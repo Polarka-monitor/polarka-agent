@@ -109,11 +109,13 @@ class Facilitator:
     took is kept in `used` (a file, one JSON line a change), so that one payment cannot buy twice, not even after a
     start again."""
 
-    def __init__(self, node, chain, used, confirmations=1, instant_below=0, redeliver=600, clock=time.time):
+    def __init__(self, node, chain, used, confirmations=1, instant_below=0, redeliver=600, clock=time.time, catalog=None):
         if not 0 <= confirmations <= 100 or instant_below < 0 or redeliver < 0:
             raise ValueError("confirmations 0 to 100, instant_below and redeliver 0 or more")
         self.node, self.chain, self.used_path = node, chain, used
         self.confirmations, self.instant_below, self.redeliver, self.clock = confirmations, instant_below, redeliver, clock
+        self.catalog = catalog      # a bazaar.Catalog: what is settled and asks to be found goes into it
+        self.told = threading.local()   # what the last settle of this thread says about the extensions
         self.lock = threading.Lock()
         self.network = network_of(node)
         self.known = {}             # txid -> the last word about it
@@ -139,7 +141,7 @@ class Facilitator:
     def supported(self):
         return {"kinds": [{"x402Version": VERSION, "scheme": "exact", "network": self.network,
                            "extra": {"confirmations": self.confirmations, "instantBelow": str(self.instant_below)}}],
-                "extensions": [], "signers": {}}
+                "extensions": ["bazaar"] if self.catalog is not None else [], "signers": {}}
 
     def _keep(self, rec):
         with open(self.used_path, "a+b") as f:
@@ -258,7 +260,18 @@ class Facilitator:
 
     def settle(self, payment, wanted):
         """Takes the payment. Gives success once it is deep enough; until then "awaiting_confirmation" with how deep
-        it is. The same payment with the same claim may be shown again as often as needed."""
+        it is. The same payment with the same claim may be shown again as often as needed. A settled payment that
+        carries the bazaar extension puts its resource into the catalog; what came of that is in self.told.bazaar."""
+        self.told.bazaar = None
+        done = self._settle(payment, wanted)
+        if done.get("success") and not done.get("redelivered") and self.catalog is not None:
+            try:
+                self.told.bazaar = self.catalog.add(payment, wanted)
+            except Exception:
+                self.told.bazaar = {"status": "rejected", "rejectedReason": "the catalog could not be written"}
+        return done
+
+    def _settle(self, payment, wanted):
         with self.lock:
             txid, raw, claim, decoded, why = self._read(payment)
             if why is not None:
@@ -390,19 +403,29 @@ def facilitator_server(facilitator, listen=("127.0.0.1", 0), most=64):
         def log_message(self, *a):
             pass
 
-        def send(self, status, obj):
+        def send(self, status, obj, more=None):
             data = json.dumps(obj).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
+            for k, v in (more or {}).items():
+                self.send_header(k, v)
             self.end_headers()
             self.wfile.write(data)
 
         def do_GET(self):
-            if self.path == "/supported":
+            parts = urllib.parse.urlsplit(self.path)
+            if parts.path == "/supported":
                 return self.send(200, facilitator.supported())
-            self.send(404, {"error": "there is /supported, /verify and /settle here"})
+            catalog = getattr(facilitator, "catalog", None)
+            if catalog is not None and parts.path in ("/discovery/resources", "/discovery/search"):
+                params = {k: v[0] for k, v in urllib.parse.parse_qs(parts.query).items() if v}
+                if parts.path == "/discovery/search" and not params.get("query"):
+                    return self.send(400, {"error": "query is required"})
+                return self.send(200, catalog.resources(params) if parts.path == "/discovery/resources" else catalog.search(params))
+            self.send(404, {"error": "there is /supported, /verify and /settle here"
+                                     + (", and /discovery/resources and /discovery/search" if catalog is not None else "")})
 
         def do_POST(self):
             settle = self.path == "/settle"
@@ -444,12 +467,16 @@ def facilitator_server(facilitator, listen=("127.0.0.1", 0), most=64):
                 answer = ({"success": False, "errorReason": why, "transaction": "", "network": facilitator.network, "payer": None}
                           if settle else {"isValid": False, "invalidReason": why, "payer": None})
                 return self.send(200, answer)
+            more = {}
             try:
                 answer = facilitator.settle(payment, wanted) if settle else facilitator.verify(payment, wanted)
+                told = getattr(getattr(facilitator, "told", None), "bazaar", None) if settle else None
+                if told:
+                    more["EXTENSION-RESPONSES"] = b64json({"bazaar": told})
             except Exception:
                 answer = ({"success": False, "errorReason": "unexpected_settle_error", "transaction": "", "network": facilitator.network,
                            "payer": None} if settle else {"isValid": False, "invalidReason": "unexpected_verify_error", "payer": None})
-            self.send(200, answer)
+            self.send(200, answer, more)
 
     return Bounded(listen, Handler, most)
 
@@ -626,6 +653,9 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
         claim = os.urandom(16).hex()
         payment = {"x402Version": VERSION, "resource": needed.get("resource"), "accepted": offer,
                    "payload": {"transaction": made["raw"], "claim": claim}}
+        ext = needed.get("extensions")
+        if isinstance(ext, dict) and len(json.dumps(ext)) <= 16384:
+            payment["extensions"] = ext                 # echoed, as x402 asks of a buyer (the bazaar catalogs from it)
         held = {"header": b64json(payment), "txid": made["id"], "amount": amount, "claim": claim, "made": int(clock())}
         with BOOK:                                  # kept before the seller sees it: one payment for one resource
             book = _book(wallet)
