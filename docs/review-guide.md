@@ -11,7 +11,7 @@ plus the services that run beside it on one public server:
 | Part | File | Runs where | Holds coins |
 |---|---|---|---|
 | Wallet, CLI, MCP tools | `wallet.py`, `cli.py`, `mcp.py`, `keys.py`, `tx.py`, `server.py` | the agent's machine | yes, the agent's own, within `limits.json` |
-| x402 payments in NORTH | `x402.py` | buyer: agent; seller/facilitator: server | buyer pays; facilitator holds none |
+| x402 payments in NORTH | `x402.py`, `bazaar.py` | buyer: agent; seller/facilitator: server | buyer pays; facilitator holds none |
 | Postage gate | `postage.py` | server, public behind Caddy | its wallet only receives |
 | Stamps service | `stamps.py` | server, loopback | a small fee wallet |
 | Pool (pay per share) | `pool.py`, `payout.py`, `miner.py`, `rx.py` | server; miners anywhere | yes: the pool's reserve |
@@ -40,17 +40,21 @@ Three reviews by AI models that did not write the code (not by people):
 - review 5 (Claude Opus): 2 High, 4 Medium, 7 Low; High and Medium fixed in 1ea787c (M4 in part);
 - review 6 (Claude Fable): 1 High, 4 Medium, 9 Low; High and Medium fixed in 6ddc827;
 - review 7 (Claude Sonnet): 0 High, 1 Medium, 8 Low; the Medium (the resource a payment buys was only the
-  buyer's word) and five Low fixed in the commit after 6ddc827. Open: L3 (a huge proof is slow to check), L6,
-  L7 (stamps.json rewritten whole on each new stamp), L8 in part (the gate has no read timeout).
+  buyer's word) and five Low fixed in the commit after 6ddc827, L7 (stamps.json rewritten whole on each new
+  stamp) and L8 (the gate had no read timeout) in e9512fc. Open: L3 (a huge proof is slow to check), L6.
+
+Not yet read by anybody else: the fixes of L7 and L8, the wallet that the MCP server makes when it finds none,
+the bazaar extension (`bazaar.py` and its parts in `x402.py` and `postage.py`) and
+`examples/agent_that_pays_for_itself.py`.
 
 Their reports can be had on request. Low findings that are still open are listed in them. Earlier parts of the
 project (wallet, pool) went through four further AI reviews. No person outside has read the code.
 
 ## How to run it yourself
 
-    git clone https://polarka.org/git/polarka-agent && cd polarka-agent && git checkout pool   # or the copy you were given
+    git clone https://github.com/Polarka-monitor/polarka-agent && cd polarka-agent   # or the copy you were given
     # a TrueNorth Core build (truenorthd, truenorth-cli) in a folder; tests start their own regtest node
-    TN_BIN=/path/to/bin python3 -m unittest discover -s tests -t .      # about 5 minutes, 204 tests
+    TN_BIN=/path/to/bin python3 -m unittest discover -s tests -t .      # about 5 minutes, 218 tests
 
 Without `TN_BIN` the tests that need a node are skipped. To check a stamp from the main chain:
 
@@ -60,7 +64,10 @@ Without `TN_BIN` the tests that need a node are skipped. To check a stamp from t
 
 The server is public. Its node, the facilitator, the stamps service and the wallet server listen on loopback;
 Caddy is in front of the gate, the faucet, the pool, polarka.org and the wallet server (node.polarka.org, for the
-phone wallet). Buyers are programs with a spending limit
-set by their owner in a file the program cannot change. NORTH has no market price today; the money at risk is
-the pool's reserve (5000 NORTH), the faucet's and the stamps' small wallets, and every buyer's limit. The chain
-is a Bitcoin Core 30 fork: waiting transactions are replaced by fee.
+phone wallet), and passes to the facilitator only its read-only routes (`GET /x402/supported` and
+`/x402/discovery/*` at gate.polarka.org), never `/verify` or `/settle`. Buyers are programs with a spending
+limit set by their owner in a file the program cannot change. Miners are anybody: the pool is open and pays
+any address since 21 November 2026. NORTH has no market price today; the money at risk is the pool's reserve
+(5000 NORTH, at most 10,000 paid out a day), the faucet's and the stamps' small wallets, and every buyer's
+limit. The chain is a Bitcoin Core 30 fork: waiting transactions are replaced by fee. How the parts work
+together, and who sees what: `docs/how-it-works.md`.

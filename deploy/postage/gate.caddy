@@ -1,0 +1,23 @@
+# gate.polarka.org: the postage gate, and the read-only part of the x402 facilitator beside it.
+# Only GET of /x402/supported and /x402/discovery/{resources,search} reaches the facilitator, without the
+# /x402 in front; its /verify and /settle (POST) stay on loopback. Everything else goes to the gate.
+# Check with `caddy validate --config /etc/caddy/Caddyfile` before reloading.
+gate.polarka.org {
+	request_body {
+		max_size 8KB
+	}
+	@facilitator {
+		method GET
+		path /x402/supported /x402/discovery/resources /x402/discovery/search
+	}
+	handle @facilitator {
+		uri strip_prefix /x402
+		reverse_proxy 127.0.0.1:9570
+	}
+	handle {
+		reverse_proxy 127.0.0.1:8670
+	}
+	log {
+		output discard
+	}
+}

@@ -1,5 +1,6 @@
 # The x402 facilitator: checks payments in NORTH for sellers and hands them to the node beside it. It keeps
-# no coins and signs nothing. Loopback only; a web server with a certificate stands before it.
+# no coins and signs nothing. Loopback only; a web server with a certificate stands before it and passes on
+# only GET /supported and /discovery/* (see deploy/postage/gate.caddy), never /verify or /settle.
 [Unit]
 Description=Polarka x402 facilitator (polarka-agent x402-facilitator)
 After=network-online.target truenorthd.service
@@ -8,7 +9,7 @@ Wants=network-online.target
 [Service]
 User=x402
 Group=x402
-ExecStart=/opt/polarka-x402/venv/bin/polarka-agent --dir /var/lib/polarka-x402 x402-facilitator --chain main --rpc-url http://127.0.0.1:9554 --rpc-cookie /etc/polarka-rpc/x402 --listen 127.0.0.1:9570 --confirmations 1
+ExecStart=/opt/polarka-x402/venv/bin/polarka-agent --dir /var/lib/polarka-x402 x402-facilitator --chain main --rpc-url http://127.0.0.1:9554 --rpc-cookie /etc/polarka-rpc/x402 --listen 127.0.0.1:9570 --confirmations 1 --bazaar-origin https://gate.polarka.org
 Restart=on-failure
 RestartSec=10
 RestartPreventExitStatus=2

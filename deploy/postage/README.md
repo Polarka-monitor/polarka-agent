@@ -26,4 +26,14 @@ Trying it from another machine, with a wallet that has a coin and limits:
     polarka-agent --dir WALLET postage https://gate.example.org --most 0.05
     curl -H "X-Postage: TOKEN" https://gate.example.org/v1/unit   # once the payment is in a block
 
+Ours also takes x402 (`--x402-facilitator`, see `deploy/x402`) and passes `/v1/stamp` to the stamps service
+(`deploy/stamps`), and since 0.2.1 it says what it sells in the bazaar extension of x402: `--public-url
+https://gate.polarka.org --offers /etc/polarka-gate/offers.json`, with `offers.json` from this folder. The
+facilitator, started with `--bazaar-origin https://gate.polarka.org`, lists what was paid for here, and
+`gate.caddy` lets only its read-only routes out:
+
+    curl https://gate.polarka.org/x402/supported
+    curl https://gate.polarka.org/x402/discovery/resources
+    curl 'https://gate.polarka.org/x402/discovery/search?query=stamp'
+
 Whoever runs a service for payment has the duties of one who does. This one is an experiment and says so.

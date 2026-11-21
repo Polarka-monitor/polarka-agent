@@ -6,13 +6,18 @@ A wallet for TrueNorth (NORTH) that a program can use: a command line, a Python 
 agents that speak the Model Context Protocol (MCP). The keys stay on the machine it runs on. What its
 addresses hold it asks a wallet server with the Northbound API (github.com/nova9/northbound).
 
-**State: 0.2.1, an early version.** It was written with AI models under its author's direction, and its
-author read it. Independent AI reviewers that had not seen it being written read each part and found faults;
-the serious ones are mended, with tests (`REVIEW.md`, `docs/review-guide.md`). No human security expert has
-read it yet; a review by one is asked for. On the real network it pays since 17 November 2026, and since
-20 November it runs a pool, a gate of postage, an x402 facilitator and a stamps service at polarka.org. Do not
-put into it what you cannot lose. It is an independent community project, not a product of the TrueNorth
-developers or of the Northbound project.
+**State: 0.2.1, beta.** This package and the services at polarka.org run as a beta until a security expert who
+is a person has reviewed them: any part may change, stop or be reset without notice, and nothing is promised.
+`docs/how-it-works.md` (also at https://polarka.org/how/) says what each part does, who holds what and who sees
+what. Faults: an issue at github.com/Polarka-monitor/polarka-agent, or @Polarka_monitor on X; if one puts coins
+at risk, say only that you found something.
+
+It was written with AI models under its author's direction, and its author read it. Independent AI reviewers
+that had not seen it being written read each part and found faults; the serious ones are mended, with tests
+(`REVIEW.md`, `docs/review-guide.md`). No human security expert has read it yet; a review by one is asked for.
+On the real network it pays since 17 November 2026, and since 20 November it runs a pool, a gate of postage,
+an x402 facilitator and a stamps service at polarka.org. Do not put into it what you cannot lose. It is an
+independent community project, not a product of the TrueNorth developers or of the Northbound project.
 
 ## What it is for
 
@@ -128,7 +133,7 @@ that a claim the wallet refused could be sent again without end. After the fixes
 reviewer looked at them and found two more things that stood in the way: questions that cost nothing raised
 the work for everybody, and one customer with many IPv6 addresses counted as many places. Both are mended
 here. What was found both times and what was done about it is in `docs/faucet-review-0.1.2.md`. The last
-fixes have not been read by anybody else, and the faucet has never run in public.
+fixes have not been read by anybody else. Ours runs in public at faucet.polarka.org since 19 November 2026.
 
 ## Something to pay for: postage
 
@@ -152,8 +157,8 @@ market price; NORTH has none.
 
 Postage is counted in calls. It is not a balance, it is not given back, and the gate never pays from its
 wallet, so the gate holds nobody's coins. Whoever runs a service for payment has the duties of one who does
-(saying who they are, among others); the gate is a tool and takes none of them away. It is new: nobody
-independent has read it, and it has never run in public.
+(saying who they are, among others); the gate is a tool and takes none of them away. Independent AI reviewers
+have read it (`docs/review-guide.md`), no person yet. Ours runs at gate.polarka.org since 20 November 2026.
 
 The asker's side is `postage URL --most 0.05` (for an agent the tool `north_postage`): it asks the gate for a
 quote, pays it from the wallet and shows the token. The owner's limits hold as for any payment, and nothing
@@ -233,7 +238,8 @@ proof for a court.
 ## Mining for a pool
 
 This package holds a pool that pays for each share, and a miner for it. pool.polarka.org runs it on the
-main chain since 20 November 2026, at first with its owner's miners only.
+main chain since 20 November 2026, with its owner's miners only at first and open to everybody since
+21 November.
 
     python3 -m polarka_agent build-rx --randomx /path/to/truenorth/src/randomx
     python3 -m polarka_agent --dir POOL-WALLET pool-serve --chain regtest --rpc-url http://127.0.0.1:PORT \
