@@ -257,6 +257,10 @@ class OverHttp(unittest.TestCase):
         self.assertEqual(self.get("/v1/account?address=" + ALICE)[1]["shares"], 1)
         self.assertEqual(self.get("/v1/tip")[1]["height"], 3000)
         self.assertEqual(self.get("/v1/blocks")[1], {"blocks": []})
+        status, stats = self.get("/v1/stats")
+        self.assertEqual((status, stats["coin"], stats["pool"]["miners"], stats["pool"]["fee_percent"], stats["chain"]["height"]),
+                         (200, "NORTH", 1, 5, 3000))
+        self.assertEqual(self.get("/v1/pool")[1]["speed"]["windows"]["600"]["shares"], 1)
         self.assertEqual(self.get("/v1/work?address=x")[0], 400)
         self.assertEqual(self.get("/v1/work")[0], 400)
         self.assertEqual(self.get("/nothing")[0], 404)
@@ -270,6 +274,66 @@ class OverHttp(unittest.TestCase):
         self.assertEqual(caught.exception.kind, "ADDRESS")
         work = miner._work(self.url, ALICE)
         self.assertEqual((len(work["header"]), len(work["key"]), work["height"]), (76, 32, 3000))
+
+
+class Speed(unittest.TestCase):
+    """The speed shown is the shares taken in a window times what a share stands for, over the window: an estimate."""
+
+    def setUp(self):
+        self.folder = tempfile.mkdtemp(prefix="polarka-pool-test-")
+        self.node, self.now = FakeNode(), [100000.0]
+        self.pool = self.make()
+
+    def tearDown(self):
+        shutil.rmtree(self.folder, ignore_errors=True)
+
+    def make(self):
+        return pool.Pool(self.node, "regtest", PAY, self.folder, ratio=16, hasher=FakeHash(), clock=lambda: self.now[0])
+
+    def take(self, address, n):
+        work, start = self.pool.work(address), 0
+        for _ in range(n):
+            nonce = search(work, want_block=False, start=start)
+            self.pool.share(work["job"], nonce)
+            start = nonce + 1
+
+    def test_nothing_taken_shows_nothing(self):
+        stats = self.pool.stats()
+        self.assertEqual((stats["coin"], stats["pool"]["hashrate"], stats["pool"]["miners"], stats["pool"]["blocks_found"]), ("NORTH", 0, 0, 0))
+        self.assertIsNone(stats["chain"]["hashrate"])       # no cap, no count of the chain's blocks
+
+    def test_shares_make_the_speed(self):
+        self.take(ALICE, 3)
+        self.take(BOB, 1)
+        per = (1 << 256) / ((16 << 250) + 1)                # about 4 hashes a share at a share target of 2^254
+        speed = self.pool.speed()
+        self.assertEqual(speed["hashes_a_share"], round(per))
+        self.assertEqual((speed["windows"]["600"]["shares"], speed["windows"]["600"]["miners"]), (4, 2))
+        self.assertEqual(speed["windows"]["600"]["hashrate"], round(4 * per / 600))
+        self.assertEqual(speed["windows"]["3600"]["hashrate"], round(4 * per / 3600))
+        self.now[0] += 700                                  # out of the ten minutes, still in the hour
+        speed = self.pool.speed()
+        self.assertEqual((speed["windows"]["600"]["shares"], speed["windows"]["3600"]["shares"]), (0, 4))
+        self.now[0] += 86400                                # out of the day: forgotten
+        self.assertEqual(self.pool.speed()["windows"]["86400"]["shares"], 0)
+        self.assertEqual(len(self.pool.recent), 0)
+
+    def test_after_a_restart_the_ledger_and_the_template_tell_the_speed(self):
+        self.take(ALICE, 2)
+        self.now[0] += 60
+        again = self.make()                                 # no job handed out yet: what a share stands for comes from the template
+        stats = again.stats()
+        per = (1 << 256) / ((16 << 250) + 1)
+        self.assertEqual((stats["pool"]["hashrate"], stats["pool"]["miners"], stats["pool"]["miners_24h"]), (round(2 * per / 3600), 1, 1))
+        self.assertEqual((again.speed()["hashes_a_share"], again.speed()["windows"]["3600"]["shares"]), (round(per), 2))
+
+    def test_the_chain_speed_from_the_cap(self):
+        cap = pool.Cap(FakeNode(), own_scripts=())
+        cap.last = {86400: (3, 720), 3600: (0, 30)}
+        p = pool.Pool(self.node, "regtest", PAY, tempfile.mkdtemp(dir=self.folder), ratio=16, hasher=FakeHash(), clock=lambda: self.now[0], cap=cap)
+        p.work(ALICE)
+        per = (1 << 256) / ((16 << 250) + 1)
+        self.assertEqual(p.stats()["chain"], {"height": 3000, "blocks_24h": 720, "hashrate": round(720 * round(per) * 16 / 86400)})
 
 
 class FakeChain:

@@ -5,7 +5,8 @@ the coinbase that nobody else gets), checks the proof of work of what comes back
 for it and hands a share that is also a block to the node. What it owes is paid out in rounds (payout.py).
 Cap keeps the pool under a part of the network, Guard bounds what one place may ask and send.
 
-It runs on main since 20 November 2026, first with its owner's miners only; no person outside has read it yet. Not here: a
+It runs on main since 20 November 2026, open to everybody since 21 November; a programmer read it on 22 November 2026,
+a security expert has not yet. The speed it shows (`speed`, GET /v1/stats) is estimated from the shares it took. Not here: a
 share target that follows the miner's speed, anything against a miner who keeps back the blocks he finds,
 and taking back what was credited for a block that later left the chain.
 
@@ -46,6 +47,7 @@ MOST = (1 << 256) - 1
 NODE_SILENCE = 30           # seconds without a template after which shares are no longer taken
 UNLUCKY = 0.001             # an address whose shares would have found more blocks with this certainty gets no more work
 UNLUCKY_POOL = 0.000001     # and the same for all the pool's shares together: then nobody gets work
+SPEED_WINDOWS = (600, 3600, 86400)  # seconds over which the pool's speed is shown, from the shares it took
 
 
 class PoolError(Exception):
@@ -390,6 +392,8 @@ class Pool:
         self.template, self.template_at, self.key, self.key_height = None, 0, None, None
         self.jobs, self.job_of, self.seen = {}, {}, set()
         self.accounts, self.blocks, self.taken = {}, [], set()
+        self.recent = collections.deque()   # (time, address) of the shares of the last day, for the speed shown
+        self.share_target = None            # the share target of the newest job: what one share stands for
         if cap is not None and cap.is_ours is None:
             cap.is_ours = self.taken.__contains__
         self.boot, self.counter = int.from_bytes(os.urandom(4), "little"), 0
@@ -435,6 +439,9 @@ class Pool:
         self.expected_total += 1.0 / max(int(entry.get("odds", self.ratio)), 1)
         self.found_total += 1 if entry.get("accepted") else 0
         self.earned_total += int(entry["value"])
+        self.recent.append((int(entry["t"]), entry["address"]))
+        while self.recent[0][0] < self.recent[-1][0] - SPEED_WINDOWS[-1]:
+            self.recent.popleft()
         if entry.get("block"):
             self.blocks.append({"height": entry["height"], "hash": entry["block"], "accepted": entry.get("accepted"),
                                 "time": entry["t"]})
@@ -513,6 +520,7 @@ class Pool:
                 extranonce = (self.boot << 32) | (self.counter & 0xFFFFFFFF)
                 header, _, network = assemble(template, self.pay_script, extranonce)
                 share = min(network * self.ratio, MOST)
+                self.share_target = share
                 fees = sum(int(t.get("fee", 0)) for t in template.get("transactions", []))
                 value = (template["coinbasevalue"] - fees) * network // share * (100 - self.fee) // 100
                 job_id = os.urandom(8).hex()
@@ -632,12 +640,60 @@ class Pool:
             template = self._fresh_template()
             return {"height": template["height"], "previous": template["previousblockhash"]}
 
+    def speed(self):
+        """How fast the pool's miners were, estimated from the shares it took: a share stands for
+        2^256 / (share target + 1) hashes on average, at the share target of the newest job. An estimate: over ten
+        minutes a few shares more or less move it a lot; an hour or a day says more."""
+        now = int(self.clock())
+        with self.lock:
+            while self.recent and self.recent[0][0] < now - SPEED_WINDOWS[-1]:
+                self.recent.popleft()
+            recent = list(self.recent)
+            target = self.share_target
+            if target is None and self.template is not None and self.template.get("bits"):
+                target = min(rxmod.target_of(int(self.template["bits"], 16)) * self.ratio, MOST)
+        per_share = (1 << 256) / (target + 1) if target else None
+        windows = {}
+        for window in SPEED_WINDOWS:
+            addresses = [a for t, a in recent if t > now - window]
+            windows[str(window)] = {"shares": len(addresses), "miners": len(set(addresses)),
+                                    "hashrate": None if per_share is None else round(len(addresses) * per_share / window)}
+        return {"hashes_a_share": None if per_share is None else round(per_share), "windows": windows,
+                "how": "shares taken in the window times the hashes a share stands for, divided by the window: an estimate"}
+
+    def stats(self):
+        """What listings of pools ask for, in one small answer (GET /v1/stats)."""
+        height = None
+        try:
+            height = self.tip()["height"]       # first: after a restart the template tells what a share stands for
+        except PoolError:
+            pass
+        speed = self.speed()
+        hour, day = speed["windows"]["3600"], speed["windows"]["86400"]
+        blocks = (self.cap.last.get(86400) or (None, None))[1] if self.cap is not None else None
+        chain_speed = None
+        if blocks and speed["hashes_a_share"] and self.share_target is not None and self.share_target < MOST:
+            chain_speed = round(blocks * speed["hashes_a_share"] * self.ratio / 86400)
+        with self.lock:
+            found = [b for b in self.blocks if b.get("accepted")]
+        last = found[-1] if found else None
+        return {"coin": "NORTH", "network": self.chain, "algorithm": "RandomX", "t": int(self.clock()),
+                "pool": {"hashrate": hour["hashrate"], "miners": hour["miners"], "hashrate_10m": speed["windows"]["600"]["hashrate"],
+                         "hashrate_24h": day["hashrate"], "miners_24h": day["miners"], "fee_percent": self.fee, "payout_scheme": "PPS",
+                         "min_payout": None if self.payouts is None else north(self.payouts.minimum), "blocks_found": len(found),
+                         "last_block": None if last is None else {"height": last["height"], "hash": last["hash"], "time": last["time"]}},
+                "chain": {"height": height, "blocks_24h": blocks, "hashrate": chain_speed},
+                "how": "hashrates are hashes a second over the last hour unless named otherwise, estimated from the shares the pool "
+                       "took; miners are the addresses that sent a share in the window; the chain's hashrate is its blocks of the "
+                       "last day times the hashes a block stands for now"}
+
     def info(self):
         paused, height = False, None
         try:
             height = self.tip()["height"]
         except PoolError:
             paused = True
+        speed = self.speed()
         with self.lock:
             shares = sum(a["shares"] for a in self.accounts.values())
             earned = sum(a["earned"] for a in self.accounts.values())
@@ -648,7 +704,7 @@ class Pool:
                 "pays": "for each share, the block reward without fees divided by share_ratio, less the fee",
                 "share_ratio": self.ratio, "fee_percent": self.fee, "coinbase_tag": TAG.decode(), "pays_blocks_to": self.pay_to,
                 "height": height, "paused": paused, "shares": shares, "earned": north(earned), "paid": north(paid),
-                "on_the_way": north(flying), "owed": north(earned - paid - flying), "blocks": len(self.blocks),
+                "on_the_way": north(flying), "owed": north(earned - paid - flying), "blocks": len(self.blocks), "speed": speed,
                 "how": ["GET /v1/work?address=YOURS", "look for a nonce whose hash is at or below share_target",
                         'POST /v1/share {"job", "nonce"}', "GET /v1/account?address=YOURS"]}
 
@@ -709,7 +765,9 @@ def handler_for(pool, trust_proxy=False):
                 return self.answer(lambda: pool.account(address))
             if url.path == "/v1/blocks":
                 return self.answer(lambda: {"blocks": pool.blocks[-50:]})
-            self.send(404, {"error": "INPUT", "message": "there is /v1/pool, /v1/work, /v1/tip, /v1/share, /v1/account and /v1/blocks"})
+            if url.path == "/v1/stats":
+                return self.answer(pool.stats)
+            self.send(404, {"error": "INPUT", "message": "there is /v1/pool, /v1/stats, /v1/work, /v1/tip, /v1/share, /v1/account and /v1/blocks"})
 
         def do_POST(self):
             if urlparse(self.path).path != "/v1/share":
