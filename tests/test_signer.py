@@ -101,6 +101,10 @@ def stand_in(answer):
     return path, listener
 
 
+AS_ROOT = os.geteuid() == 0                 # the service does not run as root: these run as a user (ApartOnLinux as root)
+
+
+@unittest.skipIf(AS_ROOT, "the service does not run as root; run these as a user")
 class ServiceInProcess(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -360,7 +364,8 @@ class ServiceInProcess(unittest.TestCase):
         self.assertEqual(signer._hops(os.path.join(venv, "bin", "python3"))[1], sys.executable)
 
 
-@unittest.skipUnless(bench.find_bin(), "truenorthd and truenorth-cli are needed (TN_BIN names their folder)")
+@unittest.skipUnless(bench.find_bin() and not AS_ROOT, "truenorthd and truenorth-cli are needed (TN_BIN names their folder), "
+                                                         "and a user other than root")
 class ServiceOnRegtest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -427,7 +432,7 @@ class ServiceOnRegtest(unittest.TestCase):
         self.assertNotIn("wallet.json", os.listdir(self.agent))
 
 
-USERS = os.environ.get("POLARKA_TEST_USERS") == "1" and sys.platform.startswith("linux") and os.geteuid() == 0
+USERS = os.environ.get("POLARKA_TEST_USERS") == "1" and sys.platform.startswith("linux") and AS_ROOT
 
 
 @unittest.skipUnless(USERS, "as root on Linux with POLARKA_TEST_USERS=1 (it makes the users pst-signer, pst-agent, pst-other)")
