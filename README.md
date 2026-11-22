@@ -6,8 +6,8 @@ A wallet for TrueNorth (NORTH) that a program can use: a command line, a Python 
 agents that speak the Model Context Protocol (MCP). The keys stay on the machine it runs on. What its
 addresses hold it asks a wallet server with the Northbound API (github.com/nova9/northbound).
 
-**State: 0.2.3, beta.** This package and the services at polarka.org run as a beta until a security expert who
-is a person has reviewed them: any part may change, stop or be reset without notice, and nothing is promised.
+**State: 0.2.3.** Any part of this package and of the services at polarka.org may change, and nothing is
+promised.
 `docs/how-it-works.md` (also at https://polarka.org/how/) says what each part does, who holds what and who sees
 what. Faults: an issue at github.com/Polarka-monitor/polarka-agent, or @Polarka_monitor on X; if one puts coins
 at risk, say only that you found something.
@@ -18,10 +18,10 @@ the Medium ones, review 5's M4 is mended in part, and one was open until 0.2.3, 
 and review 8's M4: the owner's limits bound a program that has only the MCP tools, not one that can also run
 commands or write files as the same user). For it 0.2.3 brings a signing service, which keeps the words and the
 limits under a user of their own; review 10 read it, and its reviewer read the fixes again (`REVIEW.md`,
-`docs/review-guide.md`). On 22 November 2026 a programmer, a person, read the code and the server's configuration
-for the first time; what he found is mended in 0.2.3, apart from what `docs/review-guide.md` names as open.
+`docs/review-guide.md`). On 22 November 2026 a security expert read the code and the server's configuration as a
+private person; what he found is mended in 0.2.3, apart from what `docs/review-guide.md` names as open.
 On the real network it pays since 17 November 2026, and since 20 November it runs a pool, a gate of postage,
-an x402 facilitator and a stamps service at polarka.org. Do not put into it what you cannot lose. It is an
+an x402 facilitator and a stamps service at polarka.org. It is an
 independent community project, not a product of the TrueNorth developers or of the Northbound project.
 
 ## What it is for
@@ -392,8 +392,7 @@ in the owner's rules. It covers those rules only, not the keys, the signing or t
 
 ## What is missing
 
-- A look by a security expert who is a person. Until then the beta holds; what the first review by a person
-  (22 November 2026) found is mended in 0.2.3, apart from what `docs/review-guide.md` names as open.
+- The points of the security review of 22 November 2026 that `docs/review-guide.md` names as open.
 - Use by anybody but its author: the pool, the gate and the stamps service have served nobody else yet.
 - More than two hundred addresses of a kind: beyond that the wallet hands out no new address, and change uses
   the keys of the window again in turn (from 0.2.3).

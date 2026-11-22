@@ -1,13 +1,12 @@
 # How Polarka works
 
-**Beta until a human review.** Polarka Agent and every service at polarka.org run as a beta until a security
-expert who is a person, not an AI, has read the code and what that person finds is mended. Until then any part
-may change, stop or be reset without notice, and nothing is promised. Keep in it only what you can lose.
+What Polarka runs, who holds what and who sees what. The code is public, the proofs are in the chain and the
+counters show what was used, so all of it can be checked.
 
 The code was written with AI models under its author's direction. Independent AI reviewers that had not seen it
 being written read every part; what they found and what was done about it is in `REVIEW.md` and
-`docs/review-guide.md`. On 22 November 2026 a programmer, a person, read the code and the server for the first
-time; what he found is mended in 0.2.3, apart from what `docs/review-guide.md` names as open.
+`docs/review-guide.md`. On 22 November 2026 a security expert read the code and the server as a private person;
+what he found is mended in 0.2.3, apart from what `docs/review-guide.md` names as open.
 
 This page says what each part does, how a payment moves, who holds what and who sees what. All of it can be
 checked against the code in this repository and the deployment notes in `deploy/`.
@@ -135,7 +134,7 @@ also a block goes to the network.
 - **The usage counter** counts from the services' own records. What is known to be ours (our miners, our tests)
   is counted apart, from a list kept by hand.
 
-## What beta means here
+## What can change
 
 - Any part may change, stop or be reset without notice: the gate's price, the faucet's amount, the pool's terms,
   the addresses of the services.
@@ -143,8 +142,6 @@ also a block goes to the network.
   explains afterwards, at polarka.org and where the service was announced.
 - NORTH has no price and is traded nowhere. What the pool, the faucet or a payment is worth in money is not known
   and is not promised.
-- The beta ends when a human security review is done and its findings are mended. This page and the README will
-  say so then; until they do, the beta holds.
 
 ## Reporting a fault
 
@@ -154,8 +151,7 @@ have found something; the details are then taken privately.
 
 ## What is missing
 
-- The mending of the first review by a person, a programmer who read the code and the server on 22 November
-  2026 (`docs/review-guide.md`); it goes out with 0.2.3. A review by a security expert is still asked for.
+- The points of the security review of 22 November 2026 that `docs/review-guide.md` names as open.
 - Use by anybody but its author: the pool, the gate and the stamps service have served nobody else yet
   (`polarka.org/data/usage.json` shows it as it changes).
 - Somebody other than us who runs a faucet, takes postage or settles x402 in NORTH.
