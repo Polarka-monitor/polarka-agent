@@ -5,6 +5,9 @@ stamps service, the pool and both wallet servers (`deploy/walletd`) need a few c
 their own that the node allows only those calls, and none of them is in the group that can read the cookie
 (review 8, L5; the pool and its wallet server since 21 November 2026). The facilitator for sellers from outside
 (`x402/polarka-x402-public.service`, from 0.2.3) makes the same calls as the gate's own and uses its RPC user.
+From 0.2.3 the facilitators also read blocks (getblock, getblockcount): a payment whose coin the seller spent
+before the buyer came back is found in its block (human review, 22 November); without them it is called lost, as
+before.
 
 In the node's `truenorth.conf` (make the five `rpcauth` lines with `share/rpcauth/rpcauth.py` from the
 TrueNorth sources, or with the same HMAC-SHA256 in a few lines of Python):
@@ -14,7 +17,7 @@ TrueNorth sources, or with the same HMAC-SHA256 in a few lines of Python):
     rpcauth=walletpub:<salt>$<hmac>
     rpcauth=pool:<salt>$<hmac>
     rpcauth=walletd:<salt>$<hmac>
-    rpcwhitelist=x402:decoderawtransaction,getblockhash,getmempoolentry,gettxout,sendrawtransaction,testmempoolaccept
+    rpcwhitelist=x402:decoderawtransaction,getblock,getblockcount,getblockhash,getmempoolentry,gettxout,sendrawtransaction,testmempoolaccept
     rpcwhitelist=stamps:getblock,getblockcount,getblockhash,getblockheader,getmempoolentry,getrawtransaction,gettxoutproof
     rpcwhitelist=walletpub:estimatesmartfee,getblock,getblockchaininfo,getblockheader,getconnectioncount,getmempoolinfo,getnetworkinfo,getrawmempool,getrawtransaction,sendrawtransaction,testmempoolaccept,validateaddress
     rpcwhitelist=pool:getbestblockhash,getblock,getblockcount,getblockhash,getblocktemplate,gettxout,submitblock
