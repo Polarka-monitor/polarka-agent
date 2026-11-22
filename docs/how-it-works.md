@@ -104,9 +104,12 @@ also a block goes to the network.
   the SHA-256s it was given, never the files.
 - **The faucet** keeps the addresses it paid, and no internet addresses on disk.
 - **The pool** keeps every share with the address it is for.
-- **The web server** in front of every name at polarka.org keeps no access log. The services write short lines
-  about what they did (a call passed, a payout, a batch of stamps) to the server's system log, without internet
-  addresses.
+- **The web server** in front of every name at polarka.org keeps no access log. Until 21 November 2026 its own
+  lines about failed requests, and about requests for names it does not serve, held the visitor's internet address
+  and headers (review 9); since then they hold neither, and on 22 November the system log was emptied. The
+  services write short lines about what they did (a call passed, a payout, a batch of stamps) to the server's
+  system log, without internet addresses. With an address the server keeps only what concerns SSH: attempts to
+  log in and the bans fail2ban makes of them, for two weeks at most, and the operator's own logins.
 - **The usage counter** counts from the services' own records. What is known to be ours (our miners, our tests)
   is counted apart, from a list kept by hand.
 

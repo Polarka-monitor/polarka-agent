@@ -35,7 +35,7 @@ Specification draft for x402: `docs/x402-scheme-exact-bip122.md` (also open as x
 
 ## What has been checked, and by whom
 
-Four reviews by AI models that did not write the code (not by people):
+Five reviews by AI models that did not write the code (not by people):
 
 - review 5 (Claude Opus): 2 High, 4 Medium, 7 Low; High and Medium fixed in 1ea787c (M4 in part);
 - review 6 (Claude Fable): 1 High, 4 Medium, 9 Low; High and Medium fixed in 6ddc827;
@@ -59,7 +59,23 @@ Four reviews by AI models that did not write the code (not by people):
   watcher passes on only known units, states by pattern and numbers, and reports its own faults), L7 (the example
   agent pays for at most two lots and asks for an hour at most).
 
-Nobody but its author has read the fixes of review 8.
+- review 9 (a fresh AI agent, 21 November 2026, of ea557ab..18cabd8, of the deployment, the vectors, the watcher
+  and the public texts): 0 High, 0 Medium, 3 Low, 8 Info. It tried H1 and M1 again through Caddy 2.11.9: the code
+  before the fix, with Caddy's keep-alive, did settle a smuggled payment; `keepalive off` and the guard each stop
+  it alone. It found the RPC users exactly as narrow as the code, 235 tests passing, the vectors reproducible byte
+  for byte and the sdist on PyPI equal to the tag. Fixed on 21 and 22 November: L1 (the refresh job writes only in
+  a folder of its own, root copies its nine pages into the web root, and no folder there is writable by anybody
+  else), L2 (the web server's own lines hold no internet address, headers or query, none are written for names it
+  does not serve, and the system log was emptied on 22 November and keeps two weeks), L3 (texts; in the registry
+  0.2.0 and 0.2.1 are marked deprecated), I1, I2 (the facts service keeps the guard), I3 (the watcher bounds
+  numbers and output), I4 (the example agent waits no longer than its hour) and part of I7; I6 was checked (root
+  logs in by key only). While I2 was fixed it came out that the faucet still ran 0.1.3, without the guard, so that
+  Caddy's `keepalive off` was its one layer; it runs 0.2.2 since 22 November. Open: I5 (services on the loopback
+  answer every local process), I8 (the public wallet server has no rate limit), the rest of I7. On cloning: the git
+  that ships with macOS fails on plain-HTTP clones over HTTP/2 (a fault of its libcurl), so polarka.org speaks
+  HTTP/1.1 only since 22 November.
+
+Review 9 read the fixes of review 8 and found them sound. Nobody but its author has read the fixes of review 9.
 
 Their reports can be had on request. Low findings that are still open are listed in them. Earlier parts of the
 project (wallet, pool) went through four further AI reviews. No person outside has read the code.

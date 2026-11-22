@@ -13,8 +13,11 @@ what. Faults: an issue at github.com/Polarka-monitor/polarka-agent, or @Polarka_
 at risk, say only that you found something.
 
 It was written with AI models under its author's direction, and its author read it. Independent AI reviewers
-that had not seen it being written read each part and found faults; the serious ones are mended, with tests
-(`REVIEW.md`, `docs/review-guide.md`). No human security expert has read it yet; a review by one is asked for.
+that had not seen it being written read each part and found faults. Every High finding is mended, with tests. Of
+the Medium ones, one is open, found twice (the first review's F4 and review 8's M4: the owner's limits bind a
+program that has only the MCP tools, not one that can also run commands or write files as the same user), and
+review 5's M4 is mended in part (`REVIEW.md`, `docs/review-guide.md`). No human security expert has read it yet;
+a review by one is asked for.
 On the real network it pays since 17 November 2026, and since 20 November it runs a pool, a gate of postage,
 an x402 facilitator and a stamps service at polarka.org. Do not put into it what you cannot lose. It is an
 independent community project, not a product of the TrueNorth developers or of the Northbound project.
