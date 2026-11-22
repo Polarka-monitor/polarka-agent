@@ -381,6 +381,7 @@ class Pool:
         self.ratio, self.fee, self.clock = ratio, fee_percent, clock
         self.ticks = time.monotonic if clock is time.time else clock       # ages, on a clock nobody can set back
         self.best = self.tip_seen = None    # the node's tip, and when the node said so
+        self.tip_tried = None               # when stratum last asked for it, answered or not: at most every TIP_AGE
         self.template_tip = None            # the tip of the last template held, kept while the node is silent
         self.hasher = hasher or RxHasher()
         self.cap, self.guard, self.payouts = cap, guard, payouts
@@ -518,7 +519,10 @@ class Pool:
         that does not answer changes nothing, until it has been silent for NODE_SILENCE: then PoolError PAUSED."""
         asked = self.ticks()
         with self.lock:
-            ask_tip = self.template is None or self.tip_seen is None or asked - self.tip_seen >= TIP_AGE
+            # a node that does not answer is asked again only after TIP_AGE, however many shares come in meanwhile
+            ask_tip = self.tip_seen is None or self.tip_tried is None or asked - self.tip_tried >= TIP_AGE
+            if ask_tip:
+                self.tip_tried = asked
         try:
             if ask_tip:
                 best = self.node.call("getbestblockhash")
@@ -660,7 +664,7 @@ class Pool:
         with self.lock:
             self._count(entry)
             if entry["accepted"]:
-                self.template_at, self.tip_seen = 0, None   # the tip has moved: the next asker gets a new template
+                self.template_at, self.tip_seen, self.tip_tried = 0, None, None    # the tip has moved: the next asker gets a new template
         return {"ok": True, "credited": north(entry["value"]), "block": entry["block"], "accepted": entry["accepted"]}
 
     def account(self, address):

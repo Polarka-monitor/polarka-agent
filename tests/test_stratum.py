@@ -724,6 +724,22 @@ class TheNodeOutsideTheLock(unittest.TestCase):
         self.assertNotIn(job, self.pool.jobs)                   # a new tip: stale at once
         self.assertEqual(self.pool.template["previousblockhash"], "44" * 32)
 
+    def test_a_silent_node_is_asked_once_a_second_however_many_shares_come(self):
+        self.pool.work(ALICE)
+        calls, call = [], self.node.call
+
+        def counting(method, *params):
+            calls.append(method)
+            return call(method, *params)
+        self.node.call, self.node.down = counting, True
+        self.now[0] += pool.TIP_AGE
+        for _ in range(50):
+            self.pool.look(template=False)                      # what fifty shares in a second ask
+        self.assertEqual(calls.count("getbestblockhash"), 1)
+        self.now[0] += pool.TIP_AGE
+        self.pool.look(template=False)
+        self.assertEqual(calls.count("getbestblockhash"), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

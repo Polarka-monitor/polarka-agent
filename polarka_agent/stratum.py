@@ -593,7 +593,7 @@ class Stratum:
         with p.lock:
             p._count(entry)
             if entry["accepted"]:
-                p.template_at, p.tip_seen = 0, None     # the tip has moved: the next look asks the node again
+                p.template_at, p.tip_seen, p.tip_tried = 0, None, None     # the tip has moved: the next look asks the node
         return entry
 
     def _wrong(self, miner, rid, code, why):
@@ -628,9 +628,9 @@ class Stratum:
         with self.refreshing:
             p.look()                        # the node is asked outside the pool's lock (review 11, L2)
             with p.lock:
-                template, key, key_height = p.template, p.key, p.key_height
-            if template is None:
-                return None                 # the node was silent for a moment: the job there is stands
+                template, key, key_height, best = p.template, p.key, p.key_height, p.best
+            if template is None or (best is not None and template["previousblockhash"] != best):
+                return None                 # the node is silent for a moment, or has not yet given work on its new tip
             old = self.job
             if old is not None and template["previousblockhash"] == old.previous and self.ticks() - old.made < self.refresh_every:
                 return None
