@@ -17,7 +17,7 @@ checked against the code in this repository and the deployment notes in `deploy/
 |---|---|---|---|
 | Polarka Agent | your machine | a wallet as a command line, a Python library and an MCP server; pays services that speak x402, asks a faucet, mines for a pool | yours, within the `limits.json` you write |
 | Wallet server | `api.northboundwallet.org` (the Northbound project's, not ours) unless another is named; `node.polarka.org` is ours, a process apart from the one our pool pays through | tells the wallet what its addresses hold and passes its transactions to the network | no |
-| Faucet | `faucet.polarka.org` | 0.25 NORTH to an address once a day, after a few seconds of hashing | its own, at most 100 NORTH a day |
+| Faucet | `faucet.polarka.org` | 1 NORTH to an address once a day, after a few seconds of hashing | its own, at most 100 NORTH a day |
 | Gate | `gate.polarka.org` | stands before paid routes and sells lots of 100 calls, for x402 or for a quote of its own | receives payments; holds no buyer's coins |
 | x402 facilitator | the server, on loopback | checks an x402 payment, hands it to the node, waits for a block | no keys, no coins |
 | x402 facilitator for other sellers | from 0.2.3: the server, on loopback, behind `gate.polarka.org/facilitator` | the same for sellers from outside, as a process apart under a user of the system and an RPC user of its own, with bounds on requests and on payments kept, and no catalog | no keys, no coins |
@@ -34,7 +34,7 @@ checked against the code in this repository and the deployment notes in `deploy/
 2. The owner writes `FOLDER/limits.json` by hand, for example `{"per_payment_north": "0.1", "per_day_north": "1"}`.
    No command and no tool writes or changes that file.
 3. The agent gets a first coin with the tool `north_faucet` and the address `https://faucet.polarka.org`. The
-   faucet asks for a little proof of work and pays 0.25 NORTH to a new address of the wallet.
+   faucet asks for a little proof of work and pays 1 NORTH to a new address of the wallet.
 4. The agent calls a service with `north_fetch` (at the command line `polarka-agent fetch URL --most 0.05`). The
    service answers `402 Payment Required` with what it takes: the price, the network
    `bip122:470c8b8ae824c06575cfae0851282c49` (TrueNorth's main chain), the scheme `exact` and the address to pay.
