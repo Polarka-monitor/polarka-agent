@@ -1,8 +1,14 @@
 # Caddy in front of the faucet: HTTPS, small request bodies that arrive in time, and no access log.
 # An access log would keep the internet addresses of everybody who asks; the faucet itself keeps none on disk.
+# Caddy's own lines at level INFO name no client; at DEBUG they do (TLS handshakes), so stay at INFO.
 # Check the file with `caddy validate --config /etc/caddy/Caddyfile` before reloading.
 {
+	log default {
+		output stderr
+		level INFO
+	}
 	servers {
+		max_header_size 32KB
 		timeouts {
 			read_header 10s
 			read_body 10s
@@ -15,9 +21,19 @@ faucet.example.org {
 	request_body {
 		max_size 8KB
 	}
-	# the whole (small) request is read before the faucet sees it, so a request that never ends holds none of its threads
+	# the whole (small) request is read before the faucet sees it, so a request that never ends holds none of its
+	# threads; keepalive off: one connection per request, so that a body left unread is never read as a next request
 	reverse_proxy 127.0.0.1:8660 {
+		transport http {
+			keepalive off
+		}
 		request_buffers 8KB
+	}
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+		Strict-Transport-Security "max-age=31536000"
+		-Server
 	}
 	log {
 		output discard

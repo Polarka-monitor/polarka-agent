@@ -33,6 +33,8 @@ SystemCallArchitectures=native
 InaccessiblePaths=-/var/lib/polarka-gate -/var/lib/polarka-pool -/var/lib/polarka-faucet -/var/lib/polarka-stamps -/var/lib/polarka-x402 -/etc/polarka-rpc
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 MemoryMax=200M
+# the same hardening as the pool's (human review, 22 November)
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target

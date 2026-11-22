@@ -25,6 +25,18 @@ ReadWritePaths=/var/lib/polarka-faucet
 MemoryMax=300M
 TasksMax=200
 LimitNOFILE=4096
+# the same hardening as the pool's (human review, 22 November)
+CapabilityBoundingSet=
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+UMask=0077
 
 [Install]
 WantedBy=multi-user.target
