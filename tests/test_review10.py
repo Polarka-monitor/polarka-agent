@@ -484,10 +484,12 @@ class SecondLookOfReview10(unittest.TestCase):
         self.assertEqual(p.stdout, "")
         self.assertIn("sudo lets it run commands", p.stderr)
         self.assertEqual(run("User agent_1 may run the following commands on here:", "yes").stdout, "passed\n")
-        said = lambda out: mock.patch.object(signer.subprocess, "run", return_value=mock.Mock(returncode=1, stdout=out))
-        with said("sudo: a password is required\n"):
+        said = lambda code, out: mock.patch.object(signer.subprocess, "run", return_value=mock.Mock(returncode=code, stdout=out))
+        with said(0, "User agent_1 may run the following commands on here:\n    (ALL) NOPASSWD: ALL\n"):
             self.assertTrue(signer._may_sudo())
-        with said("Sorry, user agent_1 may not run sudo on here.\n"):
+        with said(1, "sudo: a password is required\n"):        # rules or none: sudo says no more without the password
+            self.assertFalse(signer._may_sudo())
+        with said(1, "Sorry, user agent_1 may not run sudo on here.\n"):
             self.assertFalse(signer._may_sudo())
         with mock.patch.object(signer.subprocess, "run", side_effect=OSError("no sudo")):
             self.assertFalse(signer._may_sudo())

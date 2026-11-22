@@ -80,7 +80,8 @@ once. `--move-from FOLDER` moves an existing one instead, reading only plain fil
 agent that could read that wallet may know its words, so the whole of the gain is a new wallet and the coins paid
 over to it. `--check` looks, as the agent's user, at the socket, the service, who may open its folder, who may
 change `limits.json`, the program and every place it takes modules from, and whether that user can administer the
-machine. Run it with the service's own Python, as above: a copy that the agent can change could say anything.
+machine (a sudo rule of its own that wants a password is seen only by the script, as root). Run it with the service's
+own Python, as above: a copy that the agent can change could say anything.
 
 It keeps nothing from an agent whose user can administer the machine (sudo with a password or without, admin,
 docker and the like: such an agent can wait for its owner's password), nor on a machine that someone else took over;

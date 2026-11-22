@@ -982,14 +982,15 @@ def _program(venv, ran=None):
 
 
 def _may_sudo():
-    """Whether sudo has rules for this user (review 10, N5). It is asked without a password; only its plain "may not
-    run sudo" counts as no. No sudo on the machine: no."""
+    """Whether sudo lists rules of this user without asking for its password (review 10, N5). sudo wants the password
+    before it says anything else, rules or none, so a rule that wants it is seen only by the setup script, which asks
+    sudo as root. No sudo on the machine: no."""
     try:
         said = subprocess.run(["sudo", "-n", "-l"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                               universal_newlines=True, timeout=10, env={"LC_ALL": "C", "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"})
     except (OSError, subprocess.TimeoutExpired):
         return False
-    return "may not run sudo" not in str(said.stdout)
+    return said.returncode == 0 and "may run the following commands" in str(said.stdout)
 
 
 def check(path=None, folder=None, venv=None, system=None):
@@ -1058,7 +1059,7 @@ def check(path=None, folder=None, venv=None, system=None):
     admin = ["the group %s" % admin[0]] if admin else (["sudo"] if _may_sudo() else [])
     point("admin", not admin, "through %s this user can administer this machine: an agent that runs as it can wait for its "
           "owner's password, and then the service keeps nothing from it" % admin[0] if admin
-          else "this user is in no group that can administer this machine, and sudo lets it run nothing")
+          else "this user is in no group that can administer this machine, and sudo lists no rule of it without a password")
     try:
         sudo = subprocess.run(["sudo", "-n", "true"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                               stderr=subprocess.DEVNULL, timeout=10).returncode == 0
