@@ -102,7 +102,7 @@ def plan(coins, outputs, fee_rate, change_script, must=()):
     that spends the same coin, so that only one of the two can ever be in a block. Then the largest first.
     What is left returns to change_script; a remainder under MIN_OUTPUT is not worth an output and goes to the fee.
     """
-    if not isinstance(fee_rate, int) or not MIN_FEE_RATE <= fee_rate <= MAX_FEE_RATE:
+    if not (isinstance(fee_rate, int) and not isinstance(fee_rate, bool)) or not MIN_FEE_RATE <= fee_rate <= MAX_FEE_RATE:
         raise PlanError("FEE_RATE")
     if not outputs or len(outputs) > MAX_OUTPUTS:
         raise PlanError("OUTPUTS")

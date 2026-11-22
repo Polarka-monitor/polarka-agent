@@ -3,8 +3,10 @@ to a line). An agent that is connected to it can read the wallet, hand out addre
 its owner wrote into limits.json, and stamp. It has no way to see the words, to change the limits, or to
 forget a payment: those belong to the owner, at the command line.
 """
+import ipaddress
 import json
 import sys
+import urllib.parse
 
 from . import __version__
 from .cli import _amounts, wait_for
@@ -75,7 +77,32 @@ TOOLS = [
 ]
 
 
-def call(wallet, name, a):
+def outside(url):
+    """Refuses an address that an agent's tool must not reach unless its owner said so (--allow-local): plain
+    http, this machine and the networks of a home or an office. A page the agent reads could otherwise make it ask
+    the owner's own services (human review, 22 November)."""
+    try:
+        parts = urllib.parse.urlsplit(url if isinstance(url, str) else "")
+        host = (parts.hostname or "").rstrip(".").lower()
+    except ValueError:
+        host, parts = "", None
+    if parts is None or parts.scheme != "https" or not host:
+        raise Refused("INPUT", "an agent's tools reach https addresses only (the owner can allow this machine with --allow-local)")
+    if host == "localhost" or host.endswith(".localhost") or host.endswith(".local") or host.endswith(".internal"):
+        raise Refused("INPUT", "an agent's tools do not reach this machine or its network (the owner can allow it with --allow-local)")
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return
+    if ip.version == 6 and ip.ipv4_mapped is not None:
+        ip = ip.ipv4_mapped
+    if not ip.is_global:
+        raise Refused("INPUT", "an agent's tools do not reach this machine or its network (the owner can allow it with --allow-local)")
+
+
+def call(wallet, name, a, allow_local=False):
+    if name in ("north_fetch", "north_postage", "north_faucet") and not allow_local:
+        outside(a.get("url"))
     if name == "north_balance":
         return _amounts(wallet.balance())
     if name == "north_address":
@@ -116,7 +143,7 @@ def call(wallet, name, a):
     raise Refused("NO_TOOL", "there is no such tool")
 
 
-def answer(wallet, message):
+def answer(wallet, message, allow_local=False):
     """The answer to one message, or None when it asks for none."""
     if type(message) is not dict or message.get("jsonrpc") != "2.0" or type(message.get("method")) is not str:
         return {"jsonrpc": "2.0", "id": message.get("id") if type(message) is dict else None, "error": {"code": -32600, "message": "not a request"}}
@@ -140,7 +167,7 @@ def answer(wallet, message):
         try:
             if type(given) is not dict:
                 raise Refused("INPUT", "arguments are an object")
-            shown, failed = call(wallet, name, given), False
+            shown, failed = call(wallet, name, given, allow_local), False
         except Refused as e:
             shown, failed = {"error": e.kind, "message": str(e)}, True
         except BadInput as e:
@@ -155,19 +182,28 @@ def answer(wallet, message):
     return {"jsonrpc": "2.0", "id": ident, "error": {"code": -32601, "message": "no such method"}}
 
 
-def serve(wallet, source=None, sink=None):
+def serve(wallet, source=None, sink=None, allow_local=False):
     source, sink = source or sys.stdin, sink or sys.stdout
-    for line in source:
-        if not line.strip():
+    while True:
+        # a line is read with a bound: one that does not end within it is read on and thrown away (first audit, F9)
+        line = source.readline(MAX_LINE + 1)
+        if not line:
+            break
+        long = len(line) > MAX_LINE
+        while long and not line.endswith("\n"):
+            line = source.readline(MAX_LINE + 1)
+            if not line:
+                break
+        if not long and not line.strip():
             continue
         try:
-            if len(line) > MAX_LINE:
+            if long:
                 raise ValueError("too long")
             message = json.loads(line)
-        except ValueError:
+        except (ValueError, RecursionError):
             reply = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "not JSON"}}
         else:
-            reply = answer(wallet, message)
+            reply = answer(wallet, message, allow_local)
         if reply is not None:
             sink.write(json.dumps(reply) + "\n")
             sink.flush()

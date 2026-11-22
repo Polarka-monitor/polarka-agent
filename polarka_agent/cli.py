@@ -131,7 +131,9 @@ def run(argv=None, out=sys.stdout):
     c.add_argument("--dry-run", action="store_true")
     c = sub.add_parser("forget", help="the owner's word that a payment which did not go through stands against nothing any more")
     c.add_argument("id")
-    sub.add_parser("mcp", help="serve the wallet to an agent over the Model Context Protocol (standard input and output)")
+    c = sub.add_parser("mcp", help="serve the wallet to an agent over the Model Context Protocol (standard input and output)")
+    c.add_argument("--allow-local", action="store_true", help="let the agent's tools reach plain http on this machine and "
+                   "addresses of its network (for a test service of your own); without it they reach public https only")
     c = sub.add_parser("faucet", help="ask a faucet for a first coin, to a fresh address of this wallet")
     c.add_argument("url")
     c.add_argument("--max-bits", type=int, default=24, help="the most work done for it, in zero bits (24 is about ten seconds of one core)")
@@ -357,7 +359,7 @@ def run(argv=None, out=sys.stdout):
         wallet = Wallet(folder)
         if a.cmd == "mcp":
             from .mcp import serve
-            return serve(wallet)
+            return serve(wallet, allow_local=a.allow_local)
         if a.cmd == "address":
             return show({"address": wallet.fresh_address()})
         if a.cmd == "faucet":

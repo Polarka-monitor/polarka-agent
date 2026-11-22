@@ -149,7 +149,7 @@ class X402OnRegtest(unittest.TestCase):
             out = io.StringIO()
             status = cli.run(["--dir", self.buyer.folder, "fetch", self.url, "--most", "0.1"], out=out)
             self.assertEqual((status, json.loads(out.getvalue())["error"]), (2, "X402_TOO_MUCH"))
-            got = mcp.call(self.buyer, "north_fetch", {"url": self.url, "most": "1"})
+            got = mcp.call(self.buyer, "north_fetch", {"url": self.url, "most": "1"}, allow_local=True)
             self.assertEqual((got["status"], got["body"], got["paid"]), (200, "the answer is 42", "0.50000000"))
 
     def test_what_the_buyer_does_not_pay(self):
@@ -221,6 +221,20 @@ class X402Deep(X402OnRegtest):
         # after a start again too
         again = x402.Facilitator(self.rpc, "regtest", os.path.join(self.tmp, "used-deep.jsonl"))
         self.assertEqual(again.known[done["txid"]]["state"], "delivered")
+
+    def test_a_coin_the_seller_spent_before_the_buyer_came_back_still_counts(self):
+        # human review, 22 November: the paying output is spent, so the node's set of coins no longer has it; the
+        # payment is found in its block instead of being called lost
+        seller = self.make("spender", {"per_payment_north": "1", "per_day_north": "5"})
+        facilitator = x402.Facilitator(self.rpc, "regtest", os.path.join(self.tmp, "used-spent.jsonl"), confirmations=1)
+        url = self.start(x402.paywall(facilitator, PRICE, seller.account.address(0, 0), b"spent answer")) + "/spent"
+        done = x402.fetch(url, self.buyer, units("1"), network=self.network, wait=0)
+        self.assertEqual(done["status"], 202)
+        self.node.mine(1, SINK)
+        spent = seller.pay([(SINK, units("0.4"))], "the seller spends what it got before the buyer comes back")
+        self.assertEqual(spent["state"], "handed", spent)
+        got = x402.fetch(url, self.buyer, units("1"), network=self.network, wait=0)
+        self.assertEqual((got["status"], got["body"], got["txid"]), (200, b"spent answer", done["txid"]))
 
     def test_a_payment_without_a_claim_is_not_taken(self):
         _, offer = self.offer(self.deep_url)

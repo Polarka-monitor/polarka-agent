@@ -16,8 +16,9 @@ It was written with AI models under its author's direction, and its author read 
 that had not seen it being written read each part and found faults. Every High finding is mended, with tests. Of
 the Medium ones, one is open, found twice (the first review's F4 and review 8's M4: the owner's limits bind a
 program that has only the MCP tools, not one that can also run commands or write files as the same user), and
-review 5's M4 is mended in part (`REVIEW.md`, `docs/review-guide.md`). No human security expert has read it yet;
-a review by one is asked for.
+review 5's M4 is mended in part (`REVIEW.md`, `docs/review-guide.md`). On 22 November 2026 a programmer, a person,
+read the code and the server's configuration for the first time; what he found is being mended on main and goes
+out with 0.2.3 (`docs/review-guide.md`).
 On the real network it pays since 17 November 2026, and since 20 November it runs a pool, a gate of postage,
 an x402 facilitator and a stamps service at polarka.org. Do not put into it what you cannot lose. It is an
 independent community project, not a product of the TrueNorth developers or of the Northbound project.
@@ -106,7 +107,10 @@ For an agent: start `python3 -m polarka_agent --dir FOLDER mcp` (or `uvx polarka
 server over standard input and output. Without a wallet in the folder it makes one on main, which pays
 nothing until its owner writes `limits.json`; the recovery words are in `wallet.json` there. Its tools are
 `north_balance`, `north_address`, `north_received`, `north_wait`, `north_pay`, `north_stamp`, `north_payments`,
-`north_history`, `north_limits`, `north_faucet`, `north_postage` and `north_fetch`.
+`north_history`, `north_limits`, `north_faucet`, `north_postage` and `north_fetch`. The tools that ask a web
+address reach public https addresses only, not this machine or its network, so that a page the agent reads
+cannot make it ask the owner's own services; `mcp --allow-local` lets them, for a test service of one's own
+(from 0.2.3, on main).
 
 ## A first coin: the faucet
 
@@ -338,11 +342,11 @@ in the owner's rules. It covers those rules only, not the keys, the signing or t
 
 ## What is missing
 
-- A review by a person. Independent AI reviewers read every part, and what they found is listed with what
-  was done about it (`REVIEW.md`, `docs/review-guide.md`). A human review is asked for and not yet done.
+- The mending of the first review by a person (22 November 2026). Until it is out, and until a security expert
+  has looked as well, the beta holds (`docs/review-guide.md`).
 - Use by anybody but its author: the pool, the gate and the stamps service have served nobody else yet.
-- More than two hundred addresses of a kind: beyond that the wallet hands out no new address and reuses
-  its last change key.
+- More than two hundred addresses of a kind: beyond that the wallet hands out no new address, and change uses
+  the keys of the window again in turn (on main since 22 November).
 - A way to replace a payment that was handed over and waits for a block without end.
 - A node of one's own in place of a wallet server, for the wallet.
 - A history that is exact for a wallet with more than a hundred addresses.

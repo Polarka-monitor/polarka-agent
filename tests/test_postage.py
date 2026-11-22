@@ -90,8 +90,14 @@ class PostageTest(unittest.TestCase):
         self.pay(q["pay_to"], N // 100)
         self.assertTrue(self.g.spend(q["token"], "s"))
         self.assertNotIn(q["token"], open(os.path.join(self.folder, "postage.json")).read())
+        # a call taken is written lazily (human review, 22 November): with the next save, or by flush()
+        self.assertEqual(postage.Gate(self.w, N // 100, 100, clock=lambda: self.now[0], look_every=0).status(q["token"])["calls_left"], 100)
+        self.g.flush()
         again = postage.Gate(self.w, N // 100, 100, clock=lambda: self.now[0], look_every=0)
         self.assertEqual(again.status(q["token"]), {"paid": True, "calls_left": 99})
+        self.now[0] += postage.SAVE_EVERY
+        self.assertTrue(self.g.spend(q["token"], "s"))                      # SAVE_EVERY later: written with this call
+        self.assertEqual(postage.Gate(self.w, N // 100, 100, clock=lambda: self.now[0], look_every=0).status(q["token"])["calls_left"], 98)
 
     def test_free_calls_a_day_for_one_source(self):
         g = postage.Gate(self.w, N // 100, 100, free=2, clock=lambda: self.now[0])
@@ -174,13 +180,13 @@ class BuyingTest(unittest.TestCase):
     def test_an_agent_buys_postage_through_the_mcp_server(self):
         from polarka_agent import mcp
         self.assertTrue({"north_faucet", "north_postage"} <= {t["name"] for t in mcp.TOOLS})
-        got = mcp.call(self.bw, "north_postage", {"url": self.url, "most": "0.1"})
+        got = mcp.call(self.bw, "north_postage", {"url": self.url, "most": "0.1"}, allow_local=True)
         self.assertEqual((got["paid"], got["state"], len(self.m.handed)), ("0.01000000", "handed", 1))
         with self.assertRaises(Refused) as e:
-            mcp.call(self.bw, "north_postage", {"url": self.url, "most": "0.001"})
+            mcp.call(self.bw, "north_postage", {"url": self.url, "most": "0.001"}, allow_local=True)
         self.assertEqual(e.exception.kind, "TOO_DEAR")
         with self.assertRaises(KeyError):                                        # no bound given: nothing is asked or paid
-            mcp.call(self.bw, "north_postage", {"url": self.url})
+            mcp.call(self.bw, "north_postage", {"url": self.url}, allow_local=True)
         self.assertEqual(len(self.m.handed), 1)
 
     def test_nothing_is_paid_above_what_the_buyer_allows(self):

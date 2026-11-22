@@ -44,6 +44,15 @@ import urllib.request
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+try:
+    # within the package an address is read here, as the wallet reads it (human review, 22 November); run as one
+    # file, the node is asked
+    from .keys import BadInput as _NotAnAddress, script_for_address as _script_for
+except ImportError:
+    _NotAnAddress, _script_for = ValueError, None
+
+KEEP_BLOCKS = 200           # blocks kept as read below the tip; a deeper change of branch reads them from the node again
+
 
 class OneRequestWithBody:
     """The same as polarka_agent/httpguard.py, written out here because walletd runs as one file: a request that
@@ -55,8 +64,9 @@ class OneRequestWithBody:
         self._body_closes = False
         if not super().parse_request():
             return False
-        length = (self.headers.get("Content-Length") or "").strip()
-        if self.headers.get("Transfer-Encoding") is not None or length not in ("", "0"):
+        lengths = [v.strip() for v in (self.headers.get_all("Content-Length") or [])]
+        # two lengths are read differently by different readers (human review, 22 November)
+        if self.headers.get("Transfer-Encoding") is not None or len(lengths) > 1 or (lengths and lengths[0] not in ("", "0")):
             self.close_connection = True
             self._body_closes = True
         return True
@@ -170,6 +180,30 @@ class Chain:
             for n, (amount, script) in enumerate(tx["outputs"]):
                 self.outputs[(txid, n)] = (amount, script, height)
                 self.by_script.setdefault(script, []).append((txid, n))
+
+    def pop(self, block):
+        """Takes the top block off again, when another branch has won: what it made goes, what it spent is unspent."""
+        if not self.hashes or self.hashes[-1] != block["hash"]:
+            raise ValueError("not the top block")
+        height = len(self.hashes) - 1
+        for tx in reversed(block["txs"]):
+            txid = tx["txid"]
+            for n, (amount, script) in enumerate(tx["outputs"]):
+                if self.outputs.get((txid, n), (None, None, None))[2] == height:
+                    del self.outputs[(txid, n)]
+                    keys = self.by_script.get(script)
+                    if keys and (txid, n) in keys:
+                        keys.remove((txid, n))
+                        if not keys:
+                            del self.by_script[script]
+            for spent in tx["inputs"]:
+                if self.spends.get(spent) == txid:
+                    del self.spends[spent]
+            if self.where.get(txid, (None,))[0] == height:
+                del self.where[txid]
+                self.inputs.pop(txid, None)
+                self.count.pop(txid, None)
+        self.hashes.pop()
 
 
 def is_id(text):
@@ -413,23 +447,38 @@ class Index:
         return block
 
     def follow(self, tip_hash):
-        """Brings the chain up to the node's tip. When another branch has won, the common part is kept and the rest read again."""
+        """Brings the chain up to the node's tip. When another branch has won, the blocks of the old one come off the
+        top one by one and those of the new one go on. The new branch is found by its headers, and its blocks are read
+        and added one at a time; only the last KEEP_BLOCKS stay as read, so that the chain is not held twice, not even
+        at the first reading (human review, 22 November)."""
         if self.chain.hashes and self.chain.hashes[-1] == tip_hash:
             return
         known = {block_hash: height for height, block_hash in enumerate(self.chain.hashes)}
-        fresh = []
+        fresh = []                                        # the hashes of the new branch, newest first
         cursor = tip_hash
         while cursor is not None and cursor not in known:
-            block = self.block(cursor)
-            fresh.append(block)
-            cursor = block["prev"]
-        if cursor is None or known[cursor] != len(self.chain.hashes) - 1:
-            keep = [] if cursor is None else [self.blocks[h] for h in self.chain.hashes[:known[cursor] + 1]]
-            self.chain = Chain()
-            for block in keep:
-                self.chain.add(block)
-        for block in reversed(fresh):
+            fresh.append(cursor)
+            kept = self.blocks.get(cursor)
+            cursor = kept["prev"] if kept is not None else self.node.call("getblockheader", cursor).get("previousblockhash")
+        if cursor is None:
+            self.chain = Chain()                          # nothing in common: everything again
+        else:
+            while len(self.chain.hashes) - 1 > known[cursor]:
+                self.chain.pop(self.block(self.chain.hashes[-1]))
+        for n, block_hash in enumerate(reversed(fresh), 1):
+            block = self.block(block_hash)
+            if self.chain.hashes and block["prev"] != self.chain.hashes[-1]:
+                # the node changed branch while it was read: what is on the chain holds, the look begins again
+                raise Refused(0, "the node changed branch while it was read")
             self.chain.add(block)
+            if n % KEEP_BLOCKS == 0:
+                self._prune()
+        self._prune()
+
+    def _prune(self):
+        near = set(self.chain.hashes[-KEEP_BLOCKS:])
+        if len(self.blocks) > len(near):
+            self.blocks = {h: b for h, b in self.blocks.items() if h in near}
 
     def look(self):
         """One picture of the node in which the tip and the waiting transactions belong together."""
@@ -546,17 +595,23 @@ class App:
         for address in addresses:
             if len(address) > 128:
                 raise Answer(400, "address is too long")
-            checked = self.node.call("validateaddress", address)
-            if not checked.get("isvalid"):
+            if self.network is None:
+                self.network = self.node.call("getblockchaininfo")["chain"]
+            if _script_for is not None:
+                try:
+                    script, shown = _script_for(self.network, address).hex(), address.lower()
+                except _NotAnAddress:
+                    script = None
+            else:
+                checked = self.node.call("validateaddress", address)
+                script, shown = (checked["scriptPubKey"], checked.get("address", address)) if checked.get("isvalid") else (None, None)
+            if script is None:
                 # the real server tells a good address of another network from something that is no address
-                if self.network is None:
-                    self.network = self.node.call("getblockchaininfo")["chain"]
                 foreign = bech32_checksum_holds(address) and address.lower().rpartition("1")[0] != HRPS.get(self.network)
                 raise Answer(400, "address belongs to a different network" if foreign else "invalid address or checksum")
-            script = checked["scriptPubKey"]
             if script not in seen:
                 seen.add(script)
-                found.append((checked.get("address", address), script))
+                found.append((shown, script))
         return found
 
     def picture(self):
@@ -673,10 +728,13 @@ class Handler(OneRequestWithBody, BaseHTTPRequestHandler):
         if self.headers.get("Transfer-Encoding") is not None:
             self.close_connection = True
             raise Answer(411, "Request must give its length (Content-Length) and no Transfer-Encoding.")
+        if len(self.headers.get_all("Content-Length") or []) > 1:
+            self.close_connection = True                      # two lengths: which one holds is not ours to guess
+            raise Answer(400, NOT_SERVED)
         text = self.headers.get("Content-Length")
         if text is None:
             return b""                                        # nothing: the empty body is not JSON, which is said further on
-        if not text.strip().isdigit():
+        if not (text.strip().isascii() and text.strip().isdigit()) or len(text.strip()) > 12:
             self.close_connection = True                      # the body is not read
             raise Answer(400, NOT_SERVED)
         length = int(text)
@@ -754,7 +812,7 @@ def loopback(listen):
     """host and port of --listen, for a loopback address only (127.0.0.1, [::1] and the like); ValueError otherwise."""
     host, colon, port = listen.rpartition(":")
     host = host[1:-1] if host.startswith("[") and host.endswith("]") else host
-    if not colon or not port.isdigit() or not ipaddress.ip_address(host).is_loopback:
+    if not colon or not (port.isascii() and port.isdigit()) or not ipaddress.ip_address(host).is_loopback:
         raise ValueError(listen)
     port = int(port)
     if port > 65535:

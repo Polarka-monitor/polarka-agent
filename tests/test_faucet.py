@@ -42,9 +42,9 @@ class FaucetTest(unittest.TestCase):
         c = self.f.challenge(source, to)
         return self.f.claim(source, to, c["challenge"], faucet.solve(c["challenge"], c["bits"]))
 
-    def refused(self, kind, call, *a):
+    def refused(self, kind, call, *a, **k):
         with self.assertRaises(Refused) as e:
-            call(*a)
+            call(*a, **k)
         self.assertEqual(e.exception.kind, kind)
 
     def test_work_then_a_coin_and_once_a_day(self):
@@ -128,13 +128,13 @@ class FaucetTest(unittest.TestCase):
         threading.Thread(target=srv.serve_forever, daemon=True).start()
         url = "http://127.0.0.1:%d" % srv.server_address[1]
         try:
-            got = mcp.call(asker, "north_faucet", {"url": url})
+            got = mcp.call(asker, "north_faucet", {"url": url}, allow_local=True)
             self.assertEqual(got["transaction_id"], self.m.handed[-1])
             self.assertEqual(asker.account.address(0, 0), got["asked"])          # to a fresh address of the asking wallet
             # a faucet that asks for a quarter of an hour of work gets none from an agent's tool
             srv.RequestHandlerClass = faucet.make_handler(faucet.Faucet(self.w, 2 * N, base_bits=28, clock=lambda: self.now[0]), False)
-            self.refused("FAUCET", mcp.call, asker, "north_faucet", {"url": url})
-            self.refused("FAUCET", mcp.call, asker, "north_faucet", {"url": "http://127.0.0.1.faucet.example"})
+            self.refused("FAUCET", mcp.call, asker, "north_faucet", {"url": url}, allow_local=True)
+            self.refused("FAUCET", mcp.call, asker, "north_faucet", {"url": "http://127.0.0.1.faucet.example"}, allow_local=True)
             self.assertEqual(len(self.m.handed), 1)
         finally:
             srv.shutdown()

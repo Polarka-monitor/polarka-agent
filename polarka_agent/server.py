@@ -229,7 +229,7 @@ class Server:
                         self.close()
                         raise ServerError(200, "the server sent an answer that is too long")
                 retry = answer.getheader("Retry-After")
-                retry = int(retry.strip()) if retry is not None and retry.strip().isdigit() and len(retry.strip()) < 6 else None
+                retry = int(retry.strip()) if retry is not None and retry.strip().isascii() and retry.strip().isdigit() and len(retry.strip()) < 6 else None
                 if answer.will_close:
                     self.close()
                 return answer.status, bytes(data).decode("utf-8", "replace"), retry
@@ -420,10 +420,11 @@ class Server:
         return {"txid": txid, "net": net, "fee": _whole(t, "network_fee", MAX_AMOUNT, True), "reward": reward,
                 "height": height, "confirmations": deep, "time": _whole(t, "timestamp", MAX_TIME, True)}
 
-    def history(self, addresses, most=2000):
+    def history(self, addresses, most=2000, until=None):
         """(height, block, lines, complete): the history of at most a hundred addresses, newest first, the
         waiting transactions before those in blocks. Each line is summed up against the addresses of this
-        request. When a block or a waiting transaction arrives while it is read, the reading starts again."""
+        request. When a block or a waiting transaction arrives while it is read, the reading starts again.
+        With `until` (a txid) the reading stops at the page that holds it (human review, 22 November)."""
         asked = self._parts(addresses)
         if len(asked) != 1:
             raise ValueError("history is exact for at most %d addresses in one request" % MAX_ADDRESSES)
@@ -456,6 +457,9 @@ class Server:
                     seen.add(line["txid"])
                     moves.append(line)
                 cursor = _text(answer, "next_cursor", MAX_CURSOR, True)
+                if until is not None and until in seen:
+                    complete = cursor is None
+                    break
                 if cursor is None:
                     break
                 if not page:

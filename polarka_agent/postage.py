@@ -36,12 +36,13 @@ import http.client
 import json
 import os
 import re
+import signal
 import sys
 import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 
-from .httpguard import OneRequestWithBody
+from .httpguard import Bounded, Limiter, OneRequestWithBody, forwarded, one_length, place
 
 from .keys import UNIT
 from .server import ServerError, reachable
@@ -52,8 +53,15 @@ QUOTE_LIFE = 1800               # seconds an address waits for its payment
 PRICE_LIFE = 600                # seconds a price worked out from the network is kept
 PRICE_STALE = 6 * 3600          # when the server gives no template: a price older than this is not quoted
 MAX_BODY = 1 << 20              # the largest request passed on
+MAX_ANSWER = 8 << 20            # the largest answer of the service behind that is passed back
+X402_PER_MINUTE = 30            # x402 payments that reach the facilitator, a minute from one place (ten times that from all)
+KEEP_SPENT = 30 * 86400         # a lot whose calls are used up is forgotten this long after its quote ran out
+SAVE_EVERY = 5                  # seconds: a call taken from a lot is written down with the next save, at most this late
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade",
        "x-postage", "host", "content-length", "payment-signature"}
+
+
+TOO_MANY = "too_many_requests"
 
 
 def mark(token):
@@ -73,7 +81,10 @@ class Gate:
         self.lock = threading.Lock()
         self.book = os.path.join(wallet.folder, "postage.json")
         self.salt = os.urandom(16)
-        self.free_used = {}         # salted hash of a source -> (day, calls)
+        self.free_used = {}         # salted hash of a place -> its calls today; emptied when the day changes
+        self.free_day = None
+        self.x402_limiter = Limiter(X402_PER_MINUTE) if x402 is not None else None
+        self.saved, self.dirty = 0, False
         self.looked = {}            # address -> when the wallet was last asked about it
         try:
             with open(self.book) as f:
@@ -95,12 +106,29 @@ class Gate:
             self.state["x402_address"] = wallet.fresh_address()
             self._save()
 
-    def _save(self):
+    def _save(self, lazy=False):
+        """Writes the book (with the lock held). A call taken from a lot is written lazily: with the next save, at
+        most SAVE_EVERY seconds late, so that the whole book is not written at every call (human review, 22 November).
+        A crash in that time gives those calls back to the buyer, never takes any. Everything else is written at
+        once, with fsync."""
+        now = self.clock()
+        if lazy and now - self.saved < SAVE_EVERY:
+            self.dirty = True
+            return
         tmp = self.book + ".new"
-        with open(tmp, "w") as f:
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
             json.dump(self.state, f, separators=(",", ":"))
-        os.chmod(tmp, 0o600)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, self.book)
+        self.saved, self.dirty = now, False
+
+    def _prune(self, now):
+        """Tokens never paid whose time is long over, and lots whose calls are used up a month after their quote
+        ran out, are dropped. A payment over x402 shown again after that buys nothing: its facilitator knows it."""
+        self.state["tokens"] = {k: t for k, t in self.state["tokens"].items()
+                                if (t["paid"] and (t["calls"] > 0 or now < t["expires"] + KEEP_SPENT)) or now < t["expires"] + 3600}
 
     def _price(self):
         """The price of one lot in base units: the fixed one, or so many hashes' worth of NORTH at what the
@@ -137,8 +165,7 @@ class Gate:
                 self.state["addresses"][address] = 0
             token = os.urandom(24).hex()
             self.state["tokens"][mark(token)] = {"address": address, "expires": int(now) + QUOTE_LIFE, "paid": False, "calls": 0, "price": price}
-            # tokens that were never paid and whose time is long over are dropped
-            self.state["tokens"] = {k: t for k, t in self.state["tokens"].items() if t["paid"] or now < t["expires"] + 3600}
+            self._prune(now)
             self._save()
             return {"token": token, "pay_to": address, "price": north(price), "calls": self.calls, "expires": int(now) + QUOTE_LIFE,
                     "then": "pay the price to pay_to; when it is in a block, send the token in the header X-Postage"}
@@ -174,16 +201,24 @@ class Gate:
                 self._settle(t)
                 if t["calls"] > 0:
                     t["calls"] -= 1
-                    self._save()
+                    self._save(lazy=True)
                     return True
             if self.free and source is not None:
-                day, key = int(self.clock() // 86400), hashlib.sha256(self.salt + source.encode()).hexdigest()[:16]
-                was = self.free_used.get(key, (day, 0))
-                used = was[1] if was[0] == day else 0
+                # one place is an IPv4 address or an IPv6 /48, as at the faucet and the pool (human review, 22 November)
+                day, key = int(self.clock() // 86400), hashlib.sha256(self.salt + place(source).encode()).hexdigest()[:16]
+                if day != self.free_day:
+                    self.free_used, self.free_day = {}, day
+                used = self.free_used.get(key, 0)
                 if used < self.free:
-                    self.free_used[key] = (day, used + 1)
+                    self.free_used[key] = used + 1
                     return True
             return False
+
+    def flush(self):
+        """Writes what a lazy save left unwritten."""
+        with self.lock:
+            if self.dirty:
+                self._save()
 
     def x402_wanted(self, amount=None):
         """The requirements of x402 for one lot. A price asked in the last hour is still taken, so that a
@@ -238,10 +273,11 @@ class Gate:
             needed["extensions"] = ext
         return needed
 
-    def x402_pay(self, payment, path=None):
+    def x402_pay(self, payment, path=None, source=None):
         """A payment of x402 for one lot. (what came of it, True when this call may pass). What the payment says it
         buys (resource, extensions) is put back to what the gate states for `path`, so that a buyer cannot have the
-        facilitator write something else into its catalog."""
+        facilitator write something else into its catalog. A payment that is not one of a paid lot goes to the
+        facilitator at most X402_PER_MINUTE times a minute from one place (`source`; human review, 22 November)."""
         if isinstance(payment, dict) and path is not None:
             resource, ext = self.described(path)
             payment = dict(payment, resource=resource)
@@ -257,6 +293,8 @@ class Gate:
         if t is not None:                   # the lot is paid already: the payment shown again is one more call of it
             done = {"success": True, "transaction": t.get("txid", ""), "network": self.x402.network, "payer": None}
             return done, self.spend(claim, None)
+        if source is not None and self.x402_limiter is not None and not self.x402_limiter.take(place(source)):
+            return {"success": False, "errorReason": TOO_MANY, "transaction": "", "network": self.x402.network, "payer": None}, False
         accepted = payment.get("accepted")
         done = self.x402.settle(payment, self.x402_wanted(accepted.get("amount") if isinstance(accepted, dict) else None))
         if not done.get("success"):
@@ -311,11 +349,8 @@ def make_handler(gate, upstream, trust_proxy, routes=()):
         timeout = 60                # a client that announces a body and sends nothing does not hold a thread for ever
 
         def source(self):
-            if trust_proxy:
-                f = self.headers.get("X-Forwarded-For", "")
-                if f:
-                    return f.split(",")[-1].strip()
-            return self.client_address[0]
+            # behind the web server: the last element of the last X-Forwarded-For line (human review, 22 November)
+            return (forwarded(self) if trust_proxy else "") or self.client_address[0]
 
         def send(self, code, obj, more=None):
             body = json.dumps(obj).encode()
@@ -330,8 +365,17 @@ def make_handler(gate, upstream, trust_proxy, routes=()):
         def handle_one(self):
             what, outcome, t0 = "call", "passed", time.time()
             try:
-                n = int(self.headers.get("Content-Length", "0") or 0)
-                if n < 0 or n > MAX_BODY:
+                if self.headers.get("Transfer-Encoding") is not None:
+                    # a body in pieces is not read here: without this answer the service behind would get an empty one
+                    self.close_connection = True
+                    outcome = "chunked"
+                    return self.send(411, {"error": "INPUT", "message": "send the length of the body (Content-Length)"})
+                n = one_length(self.headers)
+                if n is None:
+                    self.close_connection = True
+                    outcome = "bad length"
+                    return self.send(400, {"error": "INPUT", "message": "Content-Length is one number"})
+                if n > MAX_BODY:
                     self.close_connection = True
                     outcome = "too large"
                     return self.send(413, {"error": "INPUT", "message": "request size"})
@@ -350,8 +394,12 @@ def make_handler(gate, upstream, trust_proxy, routes=()):
                     except Exception:
                         outcome = "unreadable"
                         return self.send(400, {"error": "INPUT", "message": "the payment cannot be read"})
-                    done, may = gate.x402_pay(payment, self.path)
+                    done, may = gate.x402_pay(payment, self.path, self.source())
                     more["PAYMENT-RESPONSE"] = b64json(done)
+                    if not may and done.get("errorReason") == TOO_MANY:
+                        outcome = "x402 too many"
+                        return self.send(429, {"error": "TOO_MANY", "message": "too many payments from one place; try again "
+                                                                                "in a minute"}, dict(more, **{"Retry-After": "60"}))
                     if not may:
                         if done.get("errorReason") == AWAITING:
                             outcome = "waiting"
@@ -381,7 +429,9 @@ def make_handler(gate, upstream, trust_proxy, routes=()):
                     headers = {k: v for k, v in self.headers.items() if k.lower() not in HOP}
                     c.request(self.command, self.path, body or None, headers)
                     r = c.getresponse()
-                    answer = r.read(64 << 20)
+                    answer = r.read(MAX_ANSWER + 1)
+                    if len(answer) > MAX_ANSWER:
+                        raise ValueError("the service behind the gate answered more than %d bytes" % MAX_ANSWER)
                     self.send_response(r.status)
                     for k, v in r.getheaders():
                         if k.lower() not in HOP and k.lower() not in ("payment-response", "x-postage-calls-left"):
@@ -492,8 +542,25 @@ def serve(wallet, upstream, price, calls, listen, free=0, trust_proxy=False, has
         except ServerError as e:
             raise Refused("NO_WORK", "the wallet server gives no block template (HTTP %s); a price in hashes needs a server with the mining routes of Northbound" % e.status)
     host, port = listen.rsplit(":", 1)
-    srv = ThreadingHTTPServer((host, int(port)), make_handler(gate, upstream, trust_proxy, routes))
-    srv.daemon_threads = True
+    # so many connections at once and no more (human review, 22 November)
+    srv = Bounded((host, int(port)), make_handler(gate, upstream, trust_proxy, routes), most=64)
+
+    def flushing():
+        while True:
+            time.sleep(SAVE_EVERY)
+            try:
+                gate.flush()
+            except OSError as e:
+                sys.stderr.write("%s ALARM the book could not be written (%s)\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), e))
+    threading.Thread(target=flushing, daemon=True).start()
+
+    def stop(*_):                   # a restart writes down the calls taken since the last save
+        try:
+            gate.flush()
+        finally:
+            sys.exit(0)
+    if threading.current_thread() is threading.main_thread():
+        signal.signal(signal.SIGTERM, stop)
     sys.stderr.write("postage gate on %s before %s: %s NORTH for %d calls%s, %d free a day%s\n"
                      % (listen, upstream, north(price), calls, " (%d hashes of work, at the network of this moment)" % hashes if hashes else "", free,
                         ", x402 on %s" % x402.network if x402 is not None else ""))

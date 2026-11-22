@@ -136,7 +136,7 @@ def parse_txoutproof(raw):
     flags = r.take(r.varint())
     if r.at != len(raw) or not 0 < total < 1 << 24:
         raise ValueError("this is not a merkle block")
-    bits = [(flags[i // 8] >> (i % 8)) & 1 for i in range(len(flags) * 8)]
+    bits = len(flags) * 8           # read one at a time: a list of them would take ~300 MB for 4 MB of flags (human review)
     used = {"bits": 0, "hashes": 0}
     matched = []
 
@@ -144,9 +144,9 @@ def parse_txoutproof(raw):
         return (total + (1 << h) - 1) >> h
 
     def walk(h, pos):
-        if used["bits"] >= len(bits):
+        if used["bits"] >= bits:
             raise ValueError("this is not a merkle block")
-        flag = bits[used["bits"]]
+        flag = (flags[used["bits"] >> 3] >> (used["bits"] & 7)) & 1
         used["bits"] += 1
         if h == 0 or not flag:
             if used["hashes"] >= len(hashes):
@@ -207,14 +207,21 @@ def verify(proof, node_rpc=None):
         done["block"] = ("not checked: give a node, or look up block %s at height %s in an explorer"
                          % (proof.get("block_hash"), proof.get("block_height")))
         return done
-    got = node_rpc.call("getrawtransaction", proof["txid"], True, proof["block_hash"])
-    if got.get("hex") != proof["transaction"] and got.get("hex", "").lower() != str(proof["transaction"]).lower():
-        raise ValueError("the node has another transaction under this id")
-    header = node_rpc.call("getblockheader", proof["block_hash"])
-    if int(header.get("confirmations", -1)) < 1:
-        raise ValueError("the block is not in the node's chain")
-    if int(header["height"]) != int(proof["block_height"]):
-        raise ValueError("the block is at another height than the proof says")
+    from .walletd import Refused as NodeRefused
+    try:
+        got = node_rpc.call("getrawtransaction", proof["txid"], True, proof["block_hash"])
+        if got.get("hex") != proof["transaction"] and got.get("hex", "").lower() != str(proof["transaction"]).lower():
+            raise ValueError("the node has another transaction under this id")
+        header = node_rpc.call("getblockheader", proof["block_hash"])
+        if int(header.get("confirmations", -1)) < 1:
+            raise ValueError("the block is not in the node's chain")
+        if int(header["height"]) != int(proof["block_height"]):
+            raise ValueError("the block is at another height than the proof says")
+    except NodeRefused as e:
+        # the node's own no (an unknown block, a transaction not in it) is an answer: the proof does not hold
+        raise ValueError("the node does not know this transaction in this block (%s)" % str(e)[:120])
+    except (KeyError, TypeError) as e:
+        raise ValueError("the proof lacks what the node is asked about (%s)" % e)
     done.update(block=True, confirmations=int(header["confirmations"]), time=int(header["time"]))
     return done
 
@@ -351,6 +358,15 @@ class Stamps:
                     self.state["last"] = now                   # tried again after `every`
                     self._save()
             else:
+                if done.get("state") == "kept":
+                    # the node said no: no transaction is on its way, so no batch is written down; its stamps wait for
+                    # the next one, and the wallet's next payment stands against this one (human review, 22 November)
+                    sys.stderr.write("%s batch refused by the node: %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), str(done.get("note"))[:200]))
+                    with self.lock:
+                        self.state["last"] = now
+                        self._save()
+                    self._scan()
+                    return None
                 try:
                     raw = self.rpc.call("getrawtransaction", done["id"])
                 except Exception:
@@ -399,7 +415,8 @@ class Stamps:
             for i, b in batches:                               # a block that left the chain takes its batches with it
                 if b["block"] is not None and (b["block"]["height"] > tip
                                                or self.rpc.call("getblockhash", b["block"]["height"]) != b["block"]["hash"]):
-                    changes[i] = {"block": None}
+                    # its time starts again: the node may take a while to have it waiting again (human review)
+                    changes[i] = {"block": None, "made": int(self.clock())}
                     scanned = min(scanned, b["block"]["height"] - 1)
             wanted = {b["txid"]: i for i, b in batches if b["block"] is None or i in changes}
             top = min(tip, scanned + most)
@@ -418,16 +435,19 @@ class Stamps:
             if scanned >= tip:
                 for txid, i in wanted.items():
                     b = dict(batches)[i]
-                    if self.clock() - b["made"] >= DEAD:
+                    if self.clock() - changes.get(i, b).get("made", b["made"]) >= DEAD:
                         try:
                             self.rpc.call("getmempoolentry", txid)
                         except Exception as e:
-                            # only the node's word that it does not have it: a node that did not answer says nothing
-                            if "not in mempool" in str(e).lower():
+                            # only the node's word that it does not have it: a node that did not answer says nothing;
+                            # and only while no block came since the count above, or it may be in that block (human review)
+                            if "not in mempool" in str(e).lower() and int(self.rpc.call("getblockcount")) == tip:
                                 dead.append(i)
         except Exception as e:
             sys.stderr.write("%s scan stopped: %s %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), type(e).__name__, str(e)[:200]))
         with self.lock:
+            # written only when something changed: not every half minute for nothing (human review, 22 November)
+            changed = bool(changes or dead) or self.state["scanned"] != scanned or self.state.get("recent") != recent
             for i, change in changes.items():
                 self.state["batches"][i].update(change)
                 self.trees.pop(i, None)
@@ -445,7 +465,8 @@ class Stamps:
             self.state["recent"] = recent
             if dead:
                 self._rewrite_log()
-            self._save()
+            if changed:
+                self._save()
 
 
 ABOUT = {"service": "polarka-stamps", "what": "proof that a file existed by a given block of TrueNorth",

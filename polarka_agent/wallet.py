@@ -117,7 +117,7 @@ class Wallet:
 
     def __enter__(self):
         """One program at a time works with a wallet folder."""
-        self._lock = open(self._path("lock"), "a")
+        self._lock = os.fdopen(os.open(self._path("lock"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600), "a")
         fcntl.flock(self._lock, fcntl.LOCK_EX)
         return self
 
@@ -136,7 +136,7 @@ class Wallet:
 
     def _save_state(self, state):
         tmp = self._path("state.json.tmp")
-        with open(tmp, "w") as f:
+        with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
             json.dump(state, f)
             f.flush()
             os.fsync(f.fileno())
@@ -184,13 +184,15 @@ class Wallet:
                     payments[e["txid"]] = dict(e, state="signed", note=None, settled=None)
                 else:
                     payments[e["txid"]].update(state=e["state"], note=e.get("note"), settled=e["t"])
+                    if "counted" in e:          # shown again a day or more after it was made: it counts for that day
+                        payments[e["txid"]]["t"] = int(e["counted"])
             except (ValueError, KeyError, TypeError):
                 # a journal that cannot be read is not guessed at: what it holds decides what may be paid
                 raise Refused("JOURNAL", "line %d of journal.jsonl cannot be read; nothing is paid until that is put right" % n)
         return payments
 
     def _note(self, event):
-        with open(self._path("journal.jsonl"), "a") as f:
+        with os.fdopen(os.open(self._path("journal.jsonl"), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600), "a") as f:
             f.write(json.dumps(event, separators=(",", ":")) + "\n")
             f.flush()
             if hasattr(fcntl, "F_FULLFSYNC"):       # macOS: fsync alone leaves the line in the drive's cache
@@ -200,6 +202,13 @@ class Wallet:
                     os.fsync(f.fileno())
             else:
                 os.fsync(f.fileno())
+
+    def _count_today(self, payment, now):
+        """A payment shown again a day or more after it was made can still arrive now: from here on it counts for
+        this day (first audit, F6). The line keeps the shape older versions read: a state that does not change."""
+        self._note({"t": int(now), "event": "state", "txid": payment["txid"], "state": payment["state"],
+                    "note": payment.get("note"), "counted": int(now)})
+        payment["t"] = int(now)
 
     def _set(self, payment, state, note=None):
         if payment["state"] != state or payment.get("note") != note:
@@ -329,10 +338,12 @@ class Wallet:
         script_address = {self.account.script(b, i).hex(): a for a, (b, i) in seen["addresses"].items()}
         for p in todo:
             mine = [script_address[s] for s in p["input_scripts"] if s in script_address]
-            if len(mine) != len(p["input_scripts"]) or len(set(mine)) > 100:
+            if len(mine) != len(p["input_scripts"]):
                 continue        # its coins sit on keys this look does not cover: nothing can be said, and nothing is
             try:
-                tip, block, lines, complete = self.server.history(sorted(set(mine)), 2000)
+                # a payment is in the history of every address it spends from: one of them is enough, and the
+                # reading stops at the page that holds it (human review, 22 November)
+                tip, block, lines, complete = self.server.history([sorted(set(mine))[0]], 2000, until=p["txid"])
             except ServerError:
                 continue
             line = next((m for m in lines if m["txid"] == p["txid"]), None)
@@ -386,6 +397,8 @@ class Wallet:
             if p is None:
                 raise Refused("NOT_OPEN", "there is no payment with this id")
             self._settle(payments, self.look())
+            if p["state"] in OPEN and self._clock() - p["t"] >= DAY:
+                self._count_today(p, self._clock())
             if p["state"] in OPEN or p["state"] == "in_block":
                 # also one that a server called "in a block": whoever asks has a node that does not see it there
                 self._hand_over(p)
@@ -440,8 +453,11 @@ class Wallet:
             aside = {(t, n) for p in payments.values() if p["state"] == "handed" for t, n, _ in p["inputs"]}
             free = [c for c in seen["coins"] if tx.spendable(c, seen["tip"]) and (c.txid, c.vout) not in aside]
             # change goes to the next unused key, but never to one this program does not look at: at the end of
-            # its window the last key is used again
-            change_index = min(seen["last"][1] + 1, seen["window"] - 1)
+            # its window the keys of the window are used again in turn, so that no one key gathers every payment
+            # (human review, 22 November)
+            change_index = seen["last"][1] + 1
+            if change_index >= seen["window"]:
+                change_index = len(payments) % seen["window"]
             try:
                 the_plan = tx.plan(free, [(s, v) for s, v, _ in outputs], limits["fee_rate"], self.account.script(1, change_index), must)
             except tx.PlanError as e:
@@ -471,6 +487,8 @@ class Wallet:
                 shown["stands_against"] = [t for t in shown["stands_against"] if t != again["txid"]]
             if dry_run:
                 return dict(shown, state="not made (a dry run)", same_as=None if again is None else again["txid"])
+            if again is not None and now - again["t"] >= DAY:
+                self._count_today(again, now)
             if again is not None:
                 if not hand:            # the same payment, given once more to whoever hands it over
                     return dict(shown, id=again["txid"], state=again["state"], note=again["note"], same_as=again["txid"], raw=again["raw"])

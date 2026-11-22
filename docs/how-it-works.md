@@ -6,8 +6,11 @@ may change, stop or be reset without notice, and nothing is promised. Keep in it
 
 The code was written with AI models under its author's direction. Independent AI reviewers that had not seen it
 being written read every part; what they found and what was done about it is in `REVIEW.md` and
-`docs/review-guide.md`. This page says what each part does, how a payment moves, who holds what and who sees
-what. All of it can be checked against the code in this repository and the deployment notes in `deploy/`.
+`docs/review-guide.md`. On 22 November 2026 a programmer, a person, read the code and the server for the first
+time; what he found is being mended and goes out with 0.2.3 (`docs/review-guide.md`).
+
+This page says what each part does, how a payment moves, who holds what and who sees what. All of it can be
+checked against the code in this repository and the deployment notes in `deploy/`.
 
 ## The parts
 
@@ -147,8 +150,8 @@ have found something; the details are then taken privately.
 
 ## What is missing
 
-- A review by a person. Independent AI reviewers have read every part; a human review is asked for and not yet
-  done.
+- The mending of the first review by a person, a programmer who read the code and the server on 22 November
+  2026 (`docs/review-guide.md`); it goes out with 0.2.3. A review by a security expert is still asked for.
 - Use by anybody but its author: the pool, the gate and the stamps service have served nobody else yet
   (`polarka.org/data/usage.json` shows it as it changes).
 - Somebody other than us who runs a faucet, takes postage or settles x402 in NORTH.

@@ -41,7 +41,29 @@ Specification draft for x402: `docs/x402-scheme-exact-bip122.md` (also open as x
 
 ## What has been checked, and by whom
 
-Five reviews by AI models that did not write the code (not by people):
+One review by a person, and before it five by AI models that did not write the code:
+
+- the first review by a person (a programmer, 22 November 2026, of the package of that morning: all of
+  polarka-agent, the server's configuration and scripts, the watcher and the logs; not the Android wallet and
+  miner, the web site or truenorth-cold-address; by reading, without running the code). In the keys, the
+  signing and the wallet it found nothing by which coins could be taken or an output forged. It found: a way to
+  hold up the gate's facilitator with large PAYMENT-SIGNATURE headers (the facilitator asked its node under
+  one lock, the gate had no bound on threads or attempts); records that grow without end (the pool's
+  pool-shares.jsonl against a 64 MiB bound in the usage count, walletd holding the chain twice in memory,
+  stamps.json written twice a minute); a wallet that piles every change on one key after 200 payments and reads
+  up to 2000 lines of history for each open payment; postage.py behind the other services (X-Forwarded-For,
+  IPv6 places, an unbounded server, a 64 MiB read, no fsync); two Content-Length headers passing the guard;
+  Unicode digits; a payment whose coin the seller spent before the buyer came back called lost; a buyer that
+  took a number for an amount, did not wait on 503 and read without a deadline; stamps taken for written when
+  the node refused them, or for dead when mined a moment before; MCP tools that reached this machine; the first
+  audit's F6, F9 and F11; and on the server uneven hardening, a usage count that could read every key, and
+  Caddy lines with addresses at the DEBUG level. Mended on 22 November, on main with tests
+  (`tests/test_human_review.py`) and on the server: all of that except the ones below. Open: pool-shares.jsonl
+  still grows (the count now stops loudly at 512 MiB, about six weeks), the pool asks its node under its lock
+  now and then, the web pages are still built on the server, and polarka-usage and polarka-status are still
+  root's (usage no longer sees the keys). Its report can be had on request; nobody but its author has
+  read the fixes.
+
 
 - review 5 (Claude Opus): 2 High, 4 Medium, 7 Low; High and Medium fixed in 1ea787c (M4 in part);
 - review 6 (Claude Fable): 1 High, 4 Medium, 9 Low; High and Medium fixed in 6ddc827;
@@ -92,7 +114,7 @@ project (wallet, pool) went through four further AI reviews. No person outside h
 
     git clone https://github.com/Polarka-monitor/polarka-agent && cd polarka-agent   # or the copy you were given
     # a TrueNorth Core build (truenorthd, truenorth-cli) in a folder; tests start their own regtest node
-    TN_BIN=/path/to/bin python3 -m unittest discover -s tests -t .      # about 5 minutes, 250 tests
+    TN_BIN=/path/to/bin python3 -m unittest discover -s tests -t .      # about 5 minutes, 276 tests
 
 Without `TN_BIN` the tests that need a node are skipped. To check a stamp from the main chain:
 

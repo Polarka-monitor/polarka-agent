@@ -31,7 +31,6 @@ NORTH may be named so. Until then only clients that know this module pay in NORT
 """
 import base64
 import hashlib
-import ipaddress
 import json
 import os
 import re
@@ -42,7 +41,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .httpguard import OneRequestWithBody
+from .httpguard import Bounded, Limiter, OneRequestWithBody, forwarded, one_length, place  # noqa: F401 (Bounded, Limiter: also for others)
 
 from .keys import BadInput, script_for_address
 from .wallet import Refused, north
@@ -58,8 +57,15 @@ CLAIM = re.compile(r"^[0-9a-f]{32,128}$")
 KEYS = ("scheme", "network", "amount", "asset", "payTo")
 WAITING, DELIVERED = "waiting", "delivered"
 AWAITING = "awaiting_confirmation"
+SCAN_MOST = 288                     # blocks looked through for a payment whose coin was spent since
 AGAIN = ("unexpected_settle_error", "settlement_failed")       # the facilitator failed, not the payment: ask again later
 LOCAL = ("127.0.0.1", "localhost", "::1")
+
+
+def digits(text, most=18):
+    """True for text of ASCII digits only, at most `most` of them. str.isdigit() also takes "\u00b2", which int() then
+    refuses (human review, 22 November)."""
+    return isinstance(text, str) and 0 < len(text) <= most and text.isascii() and text.isdigit()
 
 
 def local_or_https(url):
@@ -214,8 +220,10 @@ class Facilitator:
             return "invalid_payment_requirements"
         return None
 
-    def _depth(self, txid, vout):
-        """Blocks the payment is in (0: waiting in the node), or None when the node no longer knows it."""
+    def _depth(self, txid, vout, since=None):
+        """Blocks the payment is in (0: waiting in the node), or None when the node no longer knows it. A paying
+        output the seller has spent since is not in the node's set of coins any more: then the payment is looked
+        for in the blocks made since `since` (a time), at most SCAN_MOST of them (human review, 22 November)."""
         out = self.node.call("gettxout", txid, vout, True)
         if out is not None:
             return int(out.get("confirmations", 0))
@@ -223,7 +231,20 @@ class Facilitator:
             self.node.call("getmempoolentry", txid)
             return 0
         except Exception:
+            pass
+        if since is None:
             return None
+        try:
+            tip = int(self.node.call("getblockcount"))
+            for height in range(tip, max(0, tip - SCAN_MOST), -1):
+                block = self.node.call("getblock", self.node.call("getblockhash", height), 1)
+                if txid in block.get("tx", ()):
+                    return tip - height + 1
+                if int(block.get("time", 0)) < since - 7200:      # block times may run up to two hours behind
+                    break
+        except Exception:
+            pass                        # a node that does not let this user read blocks: as before, not found
+        return None
 
     def _fail(self, why, txid=None, **more):
         return dict({"success": False, "errorReason": why, "transaction": txid or "", "network": self.network, "payer": None}, **more)
@@ -249,9 +270,11 @@ class Facilitator:
         return self.most_payments is not None and len(self.known) >= self.most_payments
 
     def verify(self, payment, wanted):
-        with self.lock:
-            txid, raw, claim, decoded, why = self._read(payment)
-            rec = self.known.get(txid) if why is None else None
+        # the node is asked outside the lock; only self.known is read under it (human review, 22 November)
+        txid, raw, claim, decoded, why = self._read(payment)
+        if why is None:
+            with self.lock:
+                rec = self.known.get(txid)
             if rec is not None:
                 if not self._owner(rec, claim) or (rec["state"] == DELIVERED and self.clock() - rec["at"] > self.redeliver):
                     why = "transaction_already_used"
@@ -259,7 +282,7 @@ class Facilitator:
                     why = "invalid_payment_requirements"
                 else:
                     why = self._matches(payment, decoded, rec["wanted"])[1] or self._covers(rec, wanted)
-            elif why is None:
+            else:
                 why = self._matches(payment, decoded, wanted)[1]
                 if why is None and self._need(wanted) and claim is None:
                     why = "claim_required"
@@ -283,58 +306,73 @@ class Facilitator:
         return done
 
     def _settle(self, payment, wanted):
+        # The node is asked outside the lock (human review, 22 November): under it only self.known and the file are
+        # read and written, so that one caller who floods or a node that is slow holds up nobody else. A payment is
+        # still written down before the node has it, and once: who comes second finds it written.
+        txid, raw, claim, decoded, why = self._read(payment)
+        if why is not None:
+            return self._fail(why, txid)
+        now = self.clock()
         with self.lock:
-            txid, raw, claim, decoded, why = self._read(payment)
+            rec = self.known.get(txid)
+        made = False
+        if rec is None:
+            vout, why = self._matches(payment, decoded, wanted)
             if why is not None:
                 return self._fail(why, txid)
-            now = self.clock()
-            rec = self.known.get(txid)
-            if rec is None:
-                vout, why = self._matches(payment, decoded, wanted)
-                if why is not None:
-                    return self._fail(why, txid)
-                need = self._need(wanted)
-                if need and claim is None:
-                    return self._fail("claim_required", txid)
-                if self._full():
-                    return self._fail("settlement_failed", txid)        # it takes no new payment now; ask again later
-                if not self._node_takes(raw):
-                    return self._fail("transaction_refused_by_node", txid)
-                rec = {"txid": txid, "claim": mark(claim) if claim else None, "vout": vout, "need": need,
-                       "resource": self._resource(payment, wanted),
-                       "wanted": {k: wanted[k] for k in KEYS}, "state": WAITING, "at": int(now)}
-                self._keep(rec)                         # kept before the node has it: never sold twice
+            need = self._need(wanted)
+            if need and claim is None:
+                return self._fail("claim_required", txid)
+            if self._full():
+                return self._fail("settlement_failed", txid)            # it takes no new payment now; ask again later
+            if not self._node_takes(raw):
+                return self._fail("transaction_refused_by_node", txid)
+            with self.lock:
+                rec = self.known.get(txid)                              # another request may have written it meanwhile
+                if rec is None:
+                    if self._full():
+                        return self._fail("settlement_failed", txid)
+                    rec = {"txid": txid, "claim": mark(claim) if claim else None, "vout": vout, "need": need,
+                           "resource": self._resource(payment, wanted),
+                           "wanted": {k: wanted[k] for k in KEYS}, "state": WAITING, "at": int(now)}
+                    self._keep(rec)                     # kept before the node has it: never sold twice
+                    made = True
+            if made:
                 try:
                     self.node.call("sendrawtransaction", raw)
                 except Exception as e:
                     if "already" not in str(e).lower():
                         return self._fail("settlement_failed", txid)
-            else:
-                if not self._owner(rec, claim):
-                    return self._fail("transaction_already_used", txid)
-                # shown again: it is held to what was asked when it was made, not to today's price
-                if (self._matches(payment, decoded, rec["wanted"])[1] is not None or self._covers(rec, wanted)
-                        or rec.get("resource") != self._resource(payment, wanted)):
-                    return self._fail("invalid_payment_requirements", txid)
-                if rec["state"] == DELIVERED:
-                    if now - rec["at"] <= self.redeliver:
-                        return dict(self._ok(txid), redelivered=True)       # the same answer again, not a new sale
-                    return self._fail("transaction_already_used", txid)
-            need = max(rec.get("need", 0), self._need(wanted))
-            if need:
-                depth = self._depth(txid, rec["vout"])
-                if depth is None:
-                    try:
-                        self.node.call("sendrawtransaction", raw)       # the node may have let it go; it is given again
-                    except Exception:
-                        pass
-                    depth = self._depth(txid, rec["vout"])
-                if depth is None:
-                    return self._fail("payment_not_found", txid)        # another transaction took its coins
-                if depth < need:
-                    return self._fail(AWAITING, txid, confirmations=depth, required=need)
+        if not made:
+            if not self._owner(rec, claim):
+                return self._fail("transaction_already_used", txid)
+            # shown again: it is held to what was asked when it was made, not to today's price
+            if (self._matches(payment, decoded, rec["wanted"])[1] is not None or self._covers(rec, wanted)
+                    or rec.get("resource") != self._resource(payment, wanted)):
+                return self._fail("invalid_payment_requirements", txid)
+            if rec["state"] == DELIVERED:
+                if now - rec["at"] <= self.redeliver:
+                    return dict(self._ok(txid), redelivered=True)       # the same answer again, not a new sale
+                return self._fail("transaction_already_used", txid)
+        need = max(rec.get("need", 0), self._need(wanted))
+        if need:
+            depth = self._depth(txid, rec["vout"], since=rec.get("at"))
+            if depth is None:
+                try:
+                    self.node.call("sendrawtransaction", raw)       # the node may have let it go; it is given again
+                except Exception:
+                    pass
+                depth = self._depth(txid, rec["vout"], since=rec.get("at"))
+            if depth is None:
+                return self._fail("payment_not_found", txid)        # another transaction took its coins
+            if depth < need:
+                return self._fail(AWAITING, txid, confirmations=depth, required=need)
+        with self.lock:
+            last = self.known.get(txid)
+            if last is not None and last["state"] == DELIVERED:
+                return dict(self._ok(txid), redelivered=True)       # another request with the same claim was first
             self._keep(dict(rec, state=DELIVERED, at=int(now)))
-            return self._ok(txid)
+        return self._ok(txid)
 
 
 class RemoteFacilitator:
@@ -378,79 +416,10 @@ class RemoteFacilitator:
             return {"success": False, "errorReason": "unexpected_settle_error", "transaction": "", "network": self.network, "payer": None}
 
 
-class Bounded(ThreadingHTTPServer):
-    """An HTTP server that takes a set number of connections at once; one more is closed without an answer."""
-
-    daemon_threads = True
-
-    def __init__(self, address, handler, most=64):
-        self.slots = threading.BoundedSemaphore(most)
-        super().__init__(address, handler)
-
-    def process_request(self, request, client_address):
-        if not self.slots.acquire(blocking=False):
-            self.shutdown_request(request)
-            return
-        try:
-            super().process_request(request, client_address)
-        except Exception:
-            self.slots.release()
-            raise
-
-    def process_request_thread(self, request, client_address):
-        try:
-            super().process_request_thread(request, client_address)
-        finally:
-            self.slots.release()
-
-
 def caller(address):
-    """Whom a request counts against: its address, and for IPv6 the /64 it is in, which one machine may hold whole."""
-    try:
-        ip = ipaddress.ip_address(address)
-    except ValueError:
-        return address[:64]
-    if ip.version == 6:
-        if ip.ipv4_mapped is not None:
-            return str(ip.ipv4_mapped)
-        return str(ipaddress.ip_network((ip, 64), strict=False))
-    return str(ip)
-
-
-class Limiter:
-    """At most `per_minute` requests a minute from one caller, and ten times that from all of them together: a
-    bucket each, refilled evenly. A caller is forgotten a minute after its last request, when its bucket is full
-    again; none is written down. For a facilitator that serves sellers from outside."""
-
-    def __init__(self, per_minute, clock=time.monotonic, most_callers=10000):
-        if not 1 <= per_minute <= 600:
-            raise ValueError("per_minute is 1 to 600")
-        self.per_minute, self.clock, self.most = per_minute, clock, most_callers
-        self.buckets = {}               # caller -> (tokens, when)
-        self.all = (float(per_minute * 10), clock())
-        self.swept = clock()
-        self.lock = threading.Lock()
-
-    @staticmethod
-    def _take(held, rate, size, now):
-        tokens = min(float(size), held[0] + (now - held[1]) * rate)
-        if tokens < 1:
-            return False, (tokens, now)
-        return True, (tokens - 1, now)
-
-    def take(self, who):
-        with self.lock:
-            now, rate = self.clock(), self.per_minute / 60.0
-            if now - self.swept >= 60 or (who not in self.buckets and len(self.buckets) >= self.most):
-                self.buckets = {k: v for k, v in self.buckets.items() if now - v[1] < 60}   # full again: nothing lost
-                self.swept = now
-                if who not in self.buckets and len(self.buckets) >= self.most:
-                    return False
-            ok, self.buckets[who] = self._take(self.buckets.get(who, (float(self.per_minute), now)), rate, self.per_minute, now)
-            if not ok:
-                return False
-            ok, self.all = self._take(self.all, rate * 10, self.per_minute * 10, now)
-            return ok
+    """Whom a request to a facilitator for sellers from outside counts against: its address, and for IPv6 the /64
+    it is in, which one machine may hold whole."""
+    return place(address, 64)
 
 
 def facilitator_server(facilitator, listen=("127.0.0.1", 0), most=64, public=False, per_minute=60, clock=time.monotonic):
@@ -502,9 +471,7 @@ def facilitator_server(facilitator, listen=("127.0.0.1", 0), most=64, public=Fal
         def client(self):
             # behind the web server the last entry of the last X-Forwarded-For is the address it saw; whatever the
             # caller wrote before it counts for nothing
-            said = self.headers.get_all("X-Forwarded-For") or []
-            last = said[-1].split(",")[-1].strip() if said else ""
-            return caller(last or self.client_address[0])
+            return caller(forwarded(self) or self.client_address[0])
 
         def do_POST(self):
             settle = self.path == "/settle"
@@ -527,7 +494,7 @@ def facilitator_server(facilitator, listen=("127.0.0.1", 0), most=64, public=Fal
                 payment, wanted = body["paymentPayload"], body["paymentRequirements"]
                 if not isinstance(payment, dict) or not isinstance(wanted, dict):
                     raise ValueError
-            except (ValueError, KeyError, TypeError, UnicodeDecodeError):
+            except (ValueError, KeyError, TypeError, UnicodeDecodeError, RecursionError):
                 return self.send(400, {"error": "a JSON object with paymentPayload and paymentRequirements"})
             why = None
             if wanted.get("scheme") != "exact" or wanted.get("asset") != ASSET:
@@ -537,7 +504,7 @@ def facilitator_server(facilitator, listen=("127.0.0.1", 0), most=64, public=Fal
             else:
                 amount, pay_to = wanted.get("amount"), wanted.get("payTo")
                 try:
-                    if not isinstance(amount, str) or not amount.isdigit() or not 0 < int(amount) < 10 ** 17 or not isinstance(pay_to, str):
+                    if not digits(amount) or not 0 < int(amount) < 10 ** 17 or not isinstance(pay_to, str):
                         raise BadInput("amount")
                     script_for_address(facilitator.chain, pay_to)
                 except BadInput:
@@ -621,7 +588,40 @@ def paywall(facilitator, price, pay_to, content, content_type="text/plain; chars
 
 # ------------------------------------------------------------------------------------------------ the buyer
 
-BOOK = threading.Lock()
+_BOOK_LOCK = threading.Lock()
+
+
+class BOOK:
+    """with BOOK(wallet): the buyer's book is changed by one at a time: one thread of this process (a lock) and one
+    process (a lock on a file beside the book), so that the command line and an MCP server of the same wallet never
+    write over each other's lots (human review, 22 November). Where there is no fcntl, the lock of this process only."""
+
+    def __init__(self, wallet):
+        self.path, self.fd = os.path.join(wallet.folder, PENDING + ".lock"), None
+
+    def __enter__(self):
+        _BOOK_LOCK.acquire()
+        try:
+            import fcntl
+            self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+            fcntl.flock(self.fd, fcntl.LOCK_EX)
+        except ImportError:
+            self.fd = None
+        except BaseException:
+            if self.fd is not None:
+                os.close(self.fd)
+                self.fd = None
+            _BOOK_LOCK.release()
+            raise
+        return self
+
+    def __exit__(self, *exc):
+        try:
+            if self.fd is not None:
+                os.close(self.fd)               # closing lets the lock go
+                self.fd = None
+        finally:
+            _BOOK_LOCK.release()
 
 
 def _book(wallet):
@@ -679,13 +679,25 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
             return None
     opener = urllib.request.build_opener(Stay)
 
+    def read(r):
+        # at most 2 MB, and within the time: a server that sends a byte now and then cannot hold the buyer (human review)
+        until, got = clock() + 2 * timeout, b""
+        while len(got) < 2_000_000:
+            chunk = r.read1(65536)
+            if not chunk:
+                break
+            got += chunk
+            if clock() > until:
+                raise Refused("X402", "the answer took longer than %d seconds" % (2 * timeout))
+        return got[:2_000_000]
+
     def get(headers):
         req = urllib.request.Request(url, headers=dict(headers, **{"User-Agent": "polarka-agent"}))
         try:
             with opener.open(req, timeout=timeout) as r:
-                return r.status, r.headers, r.read(2_000_000)          # headers are looked up whatever their case
+                return r.status, r.headers, read(r)            # headers are looked up whatever their case
         except urllib.error.HTTPError as e:
-            return e.code, e.headers, e.read(2_000_000)
+            return e.code, e.headers, read(e)
 
     def told(headers):
         try:
@@ -695,16 +707,16 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
 
     def calls_left(headers):
         left = headers.get("X-Postage-Calls-Left")
-        return int(left) if isinstance(left, str) and left.isdigit() else None
+        return int(left) if digits(left, 12) else None
 
-    with BOOK:
+    with BOOK(wallet):
         book = _book(wallet)
     held, lot = book["pending"].get(url), book["lots"].get(origin)
     if held is None:
         status, headers, body = get({"X-Postage": lot["claim"]} if lot else {})
         if lot:
             left = calls_left(headers)
-            with BOOK:
+            with BOOK(wallet):
                 book = _book(wallet)
                 if (status == 402 and left is None) or left == 0:
                     _next_lot(book, origin)                 # used up, or the gate no longer knows it
@@ -726,6 +738,8 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
             raise Refused("X402", "the resource does not take NORTH on this chain (%s)" % network)
         offer = offers[0]
         try:
+            if not digits(offer["amount"]):         # the amount is text of digits, as x402 writes it, never a number
+                raise ValueError("amount")
             amount = int(offer["amount"])
             script_for_address(wallet.chain, offer["payTo"])
         except (KeyError, ValueError, TypeError, BadInput):
@@ -740,7 +754,7 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
         if isinstance(ext, dict) and len(json.dumps(ext)) <= 16384:
             payment["extensions"] = ext                 # echoed, as x402 asks of a buyer (the bazaar catalogs from it)
         held = {"header": b64json(payment), "txid": made["id"], "amount": amount, "claim": claim, "made": int(clock())}
-        with BOOK:                                  # kept before the seller sees it: one payment for one resource
+        with BOOK(wallet):                          # kept before the seller sees it: one payment for one resource
             book = _book(wallet)
             book["pending"][url] = held
             _keep_book(wallet, book)
@@ -751,11 +765,13 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
     while True:
         status, headers, body = get({"PAYMENT-SIGNATURE": held["header"]})
         settled = told(headers)
-        if not (status == 202 and settled and settled.get("errorReason") == AWAITING):
+        # 202: the seller waits for a block; 503: the seller's facilitator could not settle just now. Both are asked
+        # again, with the same payment, within `wait` (human review, 22 November)
+        if not ((status == 202 and settled and settled.get("errorReason") == AWAITING) or status == 503):
             break
         left = wait - (clock() - start)
         if left <= 0:
-            return {"status": 202, "paid": north(held["amount"]), "txid": held["txid"], "settlement": settled, "body": b"",
+            return {"status": status, "paid": north(held["amount"]), "txid": held["txid"], "settlement": settled, "body": b"",
                     "pending": True, "then": "the seller waits for the payment to be in a block; ask for the same url again "
                                              "later, nothing is paid twice"}
         try:
@@ -763,7 +779,7 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
         except ValueError:
             retry = 20
         sleep(max(0, min(max(retry, 5), 60, left)))
-    with BOOK:
+    with BOOK(wallet):
         book = _book(wallet)
         paid = bool(settled and settled.get("success"))
         final = paid or status == 400 or (status == 402 and (settled is None or settled.get("errorReason") not in AGAIN + (AWAITING,)))

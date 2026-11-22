@@ -182,8 +182,10 @@ class RulesTest(unittest.TestCase):
         change_script = self.w._journal()[paid["id"]]["outputs"][-1][0]
         seen = self.w.look()
         self.assertEqual(seen["window"], 200)
-        self.assertEqual(change_script, self.w.account.script(1, 199).hex())
-        self.assertIn(self.w.account.address(1, 199), seen["addresses"])
+        # at the end of the window the keys of the window are used again in turn, the first payment's change on the
+        # first key, not every payment's on the last (human review, 22 November)
+        self.assertEqual(change_script, self.w.account.script(1, 0).hex())
+        self.assertIn(self.w.account.address(1, 0), seen["addresses"])
 
     def test_no_address_is_handed_out_that_is_not_looked_at(self):
         for i in range(200):
