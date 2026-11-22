@@ -74,12 +74,13 @@ with the wallet in `/Library/Application Support/PolarkaSigner/wallet` and the s
 The program the service runs is installed where only root can change it (on macOS with Apple's own Python), from PyPI
 at the version the script names, or from a wheel named with `--wheel`, used only if its SHA-256 is still the one it
 had when the script was printed. The script runs in an empty environment, so that nothing of the account that ran
-sudo reaches root's Python and pip. It makes a new wallet in the service and shows its words once. `--move-from
-FOLDER` moves an existing one instead, reading only plain files and as the agent's user; but an agent that could read
-that wallet may know its words, so the whole of the gain is a new wallet and the coins paid over to it. `--check`
-looks, as the agent's user, at the socket, the service, who may open its folder, who may change `limits.json`, the
-program and every place it takes modules from, and whether that user can administer the machine. Run it with the
-service's own Python, as above: a copy that the agent can change could say anything.
+sudo reaches root's Python and pip; behind a proxy, pip finds it only in root's own settings (`/etc/pip.conf`, on
+macOS `/Library/Application Support/pip/pip.conf`). It makes a new wallet in the service and shows its words
+once. `--move-from FOLDER` moves an existing one instead, reading only plain files and as the agent's user; but an
+agent that could read that wallet may know its words, so the whole of the gain is a new wallet and the coins paid
+over to it. `--check` looks, as the agent's user, at the socket, the service, who may open its folder, who may
+change `limits.json`, the program and every place it takes modules from, and whether that user can administer the
+machine. Run it with the service's own Python, as above: a copy that the agent can change could say anything.
 
 It keeps nothing from an agent whose user can administer the machine (sudo with a password or without, admin,
 docker and the like: such an agent can wait for its owner's password), nor on a machine that someone else took over;

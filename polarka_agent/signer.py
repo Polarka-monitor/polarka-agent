@@ -586,7 +586,8 @@ PLIST = """<?xml version="1.0" encoding="UTF-8"?>
 # filled in (a folder's name, say) is read again as a piece (review 10, L2).
 
 CLEAN = """# A clean start: nothing of the account that ran sudo (its HOME, its PATH, PYTHON* and PIP_* settings) reaches
-# root's Python and pip. The file is read again under an empty environment (review 10, H3).
+# root's Python and pip. The file is read again under an empty environment (review 10, H3). Behind a proxy, pip finds
+# it in root's own settings only: /etc/pip.conf, on macOS /Library/Application Support/pip/pip.conf.
 if [ "${POLARKA_SIGNER_SETUP:-}" != clean ]; then
   [ -f "$0" ] || { echo "run it from its file: sudo sh FILE" >&2; exit 1; }
   exec /usr/bin/env -i POLARKA_SIGNER_SETUP=clean HOME=@ROOT_HOME@ PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C /bin/sh "$0"

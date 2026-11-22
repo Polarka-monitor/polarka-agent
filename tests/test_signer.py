@@ -506,8 +506,9 @@ class ApartOnLinux(unittest.TestCase):
                          "--service-dir", self.folder, "--venv", os.path.join(self.base, "no-venv"))
         done = json.loads(r.stdout)
         self.assertEqual({c["check"]: c["ok"] for c in done["checks"]},
-                         {"socket": True, "service": True, "folder": True, "limits": True, "words": True, "program": None, "sudo": True})
-        self.assertTrue(done["ok"])
+                         {"socket": True, "service": True, "folder": True, "limits": True, "words": True, "program": None,
+                          "admin": True, "sudo": True})
+        self.assertFalse(done["ok"])        # there is no program here to look at, and that is not in order (review 10, L1)
 
     def test_3_a_user_outside_the_group_cannot_ask(self):
         r = self.as_user("pst-other", "--dir", self.base, "--signer", self.sock, "limits")

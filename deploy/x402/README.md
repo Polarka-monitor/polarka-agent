@@ -47,7 +47,8 @@ IPv4 address, an IPv6 /48) brings at most a twentieth of that in a day: `/verify
 Its folder then wants looking at.
 
 What these bounds do not stop (review 10, M2): a sender with many addresses in many places can still use up the
-requests of all together, and twenty places can fill what is kept, at the price of the fees of the payments they
+requests of all together (five IPv6 /48s are enough: each has a hundred and twenty requests a minute, all of them
+together six hundred), and twenty places can fill what is kept, at the price of the fees of the payments they
 bring. A payment it already has is counted like any other request, so while that lasts it waits too. The bounds
 keep the node and the gate's own facilitator out of it; they do not make this one always available.
 
