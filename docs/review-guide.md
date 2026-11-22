@@ -11,6 +11,7 @@ plus the services that run beside it on one public server:
 | Part | File | Runs where | Holds coins |
 |---|---|---|---|
 | Wallet, CLI, MCP tools | `wallet.py`, `cli.py`, `mcp.py`, `keys.py`, `tx.py`, `server.py` | the agent's machine | yes, the agent's own, within `limits.json` |
+| Signing service (from 0.2.3) | `signer.py`; in `cli.py` `--signer`, `signer-serve`, `signer-setup` | the agent's machine, as a user of its own | yes, the agent's own, within `limits.json` |
 | x402 payments in NORTH | `x402.py`, `bazaar.py` | buyer: agent; seller/facilitator: server | buyer pays; facilitator holds none |
 | Postage gate | `postage.py` | server, public behind Caddy | its wallet only receives |
 | Stamps service | `stamps.py` | server, loopback | a small fee wallet |
@@ -30,13 +31,19 @@ Specification draft for x402: `docs/x402-scheme-exact-bip122.md` (also open as x
    sends may reach the gate's own facilitator, its payments or its catalog; an X-Forwarded-For the caller writes
    must count for nothing; the bounds must hold for a machine with a whole IPv6 /64; a full facilitator must
    take no new payment and still settle the ones it has.
-3. `x402.py`, `fetch`: an agent must never pay twice for one resource, nor more than `most`, nor send its
+3. New on main, not yet reviewed: `signer.py`, the signing service (the first review's F4, review 8's M4). The
+   agent's user must reach neither the words nor `limits.json`, and through the socket only the wallet's own
+   operations, under the wallet's rules; a caller that holds a connection or sends too much holds nothing long.
+   Then the scripts `signer-setup` prints (the users and groups, the program installed where only root can change
+   it, the systemd unit and the LaunchDaemon) and what `--check` concludes. Tests: `tests/test_signer.py`, part of
+   them as root on Linux with real users (`POLARKA_TEST_USERS=1`).
+4. `x402.py`, `fetch`: an agent must never pay twice for one resource, nor more than `most`, nor send its
    payment anywhere but the URL asked.
-4. `postage.py`, `Gate.x402_pay` and the handler: a lot of calls must not be had without a confirmed payment.
-5. `payout.py` and `pool.py`: the pool pays for shares; caps, surplus sweep, what happens on restart.
-6. `stamps.py`, `parse_tx`, `parse_txoutproof`, `check`, `verify`: a forged proof must not verify; the
+5. `postage.py`, `Gate.x402_pay` and the handler: a lot of calls must not be had without a confirmed payment.
+6. `payout.py` and `pool.py`: the pool pays for shares; caps, surplus sweep, what happens on restart.
+7. `stamps.py`, `parse_tx`, `parse_txoutproof`, `check`, `verify`: a forged proof must not verify; the
    block scan must survive reorganizations.
-7. `wallet.py`, `pay` and `_send`: limits, the journal written before anything leaves, an open payment
+8. `wallet.py`, `pay` and `_send`: limits, the journal written before anything leaves, an open payment
    standing against the next one.
 
 ## What has been checked, and by whom
@@ -79,7 +86,8 @@ One review by a person, and before it five by AI models that did not write the c
   (`keepalive off`, tried against Caddy 2.11.9). Also fixed: M3 (a search costs little whatever it asks), L2 (an
   offer needs a route), L3 (the filters), M5 and parts of L8 (texts), and in the deployment M2 (node.polarka.org has
   a walletd of its own, with an RPC user allowed only its calls). All of it is in 0.2.2. Open: M4 (the bounds hold
-  against MCP-only programs, and most MCP hosts also give file tools; the texts and the registry entry say so), L1
+  against MCP-only programs, and most MCP hosts also give file tools; the texts and the registry entry say so; a
+  signing service for it is on main since 22 November, for 0.2.3: item 3 above), L1
   (a payment shown again after a gate restart can be refused; mended on main on 22 November, not yet released), L4
   (stamps storage grows), I2 to I6. Fixed later on 21 November: L5 (the pool and its wallet server have RPC users of
   their own; the facts service runs as a user of its own; polarka-usage keeps only the right to read and opens no
@@ -105,7 +113,7 @@ One review by a person, and before it five by AI models that did not write the c
 
 Review 9 read the fixes of review 8 and found them sound. Nobody but its author has read the fixes of review 9.
 Nor the facilitator for sellers from outside (item 2 above), on main since 22 November; it opens only with
-0.2.3, after review 10.
+0.2.3, after review 10. Nor the signing service (item 3), on main since 22 November for 0.2.3.
 
 Their reports can be had on request. Low findings that are still open are listed in them. Earlier parts of the
 project (wallet, pool) went through four further AI reviews. No person outside has read the code.
@@ -114,7 +122,9 @@ project (wallet, pool) went through four further AI reviews. No person outside h
 
     git clone https://github.com/Polarka-monitor/polarka-agent && cd polarka-agent   # or the copy you were given
     # a TrueNorth Core build (truenorthd, truenorth-cli) in a folder; tests start their own regtest node
-    TN_BIN=/path/to/bin python3 -m unittest discover -s tests -t .      # about 5 minutes, 276 tests
+    TN_BIN=/path/to/bin python3 -m unittest discover -s tests -t .      # about 6 minutes, 290 tests
+    # as root on Linux, the signing service with real users of the system (it makes and removes three):
+    sudo POLARKA_TEST_USERS=1 python3 -m unittest tests.test_signer.ApartOnLinux
 
 Without `TN_BIN` the tests that need a node are skipped. To check a stamp from the main chain:
 
@@ -129,7 +139,8 @@ Caddy is in front of the gate, the faucet, the pool, polarka.org and a wallet se
 second facilitator, for sellers from outside, gets `/facilitator/{supported,verify,settle}` there: a process
 apart, with a folder of its own, bounds on requests and on payments kept, and no catalog. Buyers are
 programs with a spending limit set by their owner in a file the program cannot change while it has the MCP tools
-only. Miners are anybody: the pool is open and pays any address since 21 November 2026. NORTH has no market price
+only, or, with the signing service (from 0.2.3), whatever it can run as its own user short of becoming root.
+Miners are anybody: the pool is open and pays any address since 21 November 2026. NORTH has no market price
 today; the money at risk is the pool's reserve (5000 NORTH, at most 10,000 paid out a day), the faucet's and the
 stamps' small wallets, and every buyer's limit. The chain is a Bitcoin Core 30 fork: waiting transactions are
 replaced by fee. How the parts work together, and who sees what: `docs/how-it-works.md`.

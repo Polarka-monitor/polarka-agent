@@ -47,22 +47,26 @@ def wait_for(wallet, address, amount, confirmations=1, timeout=600, every=15, sl
         sleep(every)
 
 
-def start(folder, a, say=lambda event: sys.stderr.write(json.dumps(event) + "\n")):
+def start(folder, a, say=lambda event: sys.stderr.write(json.dumps(event) + "\n"), wallet=None):
     """The `start` command: what an agent needs to begin, each step said as it is done. Mining goes on until
-    --seconds or for ever; the summary comes when it ends."""
+    --seconds or for ever; the summary comes when it ends. With wallet (a signing service) no wallet is made here."""
     if not 1 <= a.threads <= 256:
         raise Refused("INPUT", "--threads is 1 to 256")
-    made = not os.path.exists(os.path.join(folder, "wallet.json"))
-    if made:
-        Wallet.create(folder, "main", DEFAULT_SERVER)
-    wallet = Wallet(folder)
+    if wallet is None:
+        made = not os.path.exists(os.path.join(folder, "wallet.json"))
+        if made:
+            Wallet.create(folder, "main", DEFAULT_SERVER)
+        wallet = Wallet(folder)
+        note = ("The recovery words are in wallet.json in that folder; whoever reads that file can spend. Keep a copy "
+                "somewhere else. The wallet pays nothing until its owner writes limits.json.")
+    else:
+        made, note = False, "The wallet is the signing service's: its words and its limits are kept by the service, not here."
     if wallet.chain != "main":
-        raise Refused("CHAIN", "the wallet in --dir is not of the main chain")
-    address = wallet.account.address(0, 0)      # one address the agent keeps, rather than a new one each time
+        raise Refused("CHAIN", "the wallet is not of the main chain")
+    # one address the agent keeps, rather than a new one each time
+    address = wallet.first_address() if hasattr(wallet, "first_address") else wallet.account.address(0, 0)
     done = {"folder": folder, "address": address, "wallet_made": made}
-    say({"event": "wallet", "made": made, "folder": folder, "address": address,
-         "note": "The recovery words are in wallet.json in that folder; whoever reads that file can spend. Keep a copy "
-                 "somewhere else. The wallet pays nothing until its owner writes limits.json."})
+    say({"event": "wallet", "made": made, "folder": folder, "address": address, "note": note})
     if not a.no_faucet:
         from .faucet import ask
         try:
@@ -89,6 +93,9 @@ def run(argv=None, out=sys.stdout):
     p = argparse.ArgumentParser(prog="polarka-agent", description="A TrueNorth (NORTH) wallet that a program can use.")
     p.add_argument("--version", action="version", version=__version__)
     p.add_argument("--dir", default=os.environ.get("POLARKA_AGENT_DIR", "~/.polarka-agent/default"), help="the wallet's folder")
+    p.add_argument("--signer", default=os.environ.get("POLARKA_SIGNER") or None, metavar="SOCKET",
+                   help="ask the signing service at this socket (signer-serve) in place of a wallet in --dir: the words and "
+                        "the limits stay with the service, and --dir keeps only this program's own records (also POLARKA_SIGNER)")
     sub = p.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("new", help="make a wallet, or bring one back from its words")
     c.add_argument("--chain", required=True, choices=("main", "regtest"))
@@ -134,6 +141,27 @@ def run(argv=None, out=sys.stdout):
     c = sub.add_parser("mcp", help="serve the wallet to an agent over the Model Context Protocol (standard input and output)")
     c.add_argument("--allow-local", action="store_true", help="let the agent's tools reach plain http on this machine and "
                    "addresses of its network (for a test service of your own); without it they reach public https only")
+    c.add_argument("--signer", dest="mcp_signer", metavar="SOCKET", help="the same as --signer before the command")
+    c = sub.add_parser("signer-serve", help="be the signing service: hold the wallet in --dir, a folder of this user's alone, "
+                                            "and pay for the agents that ask over --socket, within its limits.json")
+    c.add_argument("--socket", required=True, help="the socket, in a folder that only this user (or root) may write")
+    c.add_argument("--group", help="the group whose members may ask (the socket is then 660 for it); without it this user only")
+    c = sub.add_parser("signer-setup", help="print a script that sets up a signing service on this system (Linux with systemd, "
+                                            "or macOS), for its owner to read and run as root; with --check, look at one "
+                                            "that is set up, as the agent's user. Without --check this prints a script, not JSON")
+    c.add_argument("--agent-user", help="the user the agent runs as, who may ask the service (default: this user)")
+    c.add_argument("--move-from", metavar="FOLDER", help="move the wallet of this folder to the service; without it a new "
+                   "wallet is made there")
+    c.add_argument("--per-payment", help="NORTH the service may pay by itself at once (with --per-day; without them it pays "
+                   "nothing until limits.json is written)")
+    c.add_argument("--per-day", help="NORTH the service may pay by itself in a day")
+    c.add_argument("--package", help="what pip installs for the service (default: polarka-agent==%s)" % __version__)
+    c.add_argument("--system", choices=("linux", "macos"), help="default: this system")
+    c.add_argument("--check", action="store_true", help="look at the service as this user: its socket, that this user "
+                   "cannot open the words, who may change the program it runs, sudo without a password")
+    c.add_argument("--socket", help="with --check: the socket (default: where the script puts it)")
+    c.add_argument("--service-dir", help="with --check: the service's folder")
+    c.add_argument("--venv", help="with --check: the folder of the program the service runs")
     c = sub.add_parser("faucet", help="ask a faucet for a first coin, to a fresh address of this wallet")
     c.add_argument("url")
     c.add_argument("--max-bits", type=int, default=24, help="the most work done for it, in zero bits (24 is about ten seconds of one core)")
@@ -230,12 +258,32 @@ def run(argv=None, out=sys.stdout):
     c.add_argument("--surplus-every", type=int, default=21600, help="seconds between two payments to --surplus-to, at least")
     a = p.parse_args(argv)
     folder = os.path.expanduser(a.dir)
+    signer = getattr(a, "mcp_signer", None) or a.signer
 
     def show(result, status=0):
         out.write(json.dumps(result, indent=1) + "\n")
         return status
 
     try:
+        if a.cmd == "signer-serve":
+            from .signer import start as signer_start
+            if signer:
+                raise Refused("INPUT", "the signing service holds its own wallet in --dir; it is not run through another (--signer)")
+            listening = signer_start(folder, a.socket, a.group)
+            sys.stderr.write("signing service for the wallet in %s, at %s, for %s\n"
+                             % (folder, listening.path, "the group %s" % a.group if a.group else "this user only"))
+            return listening.run()
+        if a.cmd == "signer-setup":
+            from .signer import check, setup_script
+            if a.check:
+                done = check(a.socket, a.service_dir and os.path.expanduser(a.service_dir), a.venv and os.path.expanduser(a.venv), a.system)
+                return show(done, 0 if done["ok"] else 2)
+            import getpass
+            out.write(setup_script(a.system, a.agent_user or getpass.getuser(), a.move_from, a.per_payment, a.per_day, a.package))
+            return 0
+        if signer and a.cmd in ("new", "forget", "postage-serve", "stamps-serve", "faucet-serve", "pool-serve"):
+            raise Refused("SIGNER", "%s works on a wallet's own folder, not through a signing service: run it as the service's "
+                                    "user on the service's folder (polarka-agent signer-setup shows where it is)" % a.cmd)
         if a.cmd == "new":
             server = a.server or (DEFAULT_SERVER if a.chain == "main" else None)
             if server is None:
@@ -252,6 +300,9 @@ def run(argv=None, out=sys.stdout):
                          "note": "Write the words on paper now. They are the wallet. They are also in wallet.json, which only you may read; "
                                  "whoever reads that file can spend. The wallet pays nothing until you write limits.json."})
         if a.cmd == "start":
+            if signer:
+                from .signer import Signer
+                return show(start(folder, a, wallet=Signer(signer, folder)))
             return show(start(folder, a))
         if a.cmd == "build-rx":
             from .rx import build
@@ -349,14 +400,26 @@ def run(argv=None, out=sys.stdout):
                                 ", at most %d payments kept" % most_payments if most_payments is not None else ""))
             server.serve_forever()
             return 0
-        if a.cmd == "mcp" and not os.path.exists(os.path.join(folder, "wallet.json")):
-            # an agent that is given this server from a registry starts with no wallet: it gets one on main, which
-            # pays nothing until its owner writes limits.json, as `start` does
-            Wallet.create(folder, "main", DEFAULT_SERVER)
-            sys.stderr.write(json.dumps({"event": "wallet", "made": True, "folder": folder,
-                                         "note": "The recovery words are in wallet.json in that folder; whoever reads that "
-                                                 "file can spend. The wallet pays nothing until its owner writes limits.json."}) + "\n")
-        wallet = Wallet(folder)
+        if signer:
+            from .signer import Signer
+            if a.cmd in ("mcp", "fetch"):
+                os.makedirs(folder, mode=0o700, exist_ok=True)      # this program's own records: x402 payments under way
+            wallet = Signer(signer, folder)
+        else:
+            if a.cmd == "mcp" and not os.path.exists(os.path.join(folder, "wallet.json")):
+                # an agent that is given this server from a registry starts with no wallet: it gets one on main, which
+                # pays nothing until its owner writes limits.json, as `start` does
+                Wallet.create(folder, "main", DEFAULT_SERVER)
+                sys.stderr.write(json.dumps({"event": "wallet", "made": True, "folder": folder,
+                                             "note": "The recovery words are in wallet.json in that folder; whoever reads that "
+                                                     "file can spend. The wallet pays nothing until its owner writes limits.json."}) + "\n")
+            wallet = Wallet(folder)
+            if a.cmd == "mcp":
+                # said to the owner, in the agent host's log: the limits hold for the agent's tools, not for its shell
+                sys.stderr.write(json.dumps({"event": "words_open", "folder": folder,
+                                             "note": "The words of this wallet are in a file that this user can read. An agent that "
+                                                     "can run commands as this user can read them and pay past every limit. A "
+                                                     "signing service keeps them apart: see polarka-agent signer-setup --help."}) + "\n")
         if a.cmd == "mcp":
             from .mcp import serve
             return serve(wallet, allow_local=a.allow_local)

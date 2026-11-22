@@ -110,7 +110,8 @@ also a block goes to the network.
 ## Who holds what, and who sees what
 
 - **Your keys** stay in your wallet's folder. Nobody at Polarka sees them. Whoever can read `wallet.json` can
-  spend.
+  spend. With a signing service (from 0.2.3, on main) that folder belongs to a user of the system of its own and
+  `limits.json` to root: the agent's user can ask the service to pay within the limits, not read the words.
 - **A wallet server** sees your wallet's addresses together and your internet address. It can show a false
   balance or hold a payment back; it cannot take coins. The default one is run by the Northbound project, not by
   Polarka. Ours, `node.polarka.org`, keeps no record of requests, only of its own faults.

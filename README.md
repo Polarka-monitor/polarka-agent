@@ -14,11 +14,12 @@ at risk, say only that you found something.
 
 It was written with AI models under its author's direction, and its author read it. Independent AI reviewers
 that had not seen it being written read each part and found faults. Every High finding is mended, with tests. Of
-the Medium ones, one is open, found twice (the first review's F4 and review 8's M4: the owner's limits bind a
-program that has only the MCP tools, not one that can also run commands or write files as the same user), and
-review 5's M4 is mended in part (`REVIEW.md`, `docs/review-guide.md`). On 22 November 2026 a programmer, a person,
-read the code and the server's configuration for the first time; what he found is being mended on main and goes
-out with 0.2.3 (`docs/review-guide.md`).
+the Medium ones, review 5's M4 is mended in part, and one was open until 0.2.3, found twice (the first review's F4
+and review 8's M4: the owner's limits bound a program that has only the MCP tools, not one that can also run
+commands or write files as the same user). For it 0.2.3 brings a signing service, which keeps the words and the
+limits under a user of their own; it is on main and not yet reviewed (`REVIEW.md`, `docs/review-guide.md`). On 22
+November 2026 a programmer, a person, read the code and the server's configuration for the first time; what he
+found is being mended on main and goes out with 0.2.3 (`docs/review-guide.md`).
 On the real network it pays since 17 November 2026, and since 20 November it runs a pool, a gate of postage,
 an x402 facilitator and a stamps service at polarka.org. Do not put into it what you cannot lose. It is an
 independent community project, not a product of the TrueNorth developers or of the Northbound project.
@@ -36,9 +37,10 @@ that the tools given to the program cannot change.
   `"fee_rate"`. No command and no tool of the MCP server writes or changes it.
 - Every transaction is written into `journal.jsonl` before anything leaves the machine. Lines are only added.
 - The MCP server has no tool that shows the recovery words, changes the limits or forgets a payment.
-- These bounds hold against a program that reaches the wallet through the MCP server only. A program that
-  can run commands or write files as the same user can change `limits.json`, move the journal away or read
-  the words; against that the wallet does nothing. Give an agent the MCP server, not a shell in that account.
+- With the wallet in a folder of the agent's own user, these bounds hold against a program that reaches it
+  through the MCP server only. A program that can run commands or write files as the same user, as most agents
+  can, can change `limits.json`, move the journal away or read the words. Against that, run the wallet as a
+  signing service under a user of its own (from 0.2.3, on main; next section): the agent's user then only asks.
 - A payment counts into its day whatever became of it; only the owner's `forget` takes one out. A payment
   that another one replaced therefore counts twice for a day.
 - What a wallet server says in words is not passed on to the program: a refusal comes as one of a few fixed
@@ -47,6 +49,33 @@ that the tools given to the program cannot change.
 The recovery words are in `wallet.json`, readable by its owner only (mode 600; the program refuses to work
 with a file that others can read). Whoever can read that file can spend. This is a wallet for small amounts
 on a machine its owner controls.
+
+## The words apart: a signing service (from 0.2.3)
+
+On main, not yet released or reviewed. The wallet runs as a service under a user of the system of its own: its
+folder, with the words and the journal, is that user's alone, and `limits.json` is root's. The agent runs as its
+own user, in a group that may use the service's socket, and asks: what the wallet holds, an address, to pay, to
+stamp. It cannot read the words, change the limits or forget a payment. The rules of paying are the wallet's,
+unchanged, and when the service does not run, the agent pays nothing.
+
+    polarka-agent signer-setup --per-payment 0.1 --per-day 1 > setup.sh    # prints a script: read it
+    sudo sh setup.sh                                                         # the user, the group, the service
+    polarka-agent signer-setup --check                                       # as the agent's user, logged in again
+    polarka-agent --signer SOCKET mcp                                        # or POLARKA_SIGNER=SOCKET
+
+On Linux the service is a systemd unit run as `polarka-signer`, with the wallet in `/var/lib/polarka-signer` and its
+socket at `/run/polarka-signer/signer.sock`. On macOS it is a LaunchDaemon run as a hidden user `_polarkasigner`,
+with the wallet in `/Library/Application Support/PolarkaSigner/wallet` and the socket in `.../PolarkaSigner/run`.
+The program the service runs is installed where only root can change it (on macOS with Apple's own Python), since
+it runs with the words. The script makes a new wallet in the service and shows its words once. `--move-from FOLDER`
+moves an existing one instead; but an agent that could read that wallet may know its words, so the whole of the
+gain is a new wallet and the coins paid over to it. `--check` looks, as the agent's user, at the socket, the
+service, who may open its folder, who may change `limits.json` and the program, and at sudo without a password.
+
+It keeps nothing from an agent whose user can become root or the service's user (sudo without a password, or root
+itself), nor on a machine that someone else took over: then what the wallet holds is at stake, so keep little in
+it. `forget` and making a wallet stay with the owner, run as the service's user on its folder. Without `--signer`
+everything works as before, and the MCP server says in its log that the words can be read by its user.
 
 ## Paying, and a server that says no
 
@@ -95,10 +124,14 @@ faucet with the faults that `docs/faucet-review-0.1.2.md` names.
     python3 -m polarka_agent stamp-verify PROOF.json
     python3 -m polarka_agent --dir FOLDER forget ID
     python3 -m polarka_agent --dir FOLDER mcp
+    python3 -m polarka_agent --signer SOCKET balance | pay ... | fetch ... | mcp      (through a signing service)
+    python3 -m polarka_agent --dir FOLDER signer-serve --socket SOCKET --group GROUP
+    python3 -m polarka_agent signer-setup [--check]
 
-Every command prints one JSON object. Amounts are NORTH, written as text. `new --chain main` takes the public
-server of the Northbound project (`https://api.northboundwallet.org`) unless another is named; that server is
-not run by this project. `new` shows the 12 or 24 words once; `--words-file` brings a wallet back.
+Every command prints one JSON object, but `signer-setup` without `--check`, which prints a script. Amounts are
+NORTH, written as text. `new --chain main` takes the public server of the Northbound project
+(`https://api.northboundwallet.org`) unless another is named; that server is not run by this project. `new` shows
+the 12 or 24 words once; `--words-file` brings a wallet back.
 
 A stamp writes `POLARKA\x01` and a SHA-256 into an output that carries data. The chain is young and its hash
 rate is small: a stamp shows an order of events, it is not proof for a court.
@@ -110,7 +143,8 @@ nothing until its owner writes `limits.json`; the recovery words are in `wallet.
 `north_history`, `north_limits`, `north_faucet`, `north_postage` and `north_fetch`. The tools that ask a web
 address reach public https addresses only, not this machine or its network, so that a page the agent reads
 cannot make it ask the owner's own services; `mcp --allow-local` lets them, for a test service of one's own
-(from 0.2.3, on main).
+(from 0.2.3, on main). With a signing service, `polarka-agent --signer SOCKET mcp` makes no wallet: the folder
+then keeps only this program's own record of x402 payments under way.
 
 ## A first coin: the faucet
 

@@ -1,7 +1,9 @@
 """The wallet as a server of the Model Context Protocol, over standard input and output (one JSON message
 to a line). An agent that is connected to it can read the wallet, hand out addresses, pay within the limits
 its owner wrote into limits.json, and stamp. It has no way to see the words, to change the limits, or to
-forget a payment: those belong to the owner, at the command line.
+forget a payment: those belong to the owner, at the command line. An agent that can also run commands as the
+wallet's user can do all of that, unless the wallet is a signing service of a user of its own (signer.py), which
+this server then only asks (--signer).
 """
 import ipaddress
 import json
