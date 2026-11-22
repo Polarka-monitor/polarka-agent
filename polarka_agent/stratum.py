@@ -54,7 +54,7 @@ JOBS_KEPT = 8               # jobs of one connection that still take shares, all
 MIN_ODDS = 16               # a share is never more than this part of a block
 TIME_AHEAD = 600            # seconds the time in a share may be after its job's
 MOST_LINE = 4096            # bytes in one line from a miner
-MOST_CONNECTIONS = 1000
+MOST_CONNECTIONS = 500      # each one an open file; a service gets 1024 of them unless told otherwise
 PER_PLACE = 64              # connections from one place (pool.place: an IPv4 address, or an IPv6 /48)
 MOST_WORKERS = 4            # names authorized on one connection
 QUIET = 30                  # seconds a connection has to subscribe and authorize
@@ -106,6 +106,16 @@ def root(coinbase_hash, steps):
     for step in steps:
         coinbase_hash = dsha(coinbase_hash + step)
     return coinbase_hash
+
+
+def inherited():
+    """The socket systemd listens on for this service (socket activation), or None. Its own IP rules then hold for
+    the miners' connections, and the service's (a pool that talks only to its own machine) for everything else."""
+    if os.environ.get("LISTEN_PID") != str(os.getpid()) or not os.environ.get("LISTEN_FDS", "").isdigit():
+        return None
+    if int(os.environ["LISTEN_FDS"]) < 1:
+        return None
+    return socket.socket(fileno=3)          # SD_LISTEN_FDS_START
 
 
 def swapped(previous):
@@ -168,9 +178,19 @@ class Stratum:
     worker threads, so that a slow node or a slow check holds up no connection."""
 
     def __init__(self, pool, listen, target_seconds=TARGET_SECONDS, refresh=JOB_REFRESH, most=MOST_CONNECTIONS,
-                 per_place=PER_PLACE, welcome=None, span=None):
-        host, _, port = listen.rpartition(":")
-        self.host, self.port = host.strip("[]") or None, int(port)
+                 per_place=PER_PLACE, welcome=None, span=None, sock=None):
+        """`listen` is HOST:PORT (":3333" for every address), or "systemd" for the socket systemd hands over;
+        `sock` a listening socket made already."""
+        self.sock = sock
+        if listen == "systemd" and sock is None:
+            self.sock = inherited()
+            if self.sock is None:
+                raise ValueError("--stratum systemd needs the socket of a socket unit (LISTEN_FDS); there is none")
+        if self.sock is not None:
+            self.host, self.port = None, self.sock.getsockname()[1]
+        else:
+            host, _, port = listen.rpartition(":")
+            self.host, self.port = host.strip("[]") or None, int(port)
         self.pool, self.ticks = pool, pool.ticks
         self.span = span                            # (hardest k, easiest k) in place of bounds(): only for trying a miner on regtest
         self.target_seconds, self.refresh_every, self.most, self.per_place = target_seconds, refresh, most, per_place
@@ -240,7 +260,10 @@ class Stratum:
     async def _main(self):
         self.wake = asyncio.Event()
         try:
-            self.server = await asyncio.start_server(self._client, self.host, self.port, limit=MOST_LINE, reuse_address=True)
+            if self.sock is not None:
+                self.server = await asyncio.start_server(self._client, sock=self.sock, limit=MOST_LINE)
+            else:
+                self.server = await asyncio.start_server(self._client, self.host, self.port, limit=MOST_LINE, reuse_address=True)
         except OSError as e:
             self.failed = e
             return

@@ -313,6 +313,34 @@ class OverTheLine(unittest.TestCase):
             d.line()
         self.assertEqual(self.client().answered["result"], True)        # and the pool goes on
 
+    def test_a_socket_made_elsewhere(self):
+        """What systemd hands over in socket activation: a socket that listens already."""
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(16)
+        other = stratum.Stratum(self.make(), "systemd", sock=sock)
+        try:
+            self.assertEqual(other.start(), sock.getsockname()[1])
+            c = Client(other.port)
+            self.clients.append(c)
+            self.assertEqual(c.start(ALICE)["result"], True)
+        finally:
+            other.stop()
+        saved = {k: os.environ.get(k) for k in ("LISTEN_PID", "LISTEN_FDS")}
+        try:
+            os.environ["LISTEN_PID"], os.environ["LISTEN_FDS"] = str(os.getpid() + 1), "1"
+            self.assertIsNone(stratum.inherited())                  # meant for another process
+            os.environ["LISTEN_PID"], os.environ["LISTEN_FDS"] = str(os.getpid()), "0"
+            self.assertIsNone(stratum.inherited())
+            with self.assertRaises(ValueError):
+                stratum.Stratum(self.pool, "systemd")
+        finally:
+            for k, v in saved.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
 
 class FakeWriter:
     class Transport:

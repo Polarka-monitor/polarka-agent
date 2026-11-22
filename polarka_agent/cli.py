@@ -263,8 +263,8 @@ def run(argv=None, out=sys.stdout):
     c.add_argument("--keep", default="5000", help="NORTH the wallet keeps as its reserve beyond what it owes (with --surplus-to)")
     c.add_argument("--surplus-most", default="1000", help="NORTH sent to --surplus-to at a time, at most")
     c.add_argument("--surplus-every", type=int, default=21600, help="seconds between two payments to --surplus-to, at least")
-    c.add_argument("--stratum", help="also take miners over stratum (IronMiner) on HOST:PORT, for example 0.0.0.0:3333; "
-                                     "the port is then open to the internet itself, not behind the web server")
+    c.add_argument("--stratum", help="also take miners over stratum (IronMiner) on HOST:PORT (:3333 for every address), or "
+                                     "'systemd' for the socket of a socket unit; the port faces the internet itself, not the web server")
     c.add_argument("--public-url", default=DEFAULT_POOL, help="where miners look up their account, said to them over stratum")
     a = p.parse_args(argv)
     folder = os.path.expanduser(a.dir)
