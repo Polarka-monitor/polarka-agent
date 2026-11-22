@@ -291,6 +291,28 @@ class PriceInHashesTest(unittest.TestCase):
         self.m.coin(b["pay_to"], second, "%02x" % self.n * 32)
         self.assertEqual(g.status(b["token"]), {"paid": True, "calls_left": 100})
 
+    def test_a_price_asked_before_a_restart_is_still_taken(self):
+        # review 8, L1: a payment of the price asked before the gate restarted is held to that price after it
+        class Facilitator:
+            network = "bip122:regtest"
+
+            def needed(self, amount):
+                return 1
+        self.template(self.BITS)
+        one_north = self.work(self.BITS) // 512
+        g = postage.Gate(self.w, 0, 100, clock=lambda: self.now[0], look_every=0, hashes=one_north, x402=Facilitator())
+        first = int(g.x402_wanted()["amount"])
+        self.template(self.HALF)                                       # the network doubles: half the NORTH for the work
+        self.now[0] += postage.PRICE_LIFE + 1
+        second = int(g.x402_wanted()["amount"])
+        self.assertNotEqual(first, second)
+        restarted = postage.Gate(self.w, 0, 100, clock=lambda: self.now[0], look_every=0, hashes=one_north, x402=Facilitator())
+        self.assertEqual(int(restarted.x402_wanted(str(first))["amount"]), first)      # the old price is still taken
+        self.assertEqual(int(restarted.x402_wanted(str(first + 1))["amount"]), second)  # one never asked is not
+        self.now[0] += 6 * postage.PRICE_LIFE + 1                       # an hour later the old price is gone
+        again = postage.Gate(self.w, 0, 100, clock=lambda: self.now[0], look_every=0, hashes=one_north, x402=Facilitator())
+        self.assertEqual(int(again.x402_wanted(str(first))["amount"]), second)
+
     def test_a_server_without_a_template(self):
         from polarka_agent.server import ServerError
         g = self.gate(1000)

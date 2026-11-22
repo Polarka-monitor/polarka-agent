@@ -5,7 +5,7 @@
 `agent_that_pays_for_itself.py` goes from no coin at all to a file stamped into the TrueNorth chain, and no person
 is needed on the way but the owner who writes the wallet's limits.
 
-    pip install polarka-agent
+    pip install polarka-agent==0.2.2
     python agent_that_pays_for_itself.py FILE              # the first coin from the faucet of polarka.org
     python agent_that_pays_for_itself.py FILE --mine 300   # or earned by five minutes of mining for the pool
 
@@ -21,7 +21,7 @@ behind the service.
 
 ## The same as an agent with the MCP server
 
-Give the agent the server (`uvx polarka-agent --dir FOLDER mcp`) and, once, a `limits.json` in FOLDER. Then a
+Give the agent the server (`uvx polarka-agent@0.2.2 --dir FOLDER mcp`) and, once, a `limits.json` in FOLDER. Then a
 task like this is enough:
 
 > Get a first coin for your NORTH wallet from https://faucet.polarka.org with north_faucet, wait for it with

@@ -68,7 +68,6 @@ class Gate:
         # {"prefix", "description", "method", "route", "pathParams", "queryParams", "output", "serviceName", "tags", "iconUrl"}
         self.public_url = public_url.rstrip("/") if public_url else None
         self.offers = sorted((dict(o) for o in offers), key=lambda o: -len(o["prefix"]))
-        self.offered = {}           # a price asked over x402 -> until when a payment of it is taken
         self.hashes = hashes        # above nothing: the price of a lot is this much mining work, not a fixed amount
         self.priced = None          # (when, the price in base units, hashes for one NORTH)
         self.lock = threading.Lock()
@@ -81,6 +80,16 @@ class Gate:
                 self.state = json.load(f)
         except FileNotFoundError:
             self.state = {"tokens": {}, "addresses": {}}     # addresses: address -> the amount on it already counted
+        # a price asked over x402 -> until when a payment of it is taken. Kept in the book, so that a payment made
+        # before a restart of the gate and shown again after it is held to the price it was asked, not to today's
+        # (review 8, L1). Written at most once a PRICE_LIFE unless the prices change, so the kept time may be up
+        # to that much shorter than the one in memory.
+        self.offered, self.offered_kept = {}, 0
+        for p, until in (self.state.get("offered") or {}).items():
+            try:
+                self.offered[int(p)] = int(until)
+            except (TypeError, ValueError):
+                pass
         if x402 is not None and not self.state.get("x402_address"):
             # one address for every payment over x402: such a payment is told apart by its transaction, not its address
             self.state["x402_address"] = wallet.fresh_address()
@@ -182,8 +191,13 @@ class Gate:
         with self.lock:
             now = self.clock()
             price = self._price()
+            before = set(self.offered)
             self.offered = {p: until for p, until in self.offered.items() if until > now}
             self.offered[price] = now + 6 * PRICE_LIFE
+            if set(self.offered) != before or now - self.offered_kept >= PRICE_LIFE:
+                self.state["offered"] = {str(p): int(until) for p, until in self.offered.items()}
+                self._save()
+                self.offered_kept = now
             try:
                 asked = int(amount) if amount is not None else None
             except (TypeError, ValueError):

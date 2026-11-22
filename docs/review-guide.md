@@ -43,19 +43,19 @@ Five reviews by AI models that did not write the code (not by people):
   buyer's word) and five Low fixed in the commit after 6ddc827, L7 (stamps.json rewritten whole on each new
   stamp) and L8 (the gate had no read timeout) in e9512fc. Open: L3 (a huge proof is slow to check), L6.
 
-- review 8 (a fresh AI agent, 21 November 2026, of b7b2d68..ea557ab and of the deployment): 1 High, 5 Medium,
-  8 Low, 6 Info. H1: a GET with a body reached a handler as two requests, so the proposed public route to the
-  facilitator's discovery would have opened its `/settle`; the route was live for twelve minutes, then off until
-  0.2.2 ran. M1: the same on pool.polarka.org and node.polarka.org. Fixed: every handler now ends a connection
-  after a request with a body (`httpguard.py`, `tests/test_http_guard.py`), and the web server opens one upstream
-  connection per request (`keepalive off`, tried against Caddy 2.11.9). Also fixed: M3 (a search costs little
-  whatever it asks), L2 (an offer needs a route), L3 (the filters), M5 and parts of L8 (texts), and in the
-  deployment M2 (node.polarka.org has a walletd of its own, with an RPC user allowed only its calls). All of it is
-  in 0.2.2. Open: M4 (the bounds hold against MCP-only programs, and most MCP hosts also give file tools; the
-  texts and the registry entry say so), L1 (a payment shown again after a gate restart can be refused), L4 (stamps
-  storage grows), I2 to I6. Fixed later on 21 November: L5 (the pool and its wallet server have RPC users of their
-  own; the facts service runs as a user of its own; polarka-usage keeps only the right to read and opens no record
-  through a link, as does polarka-status; under the web root only the pages are the refresh job's), L6 (the
+- review 8 (a fresh AI agent, 21 November 2026, of b7b2d68..ea557ab and of the deployment): 1 High, 5 Medium, 8 Low,
+  6 Info. H1: a GET with a body reached a handler as two requests, so the proposed public route to the facilitator's
+  discovery would have opened its `/settle`; the route was live for twelve minutes, then off until 0.2.2 ran. M1:
+  the same on pool.polarka.org and node.polarka.org. Fixed: every handler now ends a connection after a request with
+  a body (`httpguard.py`, `tests/test_http_guard.py`), and the web server opens one upstream connection per request
+  (`keepalive off`, tried against Caddy 2.11.9). Also fixed: M3 (a search costs little whatever it asks), L2 (an
+  offer needs a route), L3 (the filters), M5 and parts of L8 (texts), and in the deployment M2 (node.polarka.org has
+  a walletd of its own, with an RPC user allowed only its calls). All of it is in 0.2.2. Open: M4 (the bounds hold
+  against MCP-only programs, and most MCP hosts also give file tools; the texts and the registry entry say so), L1
+  (a payment shown again after a gate restart can be refused; mended on main on 22 November, not yet released), L4
+  (stamps storage grows), I2 to I6. Fixed later on 21 November: L5 (the pool and its wallet server have RPC users of
+  their own; the facts service runs as a user of its own; polarka-usage keeps only the right to read and opens no
+  record through a link, as does polarka-status; under the web root only the pages are the refresh job's), L6 (the
   watcher passes on only known units, states by pattern and numbers, and reports its own faults), L7 (the example
   agent pays for at most two lots and asks for an hour at most).
 
@@ -84,7 +84,7 @@ project (wallet, pool) went through four further AI reviews. No person outside h
 
     git clone https://github.com/Polarka-monitor/polarka-agent && cd polarka-agent   # or the copy you were given
     # a TrueNorth Core build (truenorthd, truenorth-cli) in a folder; tests start their own regtest node
-    TN_BIN=/path/to/bin python3 -m unittest discover -s tests -t .      # about 5 minutes, 239 tests
+    TN_BIN=/path/to/bin python3 -m unittest discover -s tests -t .      # about 5 minutes, 240 tests
 
 Without `TN_BIN` the tests that need a node are skipped. To check a stamp from the main chain:
 

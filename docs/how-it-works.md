@@ -25,8 +25,9 @@ what. All of it can be checked against the code in this repository and the deplo
 
 ## An agent, from no coin to a paid call
 
-1. Its owner starts the MCP server: `uvx polarka-agent --dir FOLDER mcp`. With no wallet in FOLDER it makes one on
-   the main chain. The recovery words are in `FOLDER/wallet.json`, readable by the owner only. Nothing is paid yet.
+1. Its owner starts the MCP server: `uvx polarka-agent@0.2.2 --dir FOLDER mcp`. With no wallet in FOLDER it makes
+   one on the main chain. The recovery words are in `FOLDER/wallet.json`, readable by the owner only. Nothing is
+   paid yet.
 2. The owner writes `FOLDER/limits.json` by hand, for example `{"per_payment_north": "0.1", "per_day_north": "1"}`.
    No command and no tool writes or changes that file.
 3. The agent gets a first coin with the tool `north_faucet` and the address `https://faucet.polarka.org`. The
@@ -38,7 +39,8 @@ what. All of it can be checked against the code in this repository and the deplo
    in the header `PAYMENT-SIGNATURE`. It pays nothing above `--most` or above the owner's limits, and a second
    fetch of the same URL shows the same payment again instead of paying anew. A seller that refuses a payment
    after it has passed it to the network can still make the next fetch pay again; the owner's limits bound
-   that (review 8, L1, open).
+   that. Our own gate did so after a restart when its price had moved meanwhile (review 8, L1); it keeps the
+   prices it asked since 22 November on main, and the fix goes out with the next release.
 6. The seller's facilitator checks the transaction and hands it to its node. While it waits for a block the
    seller answers `202` with `awaiting_confirmation`, and the agent shows the same payment again. Once it is in
    a block the service answers, and the header `PAYMENT-RESPONSE` names the transaction.
