@@ -39,9 +39,10 @@ from .wallet import Refused, Wallet, units
 PROTOCOL = 1
 MAX_REQUEST = 65536                 # bytes in one request
 MAX_ANSWER = 32 << 20               # bytes in one answer: the payments of a wallet used for long
-READ_TIME = 10                      # seconds a caller has to send its request in
+READ_TIME = 5                       # seconds a caller has to send its request in
 ANSWER_TIME = 330                   # seconds a caller waits: a payment may wait three times for the wallet server
 MOST_AT_ONCE = 8                    # callers served at once; one more is told that the service is busy
+MOST_OF_ONE = 4                     # of them from one user of the system (review 10, L4)
 HEX64 = re.compile(r"^[0-9a-f]{64}$")
 NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
 OPS = ("info", "balance", "address", "first_address", "received", "history", "payments", "limits", "pay", "stamp",
@@ -92,7 +93,9 @@ class Service:
         except FileNotFoundError:
             limits = None
         return {"protocol": PROTOCOL, "version": __version__, "chain": self.wallet.chain,
-                "folder_private": not os.stat(folder).st_mode & 0o077, "limits_file": limits}
+                "folder_private": not os.stat(folder).st_mode & 0o077, "limits_file": limits,
+                # what runs: --check looks at who may change these (review 10, M3)
+                "program": {"python": sys.executable, "module": os.path.dirname(os.path.abspath(__file__)), "path": list(sys.path)}}
 
     def do(self, op, args):
         w = self.wallet
@@ -172,9 +175,11 @@ def peer_uid(conn):
 class Listening:
     """The service at its socket: serve_forever() until close(), or run() until the process is told to end."""
 
-    def __init__(self, service, listener, path, most=MOST_AT_ONCE):
+    def __init__(self, service, listener, path, most=MOST_AT_ONCE, most_of_one=MOST_OF_ONE):
         self.service, self.listener, self.path = service, listener, path
         self._slots, self._closed = threading.BoundedSemaphore(most), threading.Event()
+        self._most_of_one, self._of = most_of_one, {}       # user of the system -> callers of it being served
+        self._of_lock = threading.Lock()
         self._inode = os.stat(path).st_ino
         listener.settimeout(0.5)            # so that close() is seen within half a second
 
@@ -189,10 +194,31 @@ class Listening:
                     break
                 time.sleep(0.2)             # too many files open, for one: a moment later it may be better
                 continue
-            if not self._slots.acquire(blocking=False):
+            uid = peer_uid(conn)
+            with self._of_lock:
+                if self._of.get(uid, 0) >= self._most_of_one:
+                    uid = False             # one user holds as many places as one may: the others stay free
+                else:
+                    self._of[uid] = self._of.get(uid, 0) + 1
+            if uid is False or not self._slots.acquire(blocking=False):
+                if uid is not False:
+                    self._done(uid)
                 self._busy(conn)
                 continue
-            threading.Thread(target=self._one, args=(conn,), daemon=True).start()
+            try:
+                threading.Thread(target=self._one, args=(conn, uid), daemon=True).start()
+            except RuntimeError:            # no thread to be had: the caller is told, and nothing is held
+                self._slots.release()
+                self._done(uid)
+                self._busy(conn)
+
+    def _done(self, uid):
+        with self._of_lock:
+            left = self._of.get(uid, 1) - 1
+            if left > 0:
+                self._of[uid] = left
+            else:
+                self._of.pop(uid, None)
 
     def _send(self, conn, told):
         try:
@@ -211,7 +237,7 @@ class Listening:
         finally:
             conn.close()
 
-    def _one(self, conn):
+    def _one(self, conn, uid=None):
         try:
             # one line within READ_TIME, whatever pace it comes at: a caller that holds the line holds nothing long
             until, data = time.monotonic() + READ_TIME, b""
@@ -228,12 +254,13 @@ class Listening:
             if len(line) > MAX_REQUEST:
                 self._send(conn, {"v": PROTOCOL, "refused": ["INPUT", "a request is at most %d bytes" % MAX_REQUEST]})
             else:
-                self._send(conn, self.service.answer(line, peer_uid(conn)))
+                self._send(conn, self.service.answer(line, uid))
         except OSError:
             pass
         finally:
             conn.close()
             self._slots.release()
+            self._done(uid)
 
     def close(self):
         self._closed.set()
@@ -450,6 +477,7 @@ class Signer:
                                "folder (polarka-agent signer-setup shows where it is)")
 
 
+
 # ------------------------------------------------------------------------------------------------ setting it up
 
 LINUX = {"system": "linux", "venv": "/opt/polarka-signer/venv", "dir": "/var/lib/polarka-signer",
@@ -457,12 +485,35 @@ LINUX = {"system": "linux", "venv": "/opt/polarka-signer/venv", "dir": "/var/lib
 MACOS = {"system": "macos", "venv": "/Library/Application Support/PolarkaSigner/venv",
          "dir": "/Library/Application Support/PolarkaSigner/wallet",
          "socket": "/Library/Application Support/PolarkaSigner/run/signer.sock", "user": "_polarkasigner", "group": "polarka-pay"}
+# groups whose members can make themselves root (with a password, or without one: docker, lxd, disk ...)
+ADMIN_GROUPS = ("root", "wheel", "sudo", "admin", "docker", "lxd", "incus", "disk", "libvirt")
+PACKAGE = re.compile(r"^polarka-agent==[0-9]+(\.[0-9]+){1,3}((\.dev|rc|a|b|\.post)[0-9]+)?$")
 
 
 def places(system=None):
     """Where signer-setup puts the service, on this system or on "linux" or "macos"."""
     system = system or ("macos" if sys.platform == "darwin" else "linux")
     return dict(MACOS if system == "macos" else LINUX)
+
+
+def groups_of(user):
+    """The names of the groups a user of this machine is in, its own group with them; KeyError when there is no
+    such user here."""
+    import pwd
+    entry = pwd.getpwnam(user)
+    names = set()
+    for gid in os.getgrouplist(user, entry.pw_gid):
+        try:
+            names.add(grp.getgrgid(gid).gr_name)
+        except KeyError:
+            pass
+    return names
+
+
+def this_user():
+    """The user this program runs as, by its id (not by what the environment says: review 10, L6)."""
+    import pwd
+    return pwd.getpwuid(os.getuid()).pw_name
 
 
 UNIT = """[Unit]
@@ -531,20 +582,66 @@ PLIST = """<?xml version="1.0" encoding="UTF-8"?>
 </plist>
 """
 
+# The pieces of the scripts. Pieces are put together first, then every @NAME@ is filled in one pass, so that nothing
+# filled in (a folder's name, say) is read again as a piece (review 10, L2).
+
+CLEAN = """# A clean start: nothing of the account that ran sudo (its HOME, its PATH, PYTHON* and PIP_* settings) reaches
+# root's Python and pip. The file is read again under an empty environment (review 10, H3).
+if [ "${POLARKA_SIGNER_SETUP:-}" != clean ]; then
+  [ -f "$0" ] || { echo "run it from its file: sudo sh FILE" >&2; exit 1; }
+  exec /usr/bin/env -i POLARKA_SIGNER_SETUP=clean HOME=@ROOT_HOME@ PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C /bin/sh "$0"
+fi
+cd /
+"""
+
+ADMIN_CHECK = """# The agent's user must not be able to administer this machine: an agent that runs as such a user can wait for
+# its owner's password, and then nothing is kept from it (review 10, M4).
+id "$AGENT_USER" >/dev/null 2>&1 || { echo "there is no user $AGENT_USER on this machine" >&2; exit 1; }
+for g in $(id -Gn "$AGENT_USER"); do
+  case " @ADMIN_GROUPS@ " in
+    *" $g "*)
+      if [ @ADMIN_AGENT@ != yes ]; then
+        echo "$AGENT_USER is in the group $g and can administer this machine. Run the agent as a user of its own, or print this script with --admin-agent, knowing that it then keeps from the agent only the simple ways in." >&2
+        exit 1
+      fi ;;
+  esac
+done
+"""
+
+FROM_PYPI = """pip_in install --quiet --upgrade pip
+pip_in install --quiet --upgrade "$PACKAGE"
+"""
+
+FROM_WHEEL = """# the wheel named when this script was printed, used only if its SHA-256 is still the one written here
+WHEEL=@WHEEL@
+WHEEL_SHA256=@WHEEL_SHA256@
+install -d -o root -g @ROOT_GROUP@ -m 755 "$BASE/dist"
+COPY="$BASE/dist/$(basename "$WHEEL")"
+rm -f "$COPY"
+cp "$WHEEL" "$COPY"
+if [ "$(@SHA256@ "$COPY" | cut -d ' ' -f 1)" != "$WHEEL_SHA256" ]; then
+  rm -f "$COPY"; echo "$WHEEL is not the wheel this script was printed for" >&2; exit 1
+fi
+pip_in install --quiet --upgrade pip
+pip_in install --quiet --no-deps --force-reinstall "$COPY"
+"""
+
 LINUX_SCRIPT = """#!/bin/sh
 # The Polarka signing service on Linux with systemd, as polarka-agent @VERSION@ signer-setup printed it.
-# Read it, then run it as root: sudo sh polarka-signer-setup.sh
+# Read it, then run it as root, from an account the agent does not use: sudo sh polarka-signer-setup.sh
 # It makes the user polarka-signer and the group polarka-pay, with @AGENT@ in that group; installs @PACKAGE@ where
 # only root can change it; makes the wallet's folder, which only the service can open; and starts the service.
-# Stop the agents that use the wallet before you run it.
+# Stop the agents that use the wallet before you run it.@ADMIN_NOTE@
 set -eu
 [ "$(id -u)" = 0 ] || { echo "run this as root: sudo sh $0" >&2; exit 1; }
-cd /
+@CLEAN@
 AGENT_USER=@AGENT@
 PACKAGE=@PACKAGE@
 BASE=/opt/polarka-signer
 DIR=/var/lib/polarka-signer
+pip_in() { "$BASE/venv/bin/python3" -I -m pip --isolated --disable-pip-version-check --no-input --no-cache-dir "$@"; }
 
+@ADMIN_CHECK@
 # 1. the service's user, and the group whose members may ask it to pay
 getent group polarka-pay >/dev/null || groupadd --system polarka-pay
 id -u polarka-signer >/dev/null 2>&1 || useradd --system --user-group --home-dir "$DIR" --no-create-home --shell /usr/sbin/nologin polarka-signer
@@ -552,12 +649,10 @@ usermod -a -G polarka-pay polarka-signer
 usermod -a -G polarka-pay "$AGENT_USER"
 
 # 2. the program, where only root can change it: the service runs it with the wallet's words
-/usr/bin/python3 -c "import ensurepip" 2>/dev/null || { echo "python3-venv is needed (Debian, Ubuntu: apt install python3-venv)" >&2; exit 1; }
+/usr/bin/python3 -I -c "import ensurepip" 2>/dev/null || { echo "python3-venv is needed (Debian, Ubuntu: apt install python3-venv)" >&2; exit 1; }
 install -d -o root -g root -m 755 "$BASE"
-[ -x "$BASE/venv/bin/python3" ] || /usr/bin/python3 -m venv "$BASE/venv"
-"$BASE/venv/bin/python3" -m pip install --quiet --disable-pip-version-check --no-cache-dir --upgrade pip
-"$BASE/venv/bin/python3" -m pip install --quiet --disable-pip-version-check --no-cache-dir --upgrade "$PACKAGE"
-chown -R root:root "$BASE"
+[ -x "$BASE/venv/bin/python3" ] || /usr/bin/python3 -I -m venv "$BASE/venv"
+@INSTALL@chown -R root:root "$BASE"
 chmod -R go-w "$BASE"
 
 # 3. the wallet's folder, which only the service's user can open
@@ -573,26 +668,30 @@ systemctl enable polarka-signer.service
 systemctl restart polarka-signer.service
 sleep 3
 [ -S /run/polarka-signer/signer.sock ] || { journalctl -u polarka-signer.service -n 20 --no-pager >&2; exit 1; }
-echo "The service runs. $AGENT_USER may ask it once it logs in again (polarka-pay is new to it). Then, as $AGENT_USER:"
-echo "  polarka-agent signer-setup --check"
-echo "  polarka-agent --signer /run/polarka-signer/signer.sock mcp   (or POLARKA_SIGNER=/run/polarka-signer/signer.sock)"
+echo "The service runs. $AGENT_USER may ask it once it logs in again (polarka-pay is new to it)."
+echo "Look at it then as $AGENT_USER, with the service's own program, which only root can change:"
+echo "  sudo -u $AGENT_USER /opt/polarka-signer/venv/bin/python3 -I -m polarka_agent signer-setup --check"
+echo "and give the agent: polarka-agent --signer /run/polarka-signer/signer.sock mcp (or POLARKA_SIGNER=/run/polarka-signer/signer.sock)"
 """
 
 MACOS_SCRIPT = """#!/bin/sh
 # The Polarka signing service on macOS, as polarka-agent @VERSION@ signer-setup printed it.
-# Read it, then run it with an administrator's password: sudo sh polarka-signer-setup.sh
+# Read it, then run it with an administrator's password, from an account the agent does not use:
+#   sudo sh polarka-signer-setup.sh
 # It makes a hidden user _polarkasigner and the group polarka-pay, with @AGENT@ in that group; installs @PACKAGE@
 # with Apple's own Python where only root can change it; makes the wallet's folder, which only the service can open;
-# and starts the service with launchd. Stop the agents that use the wallet before you run it.
+# and starts the service with launchd. Stop the agents that use the wallet before you run it.@ADMIN_NOTE@
 set -eu
 [ "$(id -u)" = 0 ] || { echo "run this as root: sudo sh $0" >&2; exit 1; }
-cd /
+@CLEAN@
 AGENT_USER=@AGENT@
 PACKAGE=@PACKAGE@
 BASE="/Library/Application Support/PolarkaSigner"
 DIR="$BASE/wallet"
 RUN="$BASE/run"
+pip_in() { "$BASE/venv/bin/python3" -I -m pip --isolated --disable-pip-version-check --no-input --no-cache-dir "$@"; }
 
+@ADMIN_CHECK@
 # 1. a hidden user for the service, and the group whose members may ask it to pay
 free_id() {
   i=401
@@ -635,13 +734,12 @@ for who in _polarkasigner "$AGENT_USER"; do
 done
 
 # 2. the program, where only root can change it: Apple's own Python, in a folder of root's
-/usr/bin/python3 -c "import sys; assert sys.version_info >= (3, 9)" || { echo "Apple's Python 3 is needed: xcode-select --install" >&2; exit 1; }
+/usr/bin/python3 -I -c "import sys; assert sys.version_info >= (3, 9)" || { echo "Apple's Python 3 is needed: xcode-select --install" >&2; exit 1; }
 install -d -o root -g wheel -m 755 "$BASE"
-[ -x "$BASE/venv/bin/python3" ] || /usr/bin/python3 -m venv "$BASE/venv"
-"$BASE/venv/bin/python3" -m pip install --quiet --disable-pip-version-check --no-cache-dir --upgrade pip
-"$BASE/venv/bin/python3" -m pip install --quiet --disable-pip-version-check --no-cache-dir --upgrade "$PACKAGE"
-chown -R root:wheel "$BASE/venv"
+[ -x "$BASE/venv/bin/python3" ] || /usr/bin/python3 -I -m venv "$BASE/venv"
+@INSTALL@chown -R root:wheel "$BASE/venv"
 chmod -R go-w "$BASE/venv"
+[ ! -d "$BASE/dist" ] || { chown -R root:wheel "$BASE/dist"; chmod -R go-w "$BASE/dist"; }
 
 # 3. the wallet's folder, which only the service's user can open; the folder of its socket; its log
 install -d -o _polarkasigner -g _polarkasigner -m 700 "$DIR"
@@ -660,9 +758,10 @@ sleep 1
 launchctl bootstrap system /Library/LaunchDaemons/org.polarka.signer.plist
 sleep 3
 [ -S "$RUN/signer.sock" ] || { tail -n 20 /Library/Logs/PolarkaSigner/signer.log >&2; exit 1; }
-echo "The service runs. $AGENT_USER may ask it once it logs out and in again (polarka-pay is new to it). Then, as $AGENT_USER:"
-echo "  polarka-agent signer-setup --check"
-echo "  polarka-agent --signer \\"$RUN/signer.sock\\" mcp   (or POLARKA_SIGNER=\\"$RUN/signer.sock\\")"
+echo "The service runs. $AGENT_USER may ask it once it logs out and in again (polarka-pay is new to it)."
+echo "Look at it then as $AGENT_USER, with the service's own program, which only root can change:"
+echo "  sudo -u $AGENT_USER \\"$BASE/venv/bin/python3\\" -I -m polarka_agent signer-setup --check"
+echo "and give the agent: polarka-agent --signer \\"$RUN/signer.sock\\" mcp (or POLARKA_SIGNER=\\"$RUN/signer.sock\\")"
 """
 
 NEW_WALLET = """# 4. a new wallet in the service's folder. Its words are shown here, once: write them on paper.
@@ -675,18 +774,30 @@ fi
 
 MOVED_WALLET = """# 4. the wallet moved here from @FROM@.
 #    An agent that could read it there may know its words. For the whole of the gain, make a new wallet here instead
-#    (signer-setup without --move-from) and pay the coins over to it.
+#    (signer-setup without --move-from) and pay the coins over to it. Its files are read as $AGENT_USER, and only
+#    plain files: no link left there leads root anywhere (review 10, M1).
 FROM=@FROM@
-[ -e "$FROM/wallet.json" ] || { echo "$FROM has no wallet.json" >&2; exit 1; }
 [ ! -e "$DIR/wallet.json" ] || { echo "$DIR holds a wallet already; nothing is moved" >&2; exit 1; }
 for f in wallet.json journal.jsonl state.json; do
-  if [ -e "$FROM/$f" ]; then
-    mv "$FROM/$f" "$DIR/$f"
-    chown @USER@:@USER@ "$DIR/$f"
-    chmod 600 "$DIR/$f"
+  if [ -L "$FROM/$f" ] || { [ -e "$FROM/$f" ] && [ ! -f "$FROM/$f" ]; }; then
+    echo "$FROM/$f is not a plain file; nothing is moved" >&2; exit 1
   fi
 done
-echo "Moved. limits.json stays where it was: the agent could change it there. The service's limits are written below."
+@AS_AGENT@ test -f "$FROM/wallet.json" || { echo "$FROM has no wallet.json that $AGENT_USER can read" >&2; exit 1; }
+for f in wallet.json journal.jsonl state.json; do
+  if @AS_AGENT@ test -f "$FROM/$f"; then
+    rm -f "$DIR/$f.new"
+    @AS_AGENT@ cat "$FROM/$f" > "$DIR/$f.new"
+    chown @USER@:@USER@ "$DIR/$f.new"
+    chmod 600 "$DIR/$f.new"
+    mv -f "$DIR/$f.new" "$DIR/$f"
+  fi
+done
+for f in wallet.json journal.jsonl state.json; do
+  @AS_AGENT@ rm -f "$FROM/$f"
+done
+echo "Moved. Its wallet server: $("$BASE/venv/bin/python3" -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["server"])' "$DIR/wallet.json")"
+echo "limits.json stays where it was: the agent could change it there. The service's limits are written below."
 """
 
 LIMITS = """# 5. the owner's limits: what the service pays by itself, and no more. The file is root's: the service reads it
@@ -707,44 +818,80 @@ fi
 """
 
 
-def setup_script(system, agent_user, move_from=None, per_payment=None, per_day=None, package=None):
+def setup_script(system, agent_user, move_from=None, per_payment=None, per_day=None, package=None, wheel=None,
+                 admin_agent=False):
     """The commands that set up the service on this system, for its owner to read and to run as root. Nothing here is
-    run: the program only prints them."""
+    run: the program only prints them. The program the service runs is polarka-agent of a version from PyPI, or a
+    wheel named by its path, installed only if its SHA-256 is still the one it had when this was printed."""
+    import hashlib
     p = places(system)
     if not isinstance(agent_user, str) or not NAME.match(agent_user) or agent_user in ("root", p["user"]):
         raise Refused("INPUT", "--agent-user is the name of the user the agent runs as (not root, not the service's user)")
-    package = package or "polarka-agent==%s" % __version__
-    if not re.match(r"^[A-Za-z0-9_.=<>!~+:/@-]{1,300}$", package):
-        raise Refused("INPUT", "--package is what pip installs, for example polarka-agent==%s or the path of a wheel" % __version__)
+    try:
+        admin = sorted(groups_of(agent_user) & set(ADMIN_GROUPS))
+    except KeyError:
+        admin = []                          # not a user of this machine: the script looks again where it runs
+    if admin and not admin_agent:
+        raise Refused("ADMIN_AGENT", "%s is in the group %s and can administer this machine: an agent that runs as it can "
+                                     "wait for its owner's password, and then nothing is kept from it. Run the agent as a user "
+                                     "of its own; or, knowing that, give --admin-agent" % (agent_user, admin[0]))
+    if package is not None and wheel is not None:
+        raise Refused("INPUT", "--package or --wheel, one of the two")
+    if wheel is not None:
+        wheel = os.path.abspath(os.path.expanduser(wheel))
+        if not wheel.endswith(".whl") or not os.path.isfile(wheel) or any(c in wheel for c in "\n\r@"):
+            raise Refused("INPUT", "--wheel is the path of a .whl file")
+        with open(wheel, "rb") as f:
+            digest = hashlib.sha256(f.read()).hexdigest()
+        install, shown = FROM_WHEEL, wheel
+    else:
+        package = package or "polarka-agent==%s" % __version__
+        if not isinstance(package, str) or not PACKAGE.match(package):
+            # no pip options, no paths, no other names: what the service runs is root's alone (review 10, M3)
+            raise Refused("INPUT", "--package is polarka-agent==VERSION, from PyPI; a wheel of one's own is named with --wheel")
+        install, shown, digest = FROM_PYPI, package, ""
     if (per_payment is None) != (per_day is None):
         raise Refused("INPUT", "--per-payment and --per-day go together")
     if per_payment is not None:
         units(per_payment), units(per_day)
-        limits = LIMITS.replace("@LIMITS_JSON@", shlex.quote(json.dumps({"per_payment_north": per_payment.strip(),
-                                                                            "per_day_north": per_day.strip()})))
+        limits_json = json.dumps({"per_payment_north": per_payment.strip(), "per_day_north": per_day.strip()})
+        limits = LIMITS
     else:
-        limits = NO_LIMITS
+        limits_json, limits = "", NO_LIMITS
     if move_from is not None:
         move_from = os.path.abspath(os.path.expanduser(move_from))
-        if not os.path.isfile(os.path.join(move_from, "wallet.json")):
+        if any(c in move_from for c in "\n\r") or not os.path.isfile(os.path.join(move_from, "wallet.json")):
             raise Refused("NO_WALLET", "there is no wallet in %s" % move_from)
-        wallet = MOVED_WALLET.replace("@FROM@", shlex.quote(move_from))
+        wallet = MOVED_WALLET
     else:
-        wallet = NEW_WALLET.replace("@AS_SERVICE@", "runuser -u polarka-signer --" if p["system"] == "linux"
-                                    else "sudo -u _polarkasigner")
-    text = LINUX_SCRIPT if p["system"] == "linux" else MACOS_SCRIPT
-    for name, value in (("@WALLET@", wallet), ("@LIMITS@", limits), ("@USER@", p["user"]), ("@UNIT@", UNIT),
-                        ("@PLIST@", PLIST), ("@AGENT@", shlex.quote(agent_user)), ("@PACKAGE@", shlex.quote(package)),
-                        ("@VERSION@", __version__)):
-        text = text.replace(name, value)
-    return text
+        wallet = NEW_WALLET
+    linux = p["system"] == "linux"
+    text = LINUX_SCRIPT if linux else MACOS_SCRIPT
+    for name, piece in (("@CLEAN@", CLEAN), ("@ADMIN_CHECK@", ADMIN_CHECK), ("@INSTALL@", install), ("@WALLET@", wallet),
+                        ("@LIMITS@", limits), ("@UNIT@", UNIT), ("@PLIST@", PLIST)):
+        text = text.replace(name, piece)
+    values = {
+        "VERSION": __version__, "AGENT": shlex.quote(agent_user), "PACKAGE": shlex.quote(shown),
+        "ROOT_HOME": "/root" if linux else "/var/root", "ROOT_GROUP": "root" if linux else "wheel",
+        "SHA256": "sha256sum" if linux else "shasum -a 256", "ADMIN_GROUPS": " ".join(ADMIN_GROUPS),
+        "ADMIN_AGENT": "yes" if admin_agent else "no",
+        "ADMIN_NOTE": "" if not admin_agent else (
+            "\n# With --admin-agent: %s may administer this machine. The service then keeps from an agent that runs as it\n"
+            "# only the simple ways in (reading the words, writing the limits), not one that waits for its owner's password."
+            % agent_user),
+        "WHEEL": shlex.quote(wheel or ""), "WHEEL_SHA256": digest, "FROM": shlex.quote(move_from or ""),
+        "USER": p["user"], "AS_SERVICE": "runuser -u polarka-signer --" if linux else "sudo -u _polarkasigner",
+        "AS_AGENT": 'runuser -u "$AGENT_USER" --' if linux else 'sudo -u "$AGENT_USER"',
+        "LIMITS_JSON": shlex.quote(limits_json)}
+    return re.sub(r"@([A-Z0-9_]+)@", lambda m: values[m.group(1)], text)
 
 
 # ------------------------------------------------------------------------------------------------ looking at it
 
 def _changeable(top, most=60000):
     """What under top, top too, a user other than root could change: a file or folder that is not root's, or that its
-    group or everyone may write. A link counts for who owns it; where it leads is looked at on its own."""
+    group or everyone may write. A link counts for who owns it; where it leads is looked at on its own. Past `most`
+    entries it says that it did not look at all of them (review 10, L1)."""
     def bad(path):
         try:
             st = os.lstat(path)
@@ -760,7 +907,10 @@ def _changeable(top, most=60000):
             seen += 1
             if bad(path):
                 found.append(path)
-        if len(found) >= 3 or seen > most:
+        if len(found) >= 3:
+            break
+        if seen > most:
+            found.append("(more than %d files under %s: not all were looked at)" % (most, top))
             break
     return found
 
@@ -789,31 +939,37 @@ def _holders(path):
         here = os.path.dirname(here)
 
 
-def _program(venv):
-    """What a user other than root could change of the program the service runs with the wallet's words: its
-    folder, the Python it was made with and that Python's own library. None when there is no such program."""
+def _program(venv, ran=None):
+    """What a user other than root could change of the program the service runs with the wallet's words: its folder,
+    the Python it was made with and that Python's library, and every place its Python takes modules from, polarka_agent
+    first (an editable install points elsewhere: review 10, M3). ran: what the service says it runs. None when there is
+    no such program here."""
     python = os.path.join(venv, "bin", "python3")
     if not os.path.isfile(python):
         return None
+    code = "import json, sys, sysconfig, polarka_agent; print(json.dumps([sysconfig.get_paths()['stdlib'], polarka_agent.__file__] + sys.path))"
     try:
-        stdlib = subprocess.run([python, "-I", "-c", "import sysconfig; print(sysconfig.get_paths()['stdlib'])"],
-                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                universal_newlines=True, timeout=30).stdout.strip()
-    except (OSError, subprocess.TimeoutExpired):
-        stdlib = ""
+        paths = json.loads(subprocess.run([python, "-I", "-c", code], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                          stderr=subprocess.DEVNULL, universal_newlines=True, timeout=30).stdout)
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return ["(the Python in %s did not say what it runs)" % venv]
+    if isinstance(ran, dict):
+        paths += [ran.get("python"), ran.get("module")] + list(ran.get("path") or [])
     found = _changeable(venv) + _holders(venv)
     for hop in _hops(python)[1:]:               # the Python the venv was made with, through its links
         found += _changeable(hop) + _holders(hop)
-    if stdlib and os.path.isdir(stdlib):
-        found += _changeable(stdlib) + _holders(stdlib)
-    else:
-        found.append("(the library of the Python in %s, which could not be found)" % venv)
+    for path in paths:
+        if isinstance(path, str) and path and os.path.exists(path):
+            found += _changeable(path) + _holders(path)
     return sorted(set(found))
 
 
 def check(path=None, folder=None, venv=None, system=None):
     """What the agent's user sees of a service that is set up. Each point is ok true or false, or null where there was
-    nothing to look at; the whole is ok when the service answered and no point is false."""
+    nothing to look at; the whole is ok only when every point is true (limits.json may be missing: then the service
+    pays nothing), so that a point not looked at is never taken for one in order (review 10, L1). Run it with the
+    service's own Python, which only root can change: a copy of this program that the agent can change could say
+    anything."""
     p = places(system)
     path, folder, venv = path or p["socket"], folder or p["dir"], venv or p["venv"]
     points = []
@@ -860,13 +1016,20 @@ def check(path=None, folder=None, venv=None, system=None):
         point("words", False, "this user may open %s, where the words are" % folder)
     else:
         point("words", True, "this user cannot open the service's folder, where the words are")
-    found = _program(venv)
+    found = _program(venv, (facts or {}).get("program"))
     if found is None:
         point("program", None, "there is no %s to look at (is it elsewhere? --venv)" % venv)
     elif found:
         point("program", False, "a user other than root could change the program the service runs: %s" % ", ".join(found[:3]))
     else:
-        point("program", True, "only root may change the program the service runs, and the Python it runs on")
+        point("program", True, "only root may change the program the service runs, the Python it runs on and where it takes modules from")
+    try:
+        admin = sorted(groups_of(this_user()) & set(ADMIN_GROUPS))
+    except KeyError:
+        admin = []
+    point("admin", not admin, "this user is in the group %s and can administer this machine: an agent that runs as it can wait for "
+          "its owner's password, and then the service keeps nothing from it" % admin[0] if admin
+          else "this user is in no group that can administer this machine")
     try:
         sudo = subprocess.run(["sudo", "-n", "true"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                               stderr=subprocess.DEVNULL, timeout=10).returncode == 0
@@ -874,4 +1037,5 @@ def check(path=None, folder=None, venv=None, system=None):
         sudo = False
     point("sudo", not sudo, "this user can become root without a password: then the service keeps nothing from it" if sudo
           else "this user cannot become root without a password")
-    return {"ok": facts is not None and all(x["ok"] is not False for x in points), "checks": points}
+    ok = facts is not None and all(x["ok"] is True or (x["check"] == "limits" and x["ok"] is None) for x in points)
+    return {"ok": ok, "checks": points}

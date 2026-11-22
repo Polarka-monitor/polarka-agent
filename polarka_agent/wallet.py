@@ -210,10 +210,23 @@ class Wallet:
                     "note": payment.get("note"), "counted": int(now)})
         payment["t"] = int(now)
 
-    def _set(self, payment, state, note=None):
-        if payment["state"] != state or payment.get("note") != note:
-            self._note({"t": int(self._clock()), "event": "state", "txid": payment["txid"], "state": state, "note": note})
+    def _set(self, payment, state, note=None, counted=None):
+        if payment["state"] != state or payment.get("note") != note or counted is not None:
+            event = {"t": int(self._clock()), "event": "state", "txid": payment["txid"], "state": state, "note": note}
+            if counted is not None:
+                event["counted"] = int(counted)
+                payment["t"] = int(counted)
+            self._note(event)
             payment.update(state=state, note=note)
+
+    def _gone_out(self, payment, state, note):
+        """The server shows a payment on its way (waiting for a block, or in one). One whose outcome was open for a day
+        or more went out now, whoever handed it over (one signed for x402 is in the hands of whoever was given it):
+        from here on it counts for this day, not for the day it was signed (review 10, H1)."""
+        now = self._clock()
+        if payment["state"] in OPEN and now - payment["t"] >= DAY:
+            return self._set(payment, state, note, counted=now)
+        return self._set(payment, state, note)
 
     # ------------------------------------------------------------------------------------------ looking
 
@@ -348,10 +361,10 @@ class Wallet:
                 continue
             line = next((m for m in lines if m["txid"] == p["txid"]), None)
             if line is not None and line["height"] is not None:
-                self._set(p, "in_block", "block %d" % line["height"])
+                self._gone_out(p, "in_block", "block %d" % line["height"])
             elif line is not None:
                 if p["state"] != "handed":
-                    self._set(p, "handed", "the server shows it waiting for a block")
+                    self._gone_out(p, "handed", "the server shows it waiting for a block")
             elif p["state"] == "handed" and self._clock() - p["t"] >= 60:
                 # It was handed over and is neither in a block nor waiting. If the server does not know it
                 # either, it is open again: the next payment is built on one of its coins.

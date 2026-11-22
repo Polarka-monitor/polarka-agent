@@ -7,6 +7,7 @@ this server then only asks (--signer).
 """
 import ipaddress
 import json
+import socket
 import sys
 import urllib.parse
 
@@ -79,7 +80,7 @@ TOOLS = [
 ]
 
 
-def outside(url):
+def outside(url, resolve=None):
     """Refuses an address that an agent's tool must not reach unless its owner said so (--allow-local): plain
     http, this machine and the networks of a home or an office. A page the agent reads could otherwise make it ask
     the owner's own services (human review, 22 November)."""
@@ -92,14 +93,21 @@ def outside(url):
         raise Refused("INPUT", "an agent's tools reach https addresses only (the owner can allow this machine with --allow-local)")
     if host == "localhost" or host.endswith(".localhost") or host.endswith(".local") or host.endswith(".internal"):
         raise Refused("INPUT", "an agent's tools do not reach this machine or its network (the owner can allow it with --allow-local)")
+    # every address the name stands for, as the system will read it (127.1, 0x7f000001 and names of the home network
+    # too: review 10, L3). A name that changes its answer between this look and the call is not caught here.
     try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        return
-    if ip.version == 6 and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
-    if not ip.is_global:
-        raise Refused("INPUT", "an agent's tools do not reach this machine or its network (the owner can allow it with --allow-local)")
+        found = {a[4][0] for a in (resolve or socket.getaddrinfo)(host, parts.port or 443, proto=socket.IPPROTO_TCP)}
+    except (OSError, UnicodeError, ValueError):
+        raise Refused("INPUT", "the address of %s cannot be found" % host[:100])
+    for address in found:
+        try:
+            ip = ipaddress.ip_address(address.split("%", 1)[0])
+        except ValueError:
+            raise Refused("INPUT", "an agent's tools reach public https addresses only")
+        if ip.version == 6 and ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        if not ip.is_global:
+            raise Refused("INPUT", "an agent's tools do not reach this machine or its network (the owner can allow it with --allow-local)")
 
 
 def call(wallet, name, a, allow_local=False):

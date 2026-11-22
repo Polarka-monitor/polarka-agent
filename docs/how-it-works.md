@@ -21,7 +21,7 @@ checked against the code in this repository and the deployment notes in `deploy/
 | Faucet | `faucet.polarka.org` | 0.25 NORTH to an address once a day, after a few seconds of hashing | its own, at most 100 NORTH a day |
 | Gate | `gate.polarka.org` | stands before paid routes and sells lots of 100 calls, for x402 or for a quote of its own | receives payments; holds no buyer's coins |
 | x402 facilitator | the server, on loopback | checks an x402 payment, hands it to the node, waits for a block | no keys, no coins |
-| x402 facilitator for other sellers | from 0.2.3, not yet open: the server, on loopback, behind `gate.polarka.org/facilitator` | the same for sellers from outside, as a process apart, with bounds on requests and on payments kept, and no catalog | no keys, no coins |
+| x402 facilitator for other sellers | from 0.2.3, not yet open: the server, on loopback, behind `gate.polarka.org/facilitator` | the same for sellers from outside, as a process apart under a user of the system and an RPC user of its own, with bounds on requests and on payments kept, and no catalog | no keys, no coins |
 | Stamps | the server, on loopback, behind the gate | writes SHA-256s into the chain every ten minutes and gives proofs | a small wallet for fees |
 | Pool | `pool.polarka.org` | pays for each share; open to everybody since 21 November 2026 | what it owes miners, from a reserve |
 | Node | the server, on loopback | TrueNorth Core; every service that talks to it (the facilitator, the stamps service, the pool and both wallet servers) has an RPC user allowed only the calls it makes | no wallet |
@@ -111,7 +111,8 @@ also a block goes to the network.
 
 - **Your keys** stay in your wallet's folder. Nobody at Polarka sees them. Whoever can read `wallet.json` can
   spend. With a signing service (from 0.2.3, on main) that folder belongs to a user of the system of its own and
-  `limits.json` to root: the agent's user can ask the service to pay within the limits, not read the words.
+  `limits.json` to root: the agent's user, which must not be one that can administer the machine, can ask the
+  service to pay within the limits, not read the words.
 - **A wallet server** sees your wallet's addresses together and your internet address. It can show a false
   balance or hold a payment back; it cannot take coins. The default one is run by the Northbound project, not by
   Polarka. Ours, `node.polarka.org`, keeps no record of requests, only of its own faults.
@@ -120,7 +121,9 @@ also a block goes to the network.
   the SHA-256s it was given, never the files.
 - **The facilitator for other sellers** (from 0.2.3) sees the internet address of the seller's server, not the
   buyer's. It holds it in memory until a minute after the last request, to count requests, and writes none
-  down; it keeps the payments it settled, as the gate's own does.
+  down. For a caller that brought new payments it holds, also in memory, until the end of that day (UTC), its
+  address or its IPv6 /48 and how many it brought, so that one sender cannot fill what is kept for all. It keeps
+  the payments it settled, as the gate's own does.
 - **The faucet** keeps the addresses it paid, and no internet addresses on disk.
 - **The pool** keeps every share with the address it is for.
 - **The web server** in front of every name at polarka.org keeps no access log. Until 21 November 2026 its own

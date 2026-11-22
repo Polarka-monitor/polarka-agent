@@ -28,18 +28,28 @@ itself for the next calls to the same place.
 Not the gate's own facilitator opened up, but a second process of the same code, so that nothing an outside
 caller does reaches the gate's payments, its lock or its memory:
 
-    install -d -o x402 -g x402 -m 0700 /var/lib/polarka-x402-public
+    useradd --system --user-group --no-create-home --shell /usr/sbin/nologin x402pub
+    install -d -o x402pub -g x402pub -m 0700 /var/lib/polarka-x402-public
+    # its RPC user x402pub and /etc/polarka-rpc/x402pub: ../rpc-users.md
     cp polarka-x402-public.service /etc/systemd/system/ && systemctl enable --now polarka-x402-public
     curl -s http://127.0.0.1:9571/supported
 
 `--public` makes it count requests by the address the web server writes into X-Forwarded-For (an IPv6 address
-by its /64): a payment to `/verify` or `/settle` at most `--per-minute` times a minute from one address (60)
-and ten times that from all of them together; more is answered `429` with `Retry-After: 60`. Only a request
-that would ask the node counts; `/supported` and a malformed request do not. It forgets an address a minute
-after its last request and writes none down. It keeps no catalog (`--bazaar-origin` is refused with
-`--public`), so what others sell is never listed in our name. It takes no new payment once it keeps
-`--most-payments` (20000): `/verify` and `/settle` then answer `settlement_failed`, which tells a seller to ask
-again later, while a payment it already has is still settled. Its folder then wants looking at.
+by its /64, and also by the /48 it is in): a payment to `/verify` or `/settle` at most `--per-minute` times a
+minute from one address (60), twice that from one /48, and ten times that from all of them together; more is
+answered `429` with `Retry-After: 60`. Only a request that would ask the node counts; `/supported` and a
+malformed request do not. It forgets an address a minute after its last request and writes none down; when it
+holds 10,000 addresses all the same, the one heard from longest ago makes room, so a newcomer is never turned
+away for a full table. It keeps no catalog (`--bazaar-origin` is refused with `--public`), so what others sell
+is never listed in our name. It takes no new payment once it keeps `--most-payments` (20000), and one place (an
+IPv4 address, an IPv6 /48) brings at most a twentieth of that in a day: `/verify` and `/settle` then answer
+`settlement_failed`, which tells a seller to ask again later, while a payment it already has is still settled.
+Its folder then wants looking at.
+
+What these bounds do not stop (review 10, M2): a sender with many addresses in many places can still use up the
+requests of all together, and twenty places can fill what is kept, at the price of the fees of the payments they
+bring. A payment it already has is counted like any other request, so while that lasts it waits too. The bounds
+keep the node and the gate's own facilitator out of it; they do not make this one always available.
 
 The web server passes it `/facilitator/supported`, `/facilitator/verify` and `/facilitator/settle`
 (`../postage/gate.caddy`); a seller names `https://gate.polarka.org/facilitator` as its facilitator. Check

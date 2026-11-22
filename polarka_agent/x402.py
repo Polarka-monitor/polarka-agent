@@ -113,18 +113,69 @@ def requirements(network, amount, pay_to, timeout=60, confirmations=None):
 
 # ------------------------------------------------------------------------------------------------ the seller
 
+class Blocks:
+    """Which of the payments a facilitator waits for went into which of the last SCAN_MOST blocks. Each block is read
+    once, when it comes (the first time, SCAN_MOST blocks back), and only the transactions waited for are written
+    down. So a payment whose paying output the seller has spent since is still found, and one that never went into
+    a block (its payer replaced it) costs two calls of the node however often it is shown, not a scan of hundreds of
+    blocks each time (review 10, H2). A reorganization is noticed by the hash of the block read last."""
+
+    def __init__(self, node, most=SCAN_MOST):
+        self.node, self.most, self.lock = node, most, threading.Lock()
+        self.read = {}              # height -> hash of the blocks read, the last `most` of them
+        self.top = None             # the height read last
+        self.found = {}             # txid -> height of the block it is in
+
+    def _forget_above(self, height):
+        for h in [h for h in self.read if h > height]:
+            del self.read[h]
+        self.found = {t: h for t, h in self.found.items() if h <= height}
+        self.top = max(self.read) if self.read else None
+
+    def depth(self, txid, waited):
+        """Blocks the transaction is in (1 or more), or None when it is in none of the last `most`. waited() gives
+        the txids to write down from blocks not read yet."""
+        with self.lock:
+            tip = int(self.node.call("getblockcount"))
+            if self.top is not None and (self.top > tip or self.node.call("getblockhash", self.top) != self.read[self.top]):
+                # another branch: back to the last block read that is still in the chain
+                h = min(self.top, tip)
+                while h in self.read and self.node.call("getblockhash", h) != self.read[h]:
+                    h -= 1
+                self._forget_above(h if h in self.read else -1)
+            start = max(tip - self.most + 1, 0) if self.top is None else self.top + 1
+            if start <= tip:
+                looked_for = waited()
+                for h in range(start, tip + 1):
+                    block_hash = self.node.call("getblockhash", h)
+                    for t in self.node.call("getblock", block_hash, 1).get("tx", ()):
+                        if t in looked_for:
+                            self.found[t] = h
+                    self.read[h] = block_hash
+                    self.top = h
+                for h in [h for h in self.read if h <= tip - self.most]:
+                    del self.read[h]
+                self.found = {t: h for t, h in self.found.items() if h > tip - self.most}
+            height = self.found.get(txid)
+            return None if height is None else tip - height + 1
+
+
 class Facilitator:
     """Checks payments and gives them to the seller's own node (a walletd.Node, or anything with call()). What it
     took is kept in `used` (a file, one JSON line a change), so that one payment cannot buy twice, not even after a
     start again."""
 
     def __init__(self, node, chain, used, confirmations=1, instant_below=0, redeliver=600, clock=time.time, catalog=None,
-                 most_payments=None):
-        if not 0 <= confirmations <= 100 or instant_below < 0 or redeliver < 0 or (most_payments is not None and most_payments < 1):
-            raise ValueError("confirmations 0 to 100, instant_below and redeliver 0 or more, most_payments 1 or more")
+                 most_payments=None, new_per_place=None):
+        if not 0 <= confirmations <= 100 or instant_below < 0 or redeliver < 0 or (most_payments is not None and most_payments < 1) \
+                or (new_per_place is not None and new_per_place < 1):
+            raise ValueError("confirmations 0 to 100, instant_below and redeliver 0 or more, most_payments and new_per_place 1 or more")
         self.node, self.chain, self.used_path = node, chain, used
         self.confirmations, self.instant_below, self.redeliver, self.clock = confirmations, instant_below, redeliver, clock
         self.most_payments = most_payments     # it keeps so many payments, then takes no new one (None: no bound)
+        # new payments one place (an IPv4 address, an IPv6 /48) may bring in a day, so that one sender cannot fill
+        # what is kept for all (review 10, M2); the places of this day only, in memory
+        self.new_per_place, self._today, self._added = new_per_place, None, {}
         self.catalog = catalog      # a bazaar.Catalog: what is settled and asks to be found goes into it
         self.told = threading.local()   # what the last settle of this thread says about the extensions
         self.lock = threading.Lock()
@@ -144,6 +195,15 @@ class Facilitator:
                     except ValueError:
                         continue                            # a line cut short when the machine stopped; the one before stands
                     self.known[rec["txid"]] = rec
+        self.blocks = Blocks(node)
+        try:
+            self.blocks.depth("", self._waited)     # the last blocks are read once now, not while a request waits
+        except Exception:
+            pass                                    # a node that does not answer yet: they are read when first needed
+
+    def _waited(self):
+        with self.lock:
+            return {t for t, r in self.known.items() if r.get("state") == WAITING}
 
     def needed(self, amount):
         """Blocks a payment of this amount must be in before what it buys is given."""
@@ -223,7 +283,7 @@ class Facilitator:
     def _depth(self, txid, vout, since=None):
         """Blocks the payment is in (0: waiting in the node), or None when the node no longer knows it. A paying
         output the seller has spent since is not in the node's set of coins any more: then the payment is looked
-        for in the blocks made since `since` (a time), at most SCAN_MOST of them (human review, 22 November)."""
+        for in the last SCAN_MOST blocks (human review, 22 November), each of which is read once (review 10, H2)."""
         out = self.node.call("gettxout", txid, vout, True)
         if out is not None:
             return int(out.get("confirmations", 0))
@@ -235,16 +295,9 @@ class Facilitator:
         if since is None:
             return None
         try:
-            tip = int(self.node.call("getblockcount"))
-            for height in range(tip, max(0, tip - SCAN_MOST), -1):
-                block = self.node.call("getblock", self.node.call("getblockhash", height), 1)
-                if txid in block.get("tx", ()):
-                    return tip - height + 1
-                if int(block.get("time", 0)) < since - 7200:      # block times may run up to two hours behind
-                    break
+            return self.blocks.depth(txid, self._waited)
         except Exception:
-            pass                        # a node that does not let this user read blocks: as before, not found
-        return None
+            return None                 # a node that does not let this user read blocks: as before, not found
 
     def _fail(self, why, txid=None, **more):
         return dict({"success": False, "errorReason": why, "transaction": txid or "", "network": self.network, "payer": None}, **more)
@@ -269,6 +322,18 @@ class Facilitator:
         """It keeps as many payments as it may: a new one is refused, one it has is still settled."""
         return self.most_payments is not None and len(self.known) >= self.most_payments
 
+    def _may_add(self, who, now):
+        """Under the lock: a place that brought new_per_place new payments this day brings no more until the next."""
+        if who is None or self.new_per_place is None:
+            return True
+        day = int(now // 86400)
+        if self._today != day:
+            self._today, self._added = day, {}
+        if self._added.get(who, 0) >= self.new_per_place:
+            return False
+        self._added[who] = self._added.get(who, 0) + 1
+        return True
+
     def verify(self, payment, wanted):
         # the node is asked outside the lock; only self.known is read under it (human review, 22 November)
         txid, raw, claim, decoded, why = self._read(payment)
@@ -292,12 +357,13 @@ class Facilitator:
                     why = "transaction_refused_by_node"
         return {"isValid": why is None, "invalidReason": why, "payer": None}
 
-    def settle(self, payment, wanted):
+    def settle(self, payment, wanted, who=None):
         """Takes the payment. Gives success once it is deep enough; until then "awaiting_confirmation" with how deep
         it is. The same payment with the same claim may be shown again as often as needed. A settled payment that
-        carries the bazaar extension puts its resource into the catalog; what came of that is in self.told.bazaar."""
+        carries the bazaar extension puts its resource into the catalog; what came of that is in self.told.bazaar.
+        who: the place the request came from, for new_per_place."""
         self.told.bazaar = None
-        done = self._settle(payment, wanted)
+        done = self._settle(payment, wanted, who)
         if done.get("success") and not done.get("redelivered") and self.catalog is not None:
             try:
                 self.told.bazaar = self.catalog.add(payment, wanted)
@@ -305,7 +371,7 @@ class Facilitator:
                 self.told.bazaar = {"status": "rejected", "rejectedReason": "the catalog could not be written"}
         return done
 
-    def _settle(self, payment, wanted):
+    def _settle(self, payment, wanted, who=None):
         # The node is asked outside the lock (human review, 22 November): under it only self.known and the file are
         # read and written, so that one caller who floods or a node that is slow holds up nobody else. A payment is
         # still written down before the node has it, and once: who comes second finds it written.
@@ -330,7 +396,7 @@ class Facilitator:
             with self.lock:
                 rec = self.known.get(txid)                              # another request may have written it meanwhile
                 if rec is None:
-                    if self._full():
+                    if self._full() or not self._may_add(who, now):
                         return self._fail("settlement_failed", txid)
                     rec = {"txid": txid, "claim": mark(claim) if claim else None, "vout": vout, "need": need,
                            "resource": self._resource(payment, wanted),
@@ -422,6 +488,13 @@ def caller(address):
     return place(address, 64)
 
 
+def wide(address):
+    """The wider place a caller counts against too: the IPv6 /48 its /64 is in, which one site may hold whole; none
+    for an IPv4 address (review 10, M2)."""
+    p = place(address, 48)
+    return p if "/" in p else None
+
+
 def facilitator_server(facilitator, listen=("127.0.0.1", 0), most=64, public=False, per_minute=60, clock=time.monotonic):
     """The facilitator as a service, as x402 names it: GET /supported, POST /verify and POST /settle with
     {"x402Version": 2, "paymentPayload": ..., "paymentRequirements": ...}. It keeps no coins and signs nothing: it
@@ -470,8 +543,9 @@ def facilitator_server(facilitator, listen=("127.0.0.1", 0), most=64, public=Fal
 
         def client(self):
             # behind the web server the last entry of the last X-Forwarded-For is the address it saw; whatever the
-            # caller wrote before it counts for nothing
-            return caller(forwarded(self) or self.client_address[0])
+            # caller wrote before it counts for nothing. The caller, and the wider place it counts against too.
+            address = forwarded(self) or self.client_address[0]
+            return caller(address), wide(address)
 
         def do_POST(self):
             settle = self.path == "/settle"
@@ -513,13 +587,17 @@ def facilitator_server(facilitator, listen=("127.0.0.1", 0), most=64, public=Fal
                 answer = ({"success": False, "errorReason": why, "transaction": "", "network": facilitator.network, "payer": None}
                           if settle else {"isValid": False, "invalidReason": why, "payer": None})
                 return self.send(200, answer)
-            if limiter is not None and not limiter.take(self.client()):
-                # counted only here, before the node is asked: the body is read, so the web server gets the answer
-                self.close_connection = True
-                return self.send(429, {"error": "too many requests from one address; try again in a minute"}, {"Retry-After": "60"})
+            place_of = {}
+            if limiter is not None:
+                who, wider = self.client()
+                if not limiter.take(who, wider):
+                    # counted only here, before the node is asked: the body is read, so the web server gets the answer
+                    self.close_connection = True
+                    return self.send(429, {"error": "too many requests from one address; try again in a minute"}, {"Retry-After": "60"})
+                place_of = {"who": wider or who}       # new payments a day count against the wider place
             more = {}
             try:
-                answer = facilitator.settle(payment, wanted) if settle else facilitator.verify(payment, wanted)
+                answer = facilitator.settle(payment, wanted, **place_of) if settle else facilitator.verify(payment, wanted)
                 told = getattr(getattr(facilitator, "told", None), "bazaar", None) if settle else None
                 if told:
                     more["EXTENSION-RESPONSES"] = b64json({"bazaar": told})
@@ -640,11 +718,12 @@ def _book(wallet):
 def _keep_book(wallet, book):
     path = os.path.join(wallet.folder, PENDING)
     tmp = path + ".new"
-    with open(tmp, "w") as f:
+    # 600 from the first byte, whatever the umask: it holds claims and signed payments (review 10, L5)
+    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
         json.dump(book, f, separators=(",", ":"))
         f.flush()
         os.fsync(f.fileno())
-    os.chmod(tmp, 0o600)
+    os.chmod(tmp, 0o600)                    # one left by an older version keeps its mode through O_TRUNC
     os.replace(tmp, path)
 
 
@@ -747,6 +826,8 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
         if not 0 < amount <= most:
             raise Refused("X402_TOO_MUCH", "the resource asks %s NORTH, more than the %s allowed for it" % (north(amount), north(most)))
         made = wallet.pay([(offer["payTo"], amount)], "x402 " + url[:150], hand=False)
+        if not isinstance(made.get("raw"), str) or not isinstance(made.get("id"), str):
+            raise Refused("X402", "the wallet gave no signed payment to hand over")     # a signing service of another kind
         claim = os.urandom(16).hex()
         payment = {"x402Version": VERSION, "resource": needed.get("resource"), "accepted": offer,
                    "payload": {"transaction": made["raw"], "claim": claim}}

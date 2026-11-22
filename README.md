@@ -42,7 +42,9 @@ that the tools given to the program cannot change.
   can, can change `limits.json`, move the journal away or read the words. Against that, run the wallet as a
   signing service under a user of its own (from 0.2.3, on main; next section): the agent's user then only asks.
 - A payment counts into its day whatever became of it; only the owner's `forget` takes one out. A payment
-  that another one replaced therefore counts twice for a day.
+  that another one replaced therefore counts twice for a day. One whose outcome stayed open for a day or more (a
+  payment signed for x402 and held back, say) and then goes out counts for the day it goes out (from 0.2.3, on
+  main; review 10, H1).
 - What a wallet server says in words is not passed on to the program: a refusal comes as one of a few fixed
   words and an error as its HTTP status.
 
@@ -52,29 +54,38 @@ on a machine its owner controls.
 
 ## The words apart: a signing service (from 0.2.3)
 
-On main, not yet released or reviewed. The wallet runs as a service under a user of the system of its own: its
-folder, with the words and the journal, is that user's alone, and `limits.json` is root's. The agent runs as its
-own user, in a group that may use the service's socket, and asks: what the wallet holds, an address, to pay, to
-stamp. It cannot read the words, change the limits or forget a payment. The rules of paying are the wallet's,
-unchanged, and when the service does not run, the agent pays nothing.
+On main, not yet released; review 10 read it, and what it found is mended (`docs/review-guide.md`). The wallet runs
+as a service under a user of the system of its own: its folder, with the words and the journal, is that user's alone,
+and `limits.json` is root's. The agent runs as a user of its own too, one that cannot administer the machine, in a
+group that may use the service's socket, and asks: what the wallet holds, an address, to pay, to stamp. It cannot
+read the words, change the limits or forget a payment. The rules of paying are the wallet's, unchanged, and when the
+service does not run, the agent pays nothing. Set it up from an account the agent does not use:
 
-    polarka-agent signer-setup --per-payment 0.1 --per-day 1 > setup.sh    # prints a script: read it
-    sudo sh setup.sh                                                         # the user, the group, the service
-    polarka-agent signer-setup --check                                       # as the agent's user, logged in again
-    polarka-agent --signer SOCKET mcp                                        # or POLARKA_SIGNER=SOCKET
+    polarka-agent signer-setup --agent-user AGENT --per-payment 0.1 --per-day 1 > setup.sh   # a script: read it
+    sudo sh setup.sh                          # the users, the group, the program, a new wallet, the service
+
+The script ends by saying how to look at the result as the agent's user, with the service's own Python (on Linux
+`sudo -u AGENT /opt/polarka-signer/venv/bin/python3 -I -m polarka_agent signer-setup --check`), and the agent is then
+given `polarka-agent --signer SOCKET mcp`, or `POLARKA_SIGNER=SOCKET`.
 
 On Linux the service is a systemd unit run as `polarka-signer`, with the wallet in `/var/lib/polarka-signer` and its
 socket at `/run/polarka-signer/signer.sock`. On macOS it is a LaunchDaemon run as a hidden user `_polarkasigner`,
 with the wallet in `/Library/Application Support/PolarkaSigner/wallet` and the socket in `.../PolarkaSigner/run`.
-The program the service runs is installed where only root can change it (on macOS with Apple's own Python), since
-it runs with the words. The script makes a new wallet in the service and shows its words once. `--move-from FOLDER`
-moves an existing one instead; but an agent that could read that wallet may know its words, so the whole of the
-gain is a new wallet and the coins paid over to it. `--check` looks, as the agent's user, at the socket, the
-service, who may open its folder, who may change `limits.json` and the program, and at sudo without a password.
+The program the service runs is installed where only root can change it (on macOS with Apple's own Python), from PyPI
+at the version the script names, or from a wheel named with `--wheel`, used only if its SHA-256 is still the one it
+had when the script was printed. The script runs in an empty environment, so that nothing of the account that ran
+sudo reaches root's Python and pip. It makes a new wallet in the service and shows its words once. `--move-from
+FOLDER` moves an existing one instead, reading only plain files and as the agent's user; but an agent that could read
+that wallet may know its words, so the whole of the gain is a new wallet and the coins paid over to it. `--check`
+looks, as the agent's user, at the socket, the service, who may open its folder, who may change `limits.json`, the
+program and every place it takes modules from, and whether that user can administer the machine. Run it with the
+service's own Python, as above: a copy that the agent can change could say anything.
 
-It keeps nothing from an agent whose user can become root or the service's user (sudo without a password, or root
-itself), nor on a machine that someone else took over: then what the wallet holds is at stake, so keep little in
-it. `forget` and making a wallet stay with the owner, run as the service's user on its folder. Without `--signer`
+It keeps nothing from an agent whose user can administer the machine (sudo with a password or without, admin,
+docker and the like: such an agent can wait for its owner's password), nor on a machine that someone else took over;
+then what the wallet holds is at stake, so keep little in it. `signer-setup` refuses such an agent's user unless told
+`--admin-agent`, and the service then keeps only the simple ways in shut: reading the words, writing the limits.
+`forget` and making a wallet stay with the owner, run as the service's user on its folder. Without `--signer`
 everything works as before, and the MCP server says in its log that the words can be read by its user.
 
 ## Paying, and a server that says no
@@ -126,7 +137,9 @@ faucet with the faults that `docs/faucet-review-0.1.2.md` names.
     python3 -m polarka_agent --dir FOLDER mcp
     python3 -m polarka_agent --signer SOCKET balance | pay ... | fetch ... | mcp      (through a signing service)
     python3 -m polarka_agent --dir FOLDER signer-serve --socket SOCKET --group GROUP
-    python3 -m polarka_agent signer-setup [--check]
+    python3 -m polarka_agent signer-setup --agent-user USER [--per-payment N --per-day N] [--move-from FOLDER]
+                                          [--package polarka-agent==X | --wheel FILE] [--admin-agent]
+    python3 -m polarka_agent signer-setup --check            (as the agent's user, with the service's Python)
 
 Every command prints one JSON object, but `signer-setup` without `--check`, which prints a script. Amounts are
 NORTH, written as text. `new --chain main` takes the public server of the Northbound project

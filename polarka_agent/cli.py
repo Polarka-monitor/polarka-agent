@@ -149,17 +149,24 @@ def run(argv=None, out=sys.stdout):
     c = sub.add_parser("signer-setup", help="print a script that sets up a signing service on this system (Linux with systemd, "
                                             "or macOS), for its owner to read and run as root; with --check, look at one "
                                             "that is set up, as the agent's user. Without --check this prints a script, not JSON")
-    c.add_argument("--agent-user", help="the user the agent runs as, who may ask the service (default: this user)")
+    c.add_argument("--agent-user", help="the user the agent runs as, who may ask the service (default: this user); it must "
+                   "not be able to administer the machine")
+    c.add_argument("--admin-agent", action="store_true", help="let --agent-user be a user who can administer the machine "
+                   "(sudo, admin, docker ...), knowing that the service then keeps from the agent only the simple ways in")
     c.add_argument("--move-from", metavar="FOLDER", help="move the wallet of this folder to the service; without it a new "
                    "wallet is made there")
     c.add_argument("--per-payment", help="NORTH the service may pay by itself at once (with --per-day; without them it pays "
                    "nothing until limits.json is written)")
     c.add_argument("--per-day", help="NORTH the service may pay by itself in a day")
-    c.add_argument("--package", help="what pip installs for the service (default: polarka-agent==%s)" % __version__)
+    c.add_argument("--package", help="the version from PyPI that the service runs, polarka-agent==VERSION (default: "
+                   "polarka-agent==%s)" % __version__)
+    c.add_argument("--wheel", help="in place of --package: a wheel file, installed only if its SHA-256 is still the one "
+                   "it has when the script is printed")
     c.add_argument("--system", choices=("linux", "macos"), help="default: this system")
     c.add_argument("--check", action="store_true", help="look at the service as this user: its socket, that this user "
-                   "cannot open the words, who may change the program it runs, sudo without a password")
-    c.add_argument("--socket", help="with --check: the socket (default: where the script puts it)")
+                   "cannot open the words, who may change the program it runs, whether this user can administer the "
+                   "machine; best run with the service's own Python (the script says how)")
+    c.add_argument("--socket", help="with --check: the socket (default: --signer, else where the script puts it)")
     c.add_argument("--service-dir", help="with --check: the service's folder")
     c.add_argument("--venv", help="with --check: the folder of the program the service runs")
     c = sub.add_parser("faucet", help="ask a faucet for a first coin, to a fresh address of this wallet")
@@ -274,12 +281,13 @@ def run(argv=None, out=sys.stdout):
                              % (folder, listening.path, "the group %s" % a.group if a.group else "this user only"))
             return listening.run()
         if a.cmd == "signer-setup":
-            from .signer import check, setup_script
+            from .signer import check, setup_script, this_user
             if a.check:
-                done = check(a.socket, a.service_dir and os.path.expanduser(a.service_dir), a.venv and os.path.expanduser(a.venv), a.system)
+                done = check(a.socket or signer, a.service_dir and os.path.expanduser(a.service_dir),
+                             a.venv and os.path.expanduser(a.venv), a.system)
                 return show(done, 0 if done["ok"] else 2)
-            import getpass
-            out.write(setup_script(a.system, a.agent_user or getpass.getuser(), a.move_from, a.per_payment, a.per_day, a.package))
+            out.write(setup_script(a.system, a.agent_user or this_user(), a.move_from, a.per_payment, a.per_day, a.package,
+                                   a.wheel, a.admin_agent))
             return 0
         if signer and a.cmd in ("new", "forget", "postage-serve", "stamps-serve", "faucet-serve", "pool-serve"):
             raise Refused("SIGNER", "%s works on a wallet's own folder, not through a signing service: run it as the service's "
@@ -389,7 +397,9 @@ def run(argv=None, out=sys.stdout):
                     raise Refused("INPUT", "--bazaar-origin is an https:// origin, for example https://gate.polarka.org")
                 catalog = Catalog(os.path.join(folder, "x402-bazaar.json"), a.bazaar_origin)
             facilitator = Facilitator(RpcNode(a.rpc_url, os.path.expanduser(a.rpc_cookie), timeout=30), a.chain, os.path.join(folder, "x402-used.jsonl"),
-                                      a.confirmations, units(a.instant_below), a.redeliver, catalog=catalog, most_payments=most_payments)
+                                      a.confirmations, units(a.instant_below), a.redeliver, catalog=catalog, most_payments=most_payments,
+                                      # one place brings at most a twentieth of what is kept, in a day (review 10, M2)
+                                      new_per_place=max(1, most_payments // 20) if a.public and most_payments else None)
             if a.chain in NETWORKS and facilitator.network != NETWORKS[a.chain]:
                 raise Refused("CHAIN", "the node runs another chain than --chain")
             server = facilitator_server(facilitator, (host, port), most=32 if a.public else 64, public=a.public, per_minute=a.per_minute)

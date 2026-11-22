@@ -343,8 +343,9 @@ class Item5Mcp(unittest.TestCase):
                     "https://169.254.169.254/latest/", "https://printer.local/", "https://[::ffff:127.0.0.1]/", "ftp://x.org/", None):
             with self.assertRaises(Refused, msg=url):
                 mcp.outside(url)
+        public = lambda host, port, **k: [(2, 1, 6, "", ("185.33.145.183", port))]     # what the name stands for, here
         for url in ("https://gate.polarka.org/v1/stamp/x", "https://8.8.8.8/"):
-            mcp.outside(url)
+            mcp.outside(url, public)
 
     def test_a_line_is_read_with_a_bound_and_deep_json_is_refused(self):
         import io

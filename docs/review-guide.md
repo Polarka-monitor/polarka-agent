@@ -25,18 +25,23 @@ Specification draft for x402: `docs/x402-scheme-exact-bip122.md` (also open as x
 
 1. `x402.py`, `Facilitator.verify` and `Facilitator.settle`: one payment must buy one resource once; a copy of
    a waiting transaction must buy nothing (the `claim`); a payment shown again must cover today's price.
-2. New on main, not yet reviewed: `x402.py`, `facilitator_server(public=True)`, `Limiter`, `caller` and
-   `Facilitator._full`, with `deploy/x402/polarka-x402-public.service` and the `/facilitator` routes in
-   `deploy/postage/gate.caddy` (the facilitator for sellers from outside, from 0.2.3). Nothing an outside caller
-   sends may reach the gate's own facilitator, its payments or its catalog; an X-Forwarded-For the caller writes
-   must count for nothing; the bounds must hold for a machine with a whole IPv6 /64; a full facilitator must
-   take no new payment and still settle the ones it has.
-3. New on main, not yet reviewed: `signer.py`, the signing service (the first review's F4, review 8's M4). The
-   agent's user must reach neither the words nor `limits.json`, and through the socket only the wallet's own
-   operations, under the wallet's rules; a caller that holds a connection or sends too much holds nothing long.
-   Then the scripts `signer-setup` prints (the users and groups, the program installed where only root can change
-   it, the systemd unit and the LaunchDaemon) and what `--check` concludes. Tests: `tests/test_signer.py`, part of
-   them as root on Linux with real users (`POLARKA_TEST_USERS=1`).
+2. New on main for 0.2.3: `x402.py`, `facilitator_server(public=True)`, `Limiter`, `caller`,
+   `Facilitator._full` and `_may_add`, and `Blocks`, with `deploy/x402/polarka-x402-public.service` and the
+   `/facilitator` routes in `deploy/postage/gate.caddy` (the facilitator for sellers from outside). Nothing an
+   outside caller sends may reach the gate's own facilitator, its payments or its catalog; an X-Forwarded-For the
+   caller writes must count for nothing; the bounds must hold for a machine with a whole IPv6 /64, and one with a
+   /48 must not use them all up; a full facilitator must take no new payment and still settle the ones it has; a
+   payment that never settles must not cost the node a reading of the chain on each request. Review 10 read it
+   (H2 and M2 below); nobody but their author has read its fixes yet.
+3. New on main for 0.2.3: `signer.py`, the signing service (the first review's F4, review 8's M4). The agent's
+   user must reach neither the words nor `limits.json`, and through the socket only the wallet's own operations,
+   under the wallet's rules, the day limit included; a caller that holds a connection or sends too much holds
+   nothing long. Then the scripts `signer-setup` prints (the users and groups, the program installed where only
+   root can change it from a pinned version or a wheel of known SHA-256, in an empty environment; the systemd unit
+   and the LaunchDaemon), what `--check` concludes, and the refusal of an agent's user that can administer the
+   machine. Tests: `tests/test_signer.py` and `tests/test_review10.py`, part of them as root on Linux with real
+   users (`POLARKA_TEST_USERS=1`). Review 10 read it (H1, H3, M1, M3 and M4 below); nobody but their author has
+   read its fixes yet.
 4. `x402.py`, `fetch`: an agent must never pay twice for one resource, nor more than `most`, nor send its
    payment anywhere but the URL asked.
 5. `postage.py`, `Gate.x402_pay` and the handler: a lot of calls must not be had without a confirmed payment.
@@ -48,7 +53,7 @@ Specification draft for x402: `docs/x402-scheme-exact-bip122.md` (also open as x
 
 ## What has been checked, and by whom
 
-One review by a person, and before it five by AI models that did not write the code:
+One review by a person, and six by AI models that did not write the code (five before it, one after):
 
 - the first review by a person (a programmer, 22 November 2026, of the package of that morning: all of
   polarka-agent, the server's configuration and scripts, the watcher and the logs; not the Android wallet and
@@ -111,18 +116,41 @@ One review by a person, and before it five by AI models that did not write the c
   that ships with macOS fails on plain-HTTP clones over HTTP/2 (a fault of its libcurl), so polarka.org speaks
   HTTP/1.1 only since 22 November.
 
-Review 9 read the fixes of review 8 and found them sound. Nobody but its author has read the fixes of review 9.
-Nor the facilitator for sellers from outside (item 2 above), on main since 22 November; it opens only with
-0.2.3, after review 10. Nor the signing service (item 3), on main since 22 November for 0.2.3.
+- review 10 (a fresh AI agent, 22 November 2026, of v0.2.2..665d8e5: the signing service, the facilitator for
+  sellers from outside and the fixes of the human review): 3 High, 4 Medium, 6 Low, 9 Info. H1: a payment signed
+  without being handed over (as x402 signs them) counted only for the day it was signed, so an agent that held it
+  back for a day and then sent it itself could at once pay a second day's limit; in 0.2.2 the same is open to an
+  MCP-only agent through `north_fetch` to a seller of its own. H2: a payment replaced by fee stayed waiting for
+  ever, and each `/settle` that showed it again had the node read up to 288 blocks twice, about 1,160 calls, as
+  often as the bounds allowed. H3: on macOS the setup script ran Python and pip as root with the HOME that sudo
+  keeps, so a `.pth` or a `pip.conf` of the agent's could decide what runs as root. M1: moving a wallet followed
+  the agent's links as root. M2: one sender with an IPv6 /48 could use up the public facilitator's bounds, and
+  payments that never settle could fill its book. M3: `--package` took pip options and paths, and `--check` did
+  not look where the program is imported from. M4: the agent's user was by default the owner's admin account.
+  Mended on 22 November, on main with tests (`tests/test_review10.py`), not yet released: all of these, L1 to L6,
+  I3 (the public facilitator runs as a user of its own, with an RPC user of its own), I8 and I9. A payment that
+  stayed open for a day or more and then goes out counts for the day it goes out; the facilitator keeps an index
+  of the blocks it has read and reads each new block once; the script starts itself again in an empty
+  environment, runs Python with `-I` and pip with `--isolated`; a move reads plain files only, as the agent's
+  user; a /48 has a bucket of its own over its /64s, the table of callers lets the longest idle go, and one place
+  may add only a twentieth of the book's room a day; the program is a pinned version or a wheel whose SHA-256 the
+  script checks, and `--check` follows every place the program takes modules from; an agent's user that can
+  administer the machine is refused unless the owner says `--admin-agent`. Open: I1 until the release, I2, I4 to
+  I7, and what a sender with many /48s can still do against the public facilitator (`deploy/x402/README.md`).
+
+Review 9 read the fixes of review 8 and found them sound, and review 10 found most of the fixes of the human
+review correct. Nobody but its author has read the fixes of review 9 and review 10. The facilitator for sellers
+from outside (item 2 above) opens only with 0.2.3.
 
 Their reports can be had on request. Low findings that are still open are listed in them. Earlier parts of the
-project (wallet, pool) went through four further AI reviews. No person outside has read the code.
+project (wallet, pool) went through four further AI reviews. No person outside has read the code since the
+package that the first review by a person read.
 
 ## How to run it yourself
 
     git clone https://github.com/Polarka-monitor/polarka-agent && cd polarka-agent   # or the copy you were given
     # a TrueNorth Core build (truenorthd, truenorth-cli) in a folder; tests start their own regtest node
-    TN_BIN=/path/to/bin python3 -m unittest discover -s tests -t .      # about 6 minutes, 290 tests
+    TN_BIN=/path/to/bin python3 -m unittest discover -s tests -t .      # about 6 minutes, 309 tests
     # as root on Linux, the signing service with real users of the system (it makes and removes three):
     sudo POLARKA_TEST_USERS=1 python3 -m unittest tests.test_signer.ApartOnLinux
 
@@ -137,9 +165,10 @@ Caddy is in front of the gate, the faucet, the pool, polarka.org and a wallet se
 (node.polarka.org, a walletd apart from the pool's), and passes to the facilitator only its read-only routes
 (`GET /x402/supported` and `/x402/discovery/*` at gate.polarka.org), never `/verify` or `/settle`. From 0.2.3 a
 second facilitator, for sellers from outside, gets `/facilitator/{supported,verify,settle}` there: a process
-apart, with a folder of its own, bounds on requests and on payments kept, and no catalog. Buyers are
-programs with a spending limit set by their owner in a file the program cannot change while it has the MCP tools
-only, or, with the signing service (from 0.2.3), whatever it can run as its own user short of becoming root.
+apart, with a user of the system and an RPC user of its own, a folder of its own, bounds on requests and on
+payments kept, and no catalog. Buyers are programs with a spending limit set by their owner in a file the program
+cannot change while it has the MCP tools only, or, with the signing service (from 0.2.3), whatever it can run as a
+user of its own that cannot administer the machine.
 Miners are anybody: the pool is open and pays any address since 21 November 2026. NORTH has no market price
 today; the money at risk is the pool's reserve (5000 NORTH, at most 10,000 paid out a day), the faucet's and the
 stamps' small wallets, and every buyer's limit. The chain is a Bitcoin Core 30 fork: waiting transactions are

@@ -35,8 +35,9 @@ class Fake:
         self.calls.append("verify")
         return {"isValid": True, "invalidReason": None, "payer": None}
 
-    def settle(self, payment, wanted):
+    def settle(self, payment, wanted, who=None):
         self.calls.append("settle")
+        self.who = who                          # the place a new payment counts against (review 10, M2)
         self.told.bazaar = {"status": "listed"} if self.catalog is not None else None
         return {"success": True, "transaction": "ab" * 32, "network": self.network, "payer": None}
 
