@@ -31,6 +31,7 @@ NORTH may be named so. Until then only clients that know this module pay in NORT
 """
 import base64
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -111,11 +112,13 @@ class Facilitator:
     took is kept in `used` (a file, one JSON line a change), so that one payment cannot buy twice, not even after a
     start again."""
 
-    def __init__(self, node, chain, used, confirmations=1, instant_below=0, redeliver=600, clock=time.time, catalog=None):
-        if not 0 <= confirmations <= 100 or instant_below < 0 or redeliver < 0:
-            raise ValueError("confirmations 0 to 100, instant_below and redeliver 0 or more")
+    def __init__(self, node, chain, used, confirmations=1, instant_below=0, redeliver=600, clock=time.time, catalog=None,
+                 most_payments=None):
+        if not 0 <= confirmations <= 100 or instant_below < 0 or redeliver < 0 or (most_payments is not None and most_payments < 1):
+            raise ValueError("confirmations 0 to 100, instant_below and redeliver 0 or more, most_payments 1 or more")
         self.node, self.chain, self.used_path = node, chain, used
         self.confirmations, self.instant_below, self.redeliver, self.clock = confirmations, instant_below, redeliver, clock
+        self.most_payments = most_payments     # it keeps so many payments, then takes no new one (None: no bound)
         self.catalog = catalog      # a bazaar.Catalog: what is settled and asks to be found goes into it
         self.told = threading.local()   # what the last settle of this thread says about the extensions
         self.lock = threading.Lock()
@@ -241,6 +244,10 @@ class Facilitator:
     def _owner(self, rec, claim):
         return claim is not None and rec.get("claim") is not None and rec["claim"] == mark(claim)
 
+    def _full(self):
+        """It keeps as many payments as it may: a new one is refused, one it has is still settled."""
+        return self.most_payments is not None and len(self.known) >= self.most_payments
+
     def verify(self, payment, wanted):
         with self.lock:
             txid, raw, claim, decoded, why = self._read(payment)
@@ -256,6 +263,8 @@ class Facilitator:
                 why = self._matches(payment, decoded, wanted)[1]
                 if why is None and self._need(wanted) and claim is None:
                     why = "claim_required"
+                if why is None and self._full():
+                    why = "settlement_failed"                           # it takes no new payment now; ask again later
                 if why is None and not self._node_takes(raw):
                     why = "transaction_refused_by_node"
         return {"isValid": why is None, "invalidReason": why, "payer": None}
@@ -287,6 +296,8 @@ class Facilitator:
                 need = self._need(wanted)
                 if need and claim is None:
                     return self._fail("claim_required", txid)
+                if self._full():
+                    return self._fail("settlement_failed", txid)        # it takes no new payment now; ask again later
                 if not self._node_takes(raw):
                     return self._fail("transaction_refused_by_node", txid)
                 rec = {"txid": txid, "claim": mark(claim) if claim else None, "vout": vout, "need": need,
@@ -393,10 +404,68 @@ class Bounded(ThreadingHTTPServer):
             self.slots.release()
 
 
-def facilitator_server(facilitator, listen=("127.0.0.1", 0), most=64):
+def caller(address):
+    """Whom a request counts against: its address, and for IPv6 the /64 it is in, which one machine may hold whole."""
+    try:
+        ip = ipaddress.ip_address(address)
+    except ValueError:
+        return address[:64]
+    if ip.version == 6:
+        if ip.ipv4_mapped is not None:
+            return str(ip.ipv4_mapped)
+        return str(ipaddress.ip_network((ip, 64), strict=False))
+    return str(ip)
+
+
+class Limiter:
+    """At most `per_minute` requests a minute from one caller, and ten times that from all of them together: a
+    bucket each, refilled evenly. A caller is forgotten a minute after its last request, when its bucket is full
+    again; none is written down. For a facilitator that serves sellers from outside."""
+
+    def __init__(self, per_minute, clock=time.monotonic, most_callers=10000):
+        if not 1 <= per_minute <= 600:
+            raise ValueError("per_minute is 1 to 600")
+        self.per_minute, self.clock, self.most = per_minute, clock, most_callers
+        self.buckets = {}               # caller -> (tokens, when)
+        self.all = (float(per_minute * 10), clock())
+        self.swept = clock()
+        self.lock = threading.Lock()
+
+    @staticmethod
+    def _take(held, rate, size, now):
+        tokens = min(float(size), held[0] + (now - held[1]) * rate)
+        if tokens < 1:
+            return False, (tokens, now)
+        return True, (tokens - 1, now)
+
+    def take(self, who):
+        with self.lock:
+            now, rate = self.clock(), self.per_minute / 60.0
+            if now - self.swept >= 60 or (who not in self.buckets and len(self.buckets) >= self.most):
+                self.buckets = {k: v for k, v in self.buckets.items() if now - v[1] < 60}   # full again: nothing lost
+                self.swept = now
+                if who not in self.buckets and len(self.buckets) >= self.most:
+                    return False
+            ok, self.buckets[who] = self._take(self.buckets.get(who, (float(self.per_minute), now)), rate, self.per_minute, now)
+            if not ok:
+                return False
+            ok, self.all = self._take(self.all, rate * 10, self.per_minute * 10, now)
+            return ok
+
+
+def facilitator_server(facilitator, listen=("127.0.0.1", 0), most=64, public=False, per_minute=60, clock=time.monotonic):
     """The facilitator as a service, as x402 names it: GET /supported, POST /verify and POST /settle with
     {"x402Version": 2, "paymentPayload": ..., "paymentRequirements": ...}. It keeps no coins and signs nothing: it
-    checks a payment and hands it to its node. For sellers that have no node of their own."""
+    checks a payment and hands it to its node. For sellers that have no node of their own.
+
+    With `public` it serves sellers from outside, behind a web server that names the caller in X-Forwarded-For:
+    it takes a payment to /verify or /settle at most `per_minute` times a minute from one caller (an IPv6 address
+    by its /64) and ten times that from all of them together, and it keeps no catalog, so that nothing others sell
+    is listed in our name. Run it apart from the facilitator of one's own gate: its payments, its lock and its
+    memory are then its own."""
+    if public and getattr(facilitator, "catalog", None) is not None:
+        raise ValueError("a facilitator for sellers from outside keeps no catalog")
+    limiter = Limiter(per_minute, clock) if public else None
 
     class Handler(OneRequestWithBody, BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -429,6 +498,13 @@ def facilitator_server(facilitator, listen=("127.0.0.1", 0), most=64):
                 return self.send(200, catalog.resources(params) if parts.path == "/discovery/resources" else catalog.search(params))
             self.send(404, {"error": "there is /supported, /verify and /settle here"
                                      + (", and /discovery/resources and /discovery/search" if catalog is not None else "")})
+
+        def client(self):
+            # behind the web server the last entry of the last X-Forwarded-For is the address it saw; whatever the
+            # caller wrote before it counts for nothing
+            said = self.headers.get_all("X-Forwarded-For") or []
+            last = said[-1].split(",")[-1].strip() if said else ""
+            return caller(last or self.client_address[0])
 
         def do_POST(self):
             settle = self.path == "/settle"
@@ -470,6 +546,10 @@ def facilitator_server(facilitator, listen=("127.0.0.1", 0), most=64):
                 answer = ({"success": False, "errorReason": why, "transaction": "", "network": facilitator.network, "payer": None}
                           if settle else {"isValid": False, "invalidReason": why, "payer": None})
                 return self.send(200, answer)
+            if limiter is not None and not limiter.take(self.client()):
+                # counted only here, before the node is asked: the body is read, so the web server gets the answer
+                self.close_connection = True
+                return self.send(429, {"error": "too many requests from one address; try again in a minute"}, {"Retry-After": "60"})
             more = {}
             try:
                 answer = facilitator.settle(payment, wanted) if settle else facilitator.verify(payment, wanted)

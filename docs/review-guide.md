@@ -24,13 +24,19 @@ Specification draft for x402: `docs/x402-scheme-exact-bip122.md` (also open as x
 
 1. `x402.py`, `Facilitator.verify` and `Facilitator.settle`: one payment must buy one resource once; a copy of
    a waiting transaction must buy nothing (the `claim`); a payment shown again must cover today's price.
-2. `x402.py`, `fetch`: an agent must never pay twice for one resource, nor more than `most`, nor send its
+2. New on main, not yet reviewed: `x402.py`, `facilitator_server(public=True)`, `Limiter`, `caller` and
+   `Facilitator._full`, with `deploy/x402/polarka-x402-public.service` and the `/facilitator` routes in
+   `deploy/postage/gate.caddy` (the facilitator for sellers from outside, from 0.2.3). Nothing an outside caller
+   sends may reach the gate's own facilitator, its payments or its catalog; an X-Forwarded-For the caller writes
+   must count for nothing; the bounds must hold for a machine with a whole IPv6 /64; a full facilitator must
+   take no new payment and still settle the ones it has.
+3. `x402.py`, `fetch`: an agent must never pay twice for one resource, nor more than `most`, nor send its
    payment anywhere but the URL asked.
-3. `postage.py`, `Gate.x402_pay` and the handler: a lot of calls must not be had without a confirmed payment.
-4. `payout.py` and `pool.py`: the pool pays for shares; caps, surplus sweep, what happens on restart.
-5. `stamps.py`, `parse_tx`, `parse_txoutproof`, `check`, `verify`: a forged proof must not verify; the
+4. `postage.py`, `Gate.x402_pay` and the handler: a lot of calls must not be had without a confirmed payment.
+5. `payout.py` and `pool.py`: the pool pays for shares; caps, surplus sweep, what happens on restart.
+6. `stamps.py`, `parse_tx`, `parse_txoutproof`, `check`, `verify`: a forged proof must not verify; the
    block scan must survive reorganizations.
-6. `wallet.py`, `pay` and `_send`: limits, the journal written before anything leaves, an open payment
+7. `wallet.py`, `pay` and `_send`: limits, the journal written before anything leaves, an open payment
    standing against the next one.
 
 ## What has been checked, and by whom
@@ -76,6 +82,8 @@ Five reviews by AI models that did not write the code (not by people):
   HTTP/1.1 only since 22 November.
 
 Review 9 read the fixes of review 8 and found them sound. Nobody but its author has read the fixes of review 9.
+Nor the facilitator for sellers from outside (item 2 above), on main since 22 November; it opens only with
+0.2.3, after review 10.
 
 Their reports can be had on request. Low findings that are still open are listed in them. Earlier parts of the
 project (wallet, pool) went through four further AI reviews. No person outside has read the code.
@@ -84,7 +92,7 @@ project (wallet, pool) went through four further AI reviews. No person outside h
 
     git clone https://github.com/Polarka-monitor/polarka-agent && cd polarka-agent   # or the copy you were given
     # a TrueNorth Core build (truenorthd, truenorth-cli) in a folder; tests start their own regtest node
-    TN_BIN=/path/to/bin python3 -m unittest discover -s tests -t .      # about 5 minutes, 240 tests
+    TN_BIN=/path/to/bin python3 -m unittest discover -s tests -t .      # about 5 minutes, 250 tests
 
 Without `TN_BIN` the tests that need a node are skipped. To check a stamp from the main chain:
 
@@ -95,7 +103,9 @@ Without `TN_BIN` the tests that need a node are skipped. To check a stamp from t
 The server is public. Its node, the facilitator, the stamps service and the wallet server listen on loopback;
 Caddy is in front of the gate, the faucet, the pool, polarka.org and a wallet server for the public
 (node.polarka.org, a walletd apart from the pool's), and passes to the facilitator only its read-only routes
-(`GET /x402/supported` and `/x402/discovery/*` at gate.polarka.org), never `/verify` or `/settle`. Buyers are
+(`GET /x402/supported` and `/x402/discovery/*` at gate.polarka.org), never `/verify` or `/settle`. From 0.2.3 a
+second facilitator, for sellers from outside, gets `/facilitator/{supported,verify,settle}` there: a process
+apart, with a folder of its own, bounds on requests and on payments kept, and no catalog. Buyers are
 programs with a spending limit set by their owner in a file the program cannot change while it has the MCP tools
 only. Miners are anybody: the pool is open and pays any address since 21 November 2026. NORTH has no market price
 today; the money at risk is the pool's reserve (5000 NORTH, at most 10,000 paid out a day), the faucet's and the

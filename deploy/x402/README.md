@@ -23,5 +23,28 @@ A buyer: `polarka-agent fetch https://gate.example.org/v1/unit --most 0.05`. The
 for the block; the claim in the payment is then the token for the rest of the lot, and `fetch` uses it by
 itself for the next calls to the same place.
 
-To offer the facilitator to other sellers, put it behind the web server under its own name. Whoever settles
-payments for others has duties of their own; this one is an experiment and says so.
+## For sellers from outside (from 0.2.3)
+
+Not the gate's own facilitator opened up, but a second process of the same code, so that nothing an outside
+caller does reaches the gate's payments, its lock or its memory:
+
+    install -d -o x402 -g x402 -m 0700 /var/lib/polarka-x402-public
+    cp polarka-x402-public.service /etc/systemd/system/ && systemctl enable --now polarka-x402-public
+    curl -s http://127.0.0.1:9571/supported
+
+`--public` makes it count requests by the address the web server writes into X-Forwarded-For (an IPv6 address
+by its /64): a payment to `/verify` or `/settle` at most `--per-minute` times a minute from one address (60)
+and ten times that from all of them together; more is answered `429` with `Retry-After: 60`. Only a request
+that would ask the node counts; `/supported` and a malformed request do not. It forgets an address a minute
+after its last request and writes none down. It keeps no catalog (`--bazaar-origin` is refused with
+`--public`), so what others sell is never listed in our name. It takes no new payment once it keeps
+`--most-payments` (20000): `/verify` and `/settle` then answer `settlement_failed`, which tells a seller to ask
+again later, while a payment it already has is still settled. Its folder then wants looking at.
+
+The web server passes it `/facilitator/supported`, `/facilitator/verify` and `/facilitator/settle`
+(`../postage/gate.caddy`); a seller names `https://gate.polarka.org/facilitator` as its facilitator. Check
+through the web server that an X-Forwarded-For the caller writes counts for nothing: from one machine, the 61st
+request within a minute is answered `429`, whatever address it names.
+
+A payment it settles pays the seller directly: the facilitator checks it and hands the buyer's own signed
+transaction to the network, as any node does. It asks no fee, holds nothing, and is an experiment that may stop.

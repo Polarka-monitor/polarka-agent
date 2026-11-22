@@ -159,6 +159,14 @@ def run(argv=None, out=sys.stdout):
     c.add_argument("--bazaar-origin", action="append", default=[], metavar="https://HOST",
                    help="keep a bazaar catalog (GET /discovery/resources, /discovery/search) of the resources of this origin "
                    "that were paid for (may be given more than once; none: no catalog)")
+    c.add_argument("--public", action="store_true",
+                   help="serve sellers from outside, behind a web server that sets X-Forwarded-For: a payment to /verify or "
+                   "/settle at most --per-minute times a minute from one address, no catalog, at most --most-payments kept; "
+                   "run it apart from the facilitator of your own gate, with its own --dir")
+    c.add_argument("--per-minute", type=int, default=60, help="with --public: requests a minute from one address, 1 to 600 "
+                   "(default 60; ten times that from all together)")
+    c.add_argument("--most-payments", type=int, help="take no new payment once so many are kept (default: 20000 with --public, "
+                   "else no bound)")
     c = sub.add_parser("postage-serve", help="be a gate before a web service that lets through who paid postage to this wallet")
     c.add_argument("--upstream", required=True, help="the service behind the gate, host:port")
     c.add_argument("--price", help="NORTH for one lot of calls")
@@ -313,6 +321,13 @@ def run(argv=None, out=sys.stdout):
                 raise Refused("INPUT", "--listen is a loopback address with a port, for example 127.0.0.1:9570")
             if not 0 <= a.confirmations <= 100 or a.redeliver < 0:
                 raise Refused("INPUT", "--confirmations is 0 to 100, --redeliver 0 or more")
+            if a.public and a.bazaar_origin:
+                raise Refused("INPUT", "a facilitator for sellers from outside keeps no catalog: --public or --bazaar-origin, not both")
+            if not 1 <= a.per_minute <= 600:
+                raise Refused("INPUT", "--per-minute is 1 to 600")
+            most_payments = a.most_payments if a.most_payments is not None else (20000 if a.public else None)
+            if most_payments is not None and most_payments < 1:
+                raise Refused("INPUT", "--most-payments is 1 or more")
             os.makedirs(folder, mode=0o700, exist_ok=True)
             catalog = None
             if a.bazaar_origin:
@@ -321,13 +336,15 @@ def run(argv=None, out=sys.stdout):
                     raise Refused("INPUT", "--bazaar-origin is an https:// origin, for example https://gate.polarka.org")
                 catalog = Catalog(os.path.join(folder, "x402-bazaar.json"), a.bazaar_origin)
             facilitator = Facilitator(RpcNode(a.rpc_url, os.path.expanduser(a.rpc_cookie), timeout=30), a.chain, os.path.join(folder, "x402-used.jsonl"),
-                                      a.confirmations, units(a.instant_below), a.redeliver, catalog=catalog)
+                                      a.confirmations, units(a.instant_below), a.redeliver, catalog=catalog, most_payments=most_payments)
             if a.chain in NETWORKS and facilitator.network != NETWORKS[a.chain]:
                 raise Refused("CHAIN", "the node runs another chain than --chain")
-            server = facilitator_server(facilitator, (host, port))
-            sys.stderr.write("x402 facilitator on %s for %s: %d confirmations, at once below %s NORTH%s\n"
+            server = facilitator_server(facilitator, (host, port), most=32 if a.public else 64, public=a.public, per_minute=a.per_minute)
+            sys.stderr.write("x402 facilitator on %s for %s: %d confirmations, at once below %s NORTH%s%s%s\n"
                              % (a.listen, facilitator.network, a.confirmations, a.instant_below,
-                                ", a bazaar catalog of %s" % " ".join(a.bazaar_origin) if catalog is not None else ""))
+                                ", a bazaar catalog of %s" % " ".join(a.bazaar_origin) if catalog is not None else "",
+                                "; for sellers from outside, %d requests a minute from one address" % a.per_minute if a.public else "",
+                                ", at most %d payments kept" % most_payments if most_payments is not None else ""))
             server.serve_forever()
             return 0
         if a.cmd == "mcp" and not os.path.exists(os.path.join(folder, "wallet.json")):

@@ -3,7 +3,8 @@
 The node's cookie allows every call, `stop` and `invalidateblock` among them. The x402 facilitator, the
 stamps service, the pool and both wallet servers (`deploy/walletd`) need a few calls each, so they get users of
 their own that the node allows only those calls, and none of them is in the group that can read the cookie
-(review 8, L5; the pool and its wallet server since 21 November 2026).
+(review 8, L5; the pool and its wallet server since 21 November 2026). The facilitator for sellers from outside
+(`x402/polarka-x402-public.service`, from 0.2.3) makes the same calls as the gate's own and uses its RPC user.
 
 In the node's `truenorth.conf` (make the five `rpcauth` lines with `share/rpcauth/rpcauth.py` from the
 TrueNorth sources, or with the same HMAC-SHA256 in a few lines of Python):

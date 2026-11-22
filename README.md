@@ -194,7 +194,10 @@ of a payment seen in the mempool buys nothing, and a payment counts only for the
 is the facilitator, the part of a seller that checks payments and hands them to its node (`/supported`,
 `/verify`, `/settle`, as in the standard). It holds no keys and no coins. `postage-serve --x402-facilitator
 http://127.0.0.1:9570` makes the gate of postage take x402 as well as its own quotes: one x402 payment buys
-a lot of calls, and the gate says how many are left in `X-Postage-Calls-Left`.
+a lot of calls, and the gate says how many are left in `X-Postage-Calls-Left`. With `--public` (from 0.2.3,
+on main and not yet released) a facilitator serves sellers from outside: it counts requests by address, keeps
+no catalog and keeps at most so many payments, as a process apart from the gate's own (`deploy/x402/README.md`).
+Ours is to open at `https://gate.polarka.org/facilitator` once that release has been reviewed.
 
 Being found: the bazaar extension of x402. With `--public-url https://HOST --offers FILE` the gate names its
 resources in full in the 402 and adds `extensions.bazaar` (what a route takes and gives, with a JSON schema) for

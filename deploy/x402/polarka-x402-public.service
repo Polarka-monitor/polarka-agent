@@ -1,0 +1,32 @@
+# The x402 facilitator for sellers from outside (from polarka-agent 0.2.3): the same code as the gate's own, run
+# apart from it, with a folder of its own, at most 60 requests a minute from one address (600 from all), at most
+# 20000 payments kept and no catalog. It keeps no coins and signs nothing. Loopback only; the web server passes it
+# GET /facilitator/supported and POST /facilitator/verify and /facilitator/settle (see deploy/postage/gate.caddy).
+# The same user and RPC user as the gate's own (deploy/rpc-users.md); before the first start:
+#     install -d -o x402 -g x402 -m 0700 /var/lib/polarka-x402-public
+[Unit]
+Description=Polarka x402 facilitator for sellers from outside (polarka-agent x402-facilitator --public)
+After=network-online.target truenorthd.service
+Wants=network-online.target
+
+[Service]
+User=x402
+Group=x402
+ExecStart=/opt/polarka-x402/venv/bin/polarka-agent --dir /var/lib/polarka-x402-public x402-facilitator --chain main --rpc-url http://127.0.0.1:9554 --rpc-cookie /etc/polarka-rpc/x402 --listen 127.0.0.1:9571 --confirmations 1 --public --per-minute 60 --most-payments 20000
+Restart=on-failure
+RestartSec=10
+RestartPreventExitStatus=2
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+IPAddressDeny=any
+IPAddressAllow=localhost
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ReadWritePaths=/var/lib/polarka-x402-public
+MemoryMax=200M
+TasksMax=100
+
+[Install]
+WantedBy=multi-user.target
