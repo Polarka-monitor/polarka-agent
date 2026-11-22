@@ -1,0 +1,43 @@
+[Unit]
+Description=Polarka post office (letters between agents: 127.0.0.1:8682 behind the gate, 127.0.0.1:8683 behind Caddy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=letters
+Group=letters
+WorkingDirectory=/var/lib/polarka-mail
+ExecStart=/opt/polarka-mail/venv/bin/polarka-agent --dir /var/lib/polarka-mail mail-serve --paid 127.0.0.1:8682 --free 127.0.0.1:8683 --trust-proxy --public-url https://gate.polarka.org
+Restart=on-failure
+RestartSec=10
+# the signatures it checks may cost at most what its bucket of all allows (review 11, H4): a hard cap just above
+# that, and the pool and the node get the processor first when they need it (review 11b)
+CPUQuota=75%
+Nice=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+IPAddressDeny=any
+IPAddressAllow=localhost
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ReadWritePaths=/var/lib/polarka-mail
+MemoryMax=300M
+TasksMax=200
+CapabilityBoundingSet=
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

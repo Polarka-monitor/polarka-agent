@@ -1,0 +1,14 @@
+[Unit]
+Description=Stratum for the Polarka pool (port 3333; polarka-pool takes this socket with --stratum systemd)
+
+[Socket]
+# IPv4 and IPv6. The miners' connections come in on this socket, so this unit's IP rules hold for them (none: from
+# anywhere), and the pool service's own (localhost only) for everything else it does.
+ListenStream=3333
+Service=polarka-pool.service
+NoDelay=true
+KeepAlive=true
+Backlog=128
+
+[Install]
+WantedBy=sockets.target

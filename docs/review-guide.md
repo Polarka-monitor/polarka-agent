@@ -16,6 +16,8 @@ plus the services that run beside it on one public server:
 | Postage gate | `postage.py` | server, public behind Caddy | its wallet only receives |
 | Stamps service | `stamps.py` | server, loopback | a small fee wallet |
 | Pool (pay per share) | `pool.py`, `payout.py`, `miner.py`, `rx.py` | server; miners anywhere | yes: the pool's reserve |
+| Stratum for the pool (from 0.2.4) | `stratum.py` | server, public on port 3333 (a systemd socket) | no: it pays through the pool |
+| Letters between agents (from 0.2.4) | `mail.py`; the gate's `--route /v1/mail` | post office: server, behind the gate and Caddy; writers and readers: the agents' machines | no |
 | Wallet server: one for the pool and stamps, one for the public | `walletd.py` | server, loopback; the second behind node.polarka.org | no |
 | Faucet | `faucet.py` | server, public | yes, small |
 
@@ -42,18 +44,25 @@ Specification draft for x402: `docs/x402-scheme-exact-bip122.md` (also open as x
    machine. Tests: `tests/test_signer.py` and `tests/test_review10.py`, part of them as root on Linux with real
    users (`POLARKA_TEST_USERS=1`). Review 10 read it (H1, H3, M1, M3 and M4 below), its reviewer read the
    fixes again, and what that second look found (N1 to N5) is mended as well.
-4. `x402.py`, `fetch`: an agent must never pay twice for one resource, nor more than `most`, nor send its
+4. New in 0.2.4: `stratum.py` and `mail.py`. Stratum: one header must belong to one job id and one difficulty
+   (the issue number in the coinbase), a share must be paid once whether it comes over stratum or HTTP, and no
+   number of places may keep a newcomer out (`_room`). Letters: only the inbox's key reads a letter and only its
+   writer's key signs it (`seal`, `letter`, `read`), a signature is used once and names the post office, a reader
+   shows a letter once (`fetch_letters`, `_take_new`), and a call of postage counts as spent only once the post
+   office has taken the letter (`postage.py`, `reserve`, `done`, `give_back`). Review 11 read both, its reviewer
+   read the fixes again, and what both found is mended (below).
+5. `x402.py`, `fetch`: an agent must never pay twice for one resource, nor more than `most`, nor send its
    payment anywhere but the URL asked.
-5. `postage.py`, `Gate.x402_pay` and the handler: a lot of calls must not be had without a confirmed payment.
-6. `payout.py` and `pool.py`: the pool pays for shares; caps, surplus sweep, what happens on restart.
-7. `stamps.py`, `parse_tx`, `parse_txoutproof`, `check`, `verify`: a forged proof must not verify; the
+6. `postage.py`, `Gate.x402_pay` and the handler: a lot of calls must not be had without a confirmed payment.
+7. `payout.py` and `pool.py`: the pool pays for shares; caps, surplus sweep, what happens on restart.
+8. `stamps.py`, `parse_tx`, `parse_txoutproof`, `check`, `verify`: a forged proof must not verify; the
    block scan must survive reorganizations.
-8. `wallet.py`, `pay` and `_send`: limits, the journal written before anything leaves, an open payment
+9. `wallet.py`, `pay` and `_send`: limits, the journal written before anything leaves, an open payment
    standing against the next one.
 
 ## What has been checked, and by whom
 
-One review by a person, and six by AI models that did not write the code (five before it, one after):
+One review by a person, and seven by AI models that did not write the code (five before it, two after):
 
 - the first review by a person (a programmer, 22 November 2026, of the package of that morning: all of
   polarka-agent, the server's configuration and scripts, the watcher and the logs; not the Android wallet and
@@ -147,6 +156,21 @@ One review by a person, and six by AI models that did not write the code (five b
   cheap now, but it grows), and what a sender with many /48s can still do against the public facilitator
   (`deploy/x402/README.md`).
 
+- review 11 (a fresh AI agent, 22 November 2026, of the stratum branch: `stratum.py`, `mail.py` and what they
+  touch in `pool.py`, `postage.py` and `x402.py`, and their deployment): 5 High, 4 Medium, 7 Low, 7 Info. H1: one
+  header could be paid at more than one difficulty, as job ids shared a coinbase; H2: a few places could keep
+  every miner out of stratum; H3: an answer of the post office too large to read whole could be taken for no
+  letters; H4: the free door's signature checks could be spent by anybody and its readers shut out; H5: the post
+  office could be filled for little. Mended the same day, with tests (aa5c283, 3149728). Its reviewer read the
+  fixes again: none High, four Medium (N2: letters the post office refused emptied the paid door's bucket for
+  nothing; N3: each call given back rewrote the gate's book; N4: a letter read while telling the post office
+  failed was lost; N7: some 200 places could still keep newcomers out of stratum), five Low and two Info. All
+  mended in fbc8702, with tests that fail on the code before (`tests/test_review11b.py`); the deployment and the
+  watcher were changed to match. Open by choice: stratum over plain TCP (I1), one call of postage a letter
+  whatever its size (H5: what bounds a fill is the place, 8 MB a day), and a faster signature check (H4: the
+  bucket and the unit's CPU quota bound it meanwhile). Nobody but their author has read the fixes of the second
+  look.
+
 Review 9 read the fixes of review 8 and found them sound; review 10 found most of the fixes of the human review
 correct, and its reviewer read the fixes of its own findings again. Nobody but their author has read the fixes of
 review 9 and of that second look. The facilitator for sellers from outside (item 2 above) opened with 0.2.3.
@@ -159,7 +183,7 @@ package that the first review by a person read.
 
     git clone https://github.com/Polarka-monitor/polarka-agent && cd polarka-agent   # or the copy you were given
     # a TrueNorth Core build (truenorthd, truenorth-cli) in a folder; tests start their own regtest node
-    TN_BIN=/path/to/bin python3 -m unittest discover -s tests -t .      # about 6 minutes, 315 tests
+    TN_BIN=/path/to/bin python3 -m unittest discover -s tests -t .      # about 6 minutes, 384 tests
     # as root on Linux, the signing service with real users of the system (it makes and removes three):
     sudo POLARKA_TEST_USERS=1 python3 -m unittest tests.test_signer.ApartOnLinux
 
@@ -175,7 +199,10 @@ Caddy is in front of the gate, the faucet, the pool, polarka.org and a wallet se
 (`GET /x402/supported` and `/x402/discovery/*` at gate.polarka.org), never `/verify` or `/settle`. From 0.2.3 a
 second facilitator, for sellers from outside, gets `/facilitator/{supported,verify,settle}` there: a process
 apart, with a user of the system and an RPC user of its own, a folder of its own, bounds on requests and on
-payments kept, and no catalog. Buyers are programs with a spending limit set by their owner in a file the program
+payments kept, and no catalog. From 0.2.4 the pool also takes miners over stratum on port 3333, straight from
+the internet through a socket of systemd, and a post office keeps sealed letters between agents: they come in
+through the gate, one call of postage each, and go out at `/v1/inbox` to whoever signs for the inbox; the post
+office cannot read them. Buyers are programs with a spending limit set by their owner in a file the program
 cannot change while it has the MCP tools only, or, with the signing service (from 0.2.3), whatever it can run as a
 user of its own that cannot administer the machine.
 Miners are anybody: the pool is open and pays any address since 21 November 2026. NORTH has no market price
