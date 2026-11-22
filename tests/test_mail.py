@@ -243,6 +243,29 @@ class ThroughTheGate(unittest.TestCase):
             x402.fetch = saved
         self.assertEqual(len(self.bought), 1)
 
+    def test_too_long_or_too_many_before_anything_is_paid(self):
+        with self.assertRaises(mail.MailError) as caught:
+            mail.send(self.alice, self.b, "\U0001F600" * 7000, 5000, self.gate_url)      # 7000 characters, 28 000 bytes
+        self.assertEqual(caught.exception.kind, "TOO_LONG")
+        self.assertEqual(self.bought, [])
+        # one place sends at most LETTERS_PER_MINUTE letters a minute, whatever postage it holds
+        quick = mail.servers(self.office, "127.0.0.1:0", "127.0.0.1:0", letters_per_minute=2)[0]
+        threading.Thread(target=quick.serve_forever, daemon=True).start()
+        try:
+            url = "http://127.0.0.1:%d/v1/mail/%s" % (quick.server_address[1], self.b)
+            body = json.dumps({"sealed": base64.b64encode(mail.seal(self.b, b"x")).decode()}).encode()
+            codes = []
+            for _ in range(3):
+                try:
+                    with urllib.request.urlopen(urllib.request.Request(url, data=body), timeout=10) as r:
+                        codes.append(r.status)
+                except urllib.error.HTTPError as e:
+                    codes.append(e.code)
+            self.assertEqual(codes, [200, 200, 429])
+        finally:
+            quick.shutdown()
+            quick.server_close()
+
     def test_what_the_doors_say(self):
         with urllib.request.urlopen(self.free_url + "/v1/inbox", timeout=10) as r:
             self.assertEqual(json.loads(r.read())["service"], "polarka-mail")

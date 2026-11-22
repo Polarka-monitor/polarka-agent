@@ -56,6 +56,7 @@ MOST_ALL = 256 << 20            # bytes the post office keeps for everybody
 FETCH_MOST = 50                 # letters handed out at once
 SKEW = 300_000                  # milliseconds a signed time may be off the post office's clock
 PER_MINUTE = 30                 # calls a minute from one place at the free door
+LETTERS_PER_MINUTE = 20         # letters a minute from one place, whatever postage it holds (ten times that from all)
 KEY_FILE = "mail-key.json"
 INBOX = re.compile(r"\A[0-9a-f]{64}\Z")
 LETTER_ID = re.compile(r"\A[0-9a-f]{24}\Z")
@@ -325,6 +326,15 @@ def make_handler(office, door, trust_proxy=False, limiter=None):
                 if parts == ["v1", "mail"] and self.command == "GET":
                     return lambda: office.about("paid")
                 if len(parts) == 3 and parts[:2] == ["v1", "mail"] and self.command == "POST":
+                    if limiter is not None:
+                        # behind the gate and the web server, which writes the caller's address: one place does not
+                        # fill the post office for everybody, however much postage it bought
+                        who = (forwarded(self) if trust_proxy else "") or self.client_address[0]
+                        if not limiter.take(place(who, 64), place(who, 48)):
+                            def slow_letters():
+                                raise MailError("SLOW", "too many letters a minute from one place", 429)
+                            return slow_letters
+
                     def post():
                         said = self.body(MOST_SEALED * 2)
                         try:
@@ -382,12 +392,12 @@ def expire_for_ever(office, every=3600, sleep=time.sleep):
             sys.stderr.write("%s mail: expiring failed: %s\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), type(e).__name__))
 
 
-def servers(office, paid, free, trust_proxy=False, per_minute=PER_MINUTE):
+def servers(office, paid, free, trust_proxy=False, per_minute=PER_MINUTE, letters_per_minute=LETTERS_PER_MINUTE):
     """The two doors, made and not yet serving: (paid server, free server)."""
     made = []
     for door, listen in (("paid", paid), ("free", free)):
         host, _, port = listen.rpartition(":")
-        limiter = Limiter(per_minute) if door == "free" else None
+        limiter = Limiter(per_minute if door == "free" else letters_per_minute)
         made.append(Bounded((host or "127.0.0.1", int(port)), make_handler(office, door, trust_proxy, limiter), most=64))
     return made
 
@@ -455,7 +465,11 @@ def send(wallet, to, text, most, office=None, timeout=30, wait=600, network=None
     if not local_or_https(base):
         raise MailError("INPUT", "letters go over https (or on this machine)")
     secret = mail_key(wallet.folder)
-    sealed = base64.b64encode(seal(to, letter(secret, to, text))).decode()
+    raw = seal(to, letter(secret, to, text))
+    if len(raw) > MOST_SEALED:          # said before anything is paid or a call of postage is used
+        raise MailError("TOO_LONG", "the letter is %d bytes sealed, more than the %d the post office takes; write less "
+                                    "(letters outside ASCII take up to four bytes a character)" % (len(raw), MOST_SEALED))
+    sealed = base64.b64encode(raw).decode()
     for _ in range(2):
         with BOOK(wallet):
             lot = _book(wallet)["lots"].get(origin)
