@@ -25,23 +25,23 @@ Specification draft for x402: `docs/x402-scheme-exact-bip122.md` (also open as x
 
 1. `x402.py`, `Facilitator.verify` and `Facilitator.settle`: one payment must buy one resource once; a copy of
    a waiting transaction must buy nothing (the `claim`); a payment shown again must cover today's price.
-2. New on main for 0.2.3: `x402.py`, `facilitator_server(public=True)`, `Limiter`, `caller`,
+2. New in 0.2.3: `x402.py`, `facilitator_server(public=True)`, `Limiter`, `caller`,
    `Facilitator._full` and `_may_add`, and `Blocks`, with `deploy/x402/polarka-x402-public.service` and the
    `/facilitator` routes in `deploy/postage/gate.caddy` (the facilitator for sellers from outside). Nothing an
    outside caller sends may reach the gate's own facilitator, its payments or its catalog; an X-Forwarded-For the
    caller writes must count for nothing; the bounds must hold for a machine with a whole IPv6 /64, and one with a
    /48 must not use them all up; a full facilitator must take no new payment and still settle the ones it has; a
    payment that never settles must not cost the node a reading of the chain on each request. Review 10 read it
-   (H2 and M2 below); nobody but their author has read its fixes yet.
-3. New on main for 0.2.3: `signer.py`, the signing service (the first review's F4, review 8's M4). The agent's
+   (H2 and M2 below), and its reviewer read the fixes again.
+3. New in 0.2.3: `signer.py`, the signing service (the first review's F4, review 8's M4). The agent's
    user must reach neither the words nor `limits.json`, and through the socket only the wallet's own operations,
    under the wallet's rules, the day limit included; a caller that holds a connection or sends too much holds
    nothing long. Then the scripts `signer-setup` prints (the users and groups, the program installed where only
    root can change it from a pinned version or a wheel of known SHA-256, in an empty environment; the systemd unit
    and the LaunchDaemon), what `--check` concludes, and the refusal of an agent's user that can administer the
    machine. Tests: `tests/test_signer.py` and `tests/test_review10.py`, part of them as root on Linux with real
-   users (`POLARKA_TEST_USERS=1`). Review 10 read it (H1, H3, M1, M3 and M4 below); nobody but their author has
-   read its fixes yet.
+   users (`POLARKA_TEST_USERS=1`). Review 10 read it (H1, H3, M1, M3 and M4 below), its reviewer read the
+   fixes again, and what that second look found (N1 to N5) is mended as well.
 4. `x402.py`, `fetch`: an agent must never pay twice for one resource, nor more than `most`, nor send its
    payment anywhere but the URL asked.
 5. `postage.py`, `Gate.x402_pay` and the handler: a lot of calls must not be had without a confirmed payment.
@@ -69,7 +69,7 @@ One review by a person, and six by AI models that did not write the code (five b
   took a number for an amount, did not wait on 503 and read without a deadline; stamps taken for written when
   the node refused them, or for dead when mined a moment before; MCP tools that reached this machine; the first
   audit's F6, F9 and F11; and on the server uneven hardening, a usage count that could read every key, and
-  Caddy lines with addresses at the DEBUG level. Mended on 22 November, on main with tests
+  Caddy lines with addresses at the DEBUG level. Mended on 22 November, in 0.2.3, with tests
   (`tests/test_human_review.py`) and on the server: all of that except the ones below. Open: pool-shares.jsonl
   still grows (the count now stops loudly at 512 MiB, about six weeks), the pool asks its node under its lock
   now and then, the web pages are still built on the server, and polarka-usage and polarka-status are still
@@ -92,8 +92,8 @@ One review by a person, and six by AI models that did not write the code (five b
   offer needs a route), L3 (the filters), M5 and parts of L8 (texts), and in the deployment M2 (node.polarka.org has
   a walletd of its own, with an RPC user allowed only its calls). All of it is in 0.2.2. Open: M4 (the bounds hold
   against MCP-only programs, and most MCP hosts also give file tools; the texts and the registry entry say so; a
-  signing service for it is on main since 22 November, for 0.2.3: item 3 above), L1
-  (a payment shown again after a gate restart can be refused; mended on main on 22 November, not yet released), L4
+  signing service for it came with 0.2.3: item 3 above), L1
+  (a payment shown again after a gate restart can be refused; mended in 0.2.3), L4
   (stamps storage grows), I2 to I6. Fixed later on 21 November: L5 (the pool and its wallet server have RPC users of
   their own; the facts service runs as a user of its own; polarka-usage keeps only the right to read and opens no
   record through a link, as does polarka-status; under the web root only the pages are the refresh job's), L6 (the
@@ -127,7 +127,7 @@ One review by a person, and six by AI models that did not write the code (five b
   the agent's links as root. M2: one sender with an IPv6 /48 could use up the public facilitator's bounds, and
   payments that never settle could fill its book. M3: `--package` took pip options and paths, and `--check` did
   not look where the program is imported from. M4: the agent's user was by default the owner's admin account.
-  Mended on 22 November, on main with tests (`tests/test_review10.py`), not yet released: all of these, L1 to L6,
+  Mended on 22 November, in 0.2.3, with tests (`tests/test_review10.py`): all of these, L1 to L6,
   I3 (the public facilitator runs as a user of its own, with an RPC user of its own), I8 and I9. A payment that
   stayed open for a day or more and then goes out counts for the day it goes out; the facilitator keeps an index
   of the blocks it has read and reads each new block once; the script starts itself again in an empty
@@ -147,9 +147,9 @@ One review by a person, and six by AI models that did not write the code (five b
   cheap now, but it grows), and what a sender with many /48s can still do against the public facilitator
   (`deploy/x402/README.md`).
 
-Review 9 read the fixes of review 8 and found them sound, and review 10 found most of the fixes of the human
-review correct. Nobody but its author has read the fixes of review 9 and review 10. The facilitator for sellers
-from outside (item 2 above) opens only with 0.2.3.
+Review 9 read the fixes of review 8 and found them sound; review 10 found most of the fixes of the human review
+correct, and its reviewer read the fixes of its own findings again. Nobody but their author has read the fixes of
+review 9 and of that second look. The facilitator for sellers from outside (item 2 above) opened with 0.2.3.
 
 Their reports can be had on request. Low findings that are still open are listed in them. Earlier parts of the
 project (wallet, pool) went through four further AI reviews. No person outside has read the code since the

@@ -7,7 +7,7 @@ coins in it on the internet.
     apt install python3-venv caddy
     useradd --system --home /var/lib/polarka-faucet --create-home --shell /usr/sbin/nologin faucet
     python3 -m venv /opt/polarka-faucet/venv
-    /opt/polarka-faucet/venv/bin/pip install polarka-agent==0.2.2
+    /opt/polarka-faucet/venv/bin/pip install polarka-agent==0.2.3
     sudo -u faucet /opt/polarka-faucet/venv/bin/polarka-agent --dir /var/lib/polarka-faucet/wallet new --chain main
 
 The last command shows the recovery words once. Write them down away from the server. Then the owner's

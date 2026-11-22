@@ -6,7 +6,7 @@ A wallet for TrueNorth (NORTH) that a program can use: a command line, a Python 
 agents that speak the Model Context Protocol (MCP). The keys stay on the machine it runs on. What its
 addresses hold it asks a wallet server with the Northbound API (github.com/nova9/northbound).
 
-**State: 0.2.2, beta.** This package and the services at polarka.org run as a beta until a security expert who
+**State: 0.2.3, beta.** This package and the services at polarka.org run as a beta until a security expert who
 is a person has reviewed them: any part may change, stop or be reset without notice, and nothing is promised.
 `docs/how-it-works.md` (also at https://polarka.org/how/) says what each part does, who holds what and who sees
 what. Faults: an issue at github.com/Polarka-monitor/polarka-agent, or @Polarka_monitor on X; if one puts coins
@@ -17,9 +17,9 @@ that had not seen it being written read each part and found faults. Every High f
 the Medium ones, review 5's M4 is mended in part, and one was open until 0.2.3, found twice (the first review's F4
 and review 8's M4: the owner's limits bound a program that has only the MCP tools, not one that can also run
 commands or write files as the same user). For it 0.2.3 brings a signing service, which keeps the words and the
-limits under a user of their own; it is on main and not yet reviewed (`REVIEW.md`, `docs/review-guide.md`). On 22
-November 2026 a programmer, a person, read the code and the server's configuration for the first time; what he
-found is being mended on main and goes out with 0.2.3 (`docs/review-guide.md`).
+limits under a user of their own; review 10 read it, and its reviewer read the fixes again (`REVIEW.md`,
+`docs/review-guide.md`). On 22 November 2026 a programmer, a person, read the code and the server's configuration
+for the first time; what he found is mended in 0.2.3, apart from what `docs/review-guide.md` names as open.
 On the real network it pays since 17 November 2026, and since 20 November it runs a pool, a gate of postage,
 an x402 facilitator and a stamps service at polarka.org. Do not put into it what you cannot lose. It is an
 independent community project, not a product of the TrueNorth developers or of the Northbound project.
@@ -40,11 +40,11 @@ that the tools given to the program cannot change.
 - With the wallet in a folder of the agent's own user, these bounds hold against a program that reaches it
   through the MCP server only. A program that can run commands or write files as the same user, as most agents
   can, can change `limits.json`, move the journal away or read the words. Against that, run the wallet as a
-  signing service under a user of its own (from 0.2.3, on main; next section): the agent's user then only asks.
+  signing service under a user of its own (from 0.2.3; next section): the agent's user then only asks.
 - A payment counts into its day whatever became of it; only the owner's `forget` takes one out. A payment
   that another one replaced therefore counts twice for a day. One whose outcome stayed open for a day or more (a
-  payment signed for x402 and held back, say) and then goes out counts for the day it goes out (from 0.2.3, on
-  main; review 10, H1).
+  payment signed for x402 and held back, say) and then goes out counts for the day it goes out (from 0.2.3;
+  review 10, H1).
 - What a wallet server says in words is not passed on to the program: a refusal comes as one of a few fixed
   words and an error as its HTTP status.
 
@@ -54,7 +54,8 @@ on a machine its owner controls.
 
 ## The words apart: a signing service (from 0.2.3)
 
-On main, not yet released; review 10 read it, and what it found is mended (`docs/review-guide.md`). The wallet runs
+From 0.2.3; review 10 read it, its reviewer read the fixes again, and what both found is mended
+(`docs/review-guide.md`). The wallet runs
 as a service under a user of the system of its own: its folder, with the words and the journal, is that user's alone,
 and `limits.json` is root's. The agent runs as a user of its own too, one that cannot administer the machine, in a
 group that may use the service's socket, and asks: what the wallet holds, an address, to pay, to stamp. It cannot
@@ -111,7 +112,7 @@ under `server_said_untrusted`, for the owner.
 
 ## Installing
 
-    pip install polarka-agent==0.2.2
+    pip install polarka-agent==0.2.3
 
 That gives the command `polarka-agent`, which is the same as `python3 -m polarka_agent`. The version is named so
 that a later upload to PyPI changes nothing on your machine until you name it. It needs Python 3.9 or later on Linux
@@ -119,7 +120,7 @@ or macOS and nothing besides; it does not run on Windows. Versions are built fro
 their version and uploaded by hand; 0.1.1 and 0.1.2 were built by a workflow that is no longer used. The same files
 are on the project's own server,
 
-    pip install https://polarka.org/download/polarka-agent-0.2.2/polarka_agent-0.2.2.tar.gz
+    pip install https://polarka.org/download/polarka-agent-0.2.3/polarka_agent-0.2.3.tar.gz
 
 and can be compared with `https://polarka.org/download/SHA256SUMS` first. Versions before 0.1.3 carry a
 faucet with the faults that `docs/faucet-review-0.1.2.md` names.
@@ -151,14 +152,14 @@ the 12 or 24 words once; `--words-file` brings a wallet back.
 A stamp writes `POLARKA\x01` and a SHA-256 into an output that carries data. The chain is young and its hash
 rate is small: a stamp shows an order of events, it is not proof for a court.
 
-For an agent: start `python3 -m polarka_agent --dir FOLDER mcp` (or `uvx polarka-agent@0.2.2 mcp`) as an MCP
+For an agent: start `python3 -m polarka_agent --dir FOLDER mcp` (or `uvx polarka-agent@0.2.3 mcp`) as an MCP
 server over standard input and output. Without a wallet in the folder it makes one on main, which pays
 nothing until its owner writes `limits.json`; the recovery words are in `wallet.json` there. Its tools are
 `north_balance`, `north_address`, `north_received`, `north_wait`, `north_pay`, `north_stamp`, `north_payments`,
 `north_history`, `north_limits`, `north_faucet`, `north_postage` and `north_fetch`. The tools that ask a web
 address reach public https addresses only, not this machine or its network, so that a page the agent reads
 cannot make it ask the owner's own services; `mcp --allow-local` lets them, for a test service of one's own
-(from 0.2.3, on main). With a signing service, `polarka-agent --signer SOCKET mcp` makes no wallet: the folder
+(from 0.2.3). With a signing service, `polarka-agent --signer SOCKET mcp` makes no wallet: the folder
 then keeps only this program's own record of x402 payments under way.
 
 ## A first coin: the faucet
@@ -247,10 +248,10 @@ of a payment seen in the mempool buys nothing, and a payment counts only for the
 is the facilitator, the part of a seller that checks payments and hands them to its node (`/supported`,
 `/verify`, `/settle`, as in the standard). It holds no keys and no coins. `postage-serve --x402-facilitator
 http://127.0.0.1:9570` makes the gate of postage take x402 as well as its own quotes: one x402 payment buys
-a lot of calls, and the gate says how many are left in `X-Postage-Calls-Left`. With `--public` (from 0.2.3,
-on main and not yet released) a facilitator serves sellers from outside: it counts requests by address, keeps
+a lot of calls, and the gate says how many are left in `X-Postage-Calls-Left`. With `--public` (from 0.2.3)
+a facilitator serves sellers from outside: it counts requests by address, keeps
 no catalog and keeps at most so many payments, as a process apart from the gate's own (`deploy/x402/README.md`).
-Ours is to open at `https://gate.polarka.org/facilitator` once that release has been reviewed.
+Ours is at `https://gate.polarka.org/facilitator`.
 
 Being found: the bazaar extension of x402. With `--public-url https://HOST --offers FILE` the gate names its
 resources in full in the 402 and adds `extensions.bazaar` (what a route takes and gives, with a JSON schema) for
@@ -391,11 +392,11 @@ in the owner's rules. It covers those rules only, not the keys, the signing or t
 
 ## What is missing
 
-- The mending of the first review by a person (22 November 2026). Until it is out, and until a security expert
-  has looked as well, the beta holds (`docs/review-guide.md`).
+- A look by a security expert who is a person. Until then the beta holds; what the first review by a person
+  (22 November 2026) found is mended in 0.2.3, apart from what `docs/review-guide.md` names as open.
 - Use by anybody but its author: the pool, the gate and the stamps service have served nobody else yet.
 - More than two hundred addresses of a kind: beyond that the wallet hands out no new address, and change uses
-  the keys of the window again in turn (on main since 22 November).
+  the keys of the window again in turn (from 0.2.3).
 - A way to replace a payment that was handed over and waits for a block without end.
 - A node of one's own in place of a wallet server, for the wallet.
 - A history that is exact for a wallet with more than a hundred addresses.

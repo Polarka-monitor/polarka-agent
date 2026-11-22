@@ -7,7 +7,7 @@ may change, stop or be reset without notice, and nothing is promised. Keep in it
 The code was written with AI models under its author's direction. Independent AI reviewers that had not seen it
 being written read every part; what they found and what was done about it is in `REVIEW.md` and
 `docs/review-guide.md`. On 22 November 2026 a programmer, a person, read the code and the server for the first
-time; what he found is being mended and goes out with 0.2.3 (`docs/review-guide.md`).
+time; what he found is mended in 0.2.3, apart from what `docs/review-guide.md` names as open.
 
 This page says what each part does, how a payment moves, who holds what and who sees what. All of it can be
 checked against the code in this repository and the deployment notes in `deploy/`.
@@ -21,7 +21,7 @@ checked against the code in this repository and the deployment notes in `deploy/
 | Faucet | `faucet.polarka.org` | 0.25 NORTH to an address once a day, after a few seconds of hashing | its own, at most 100 NORTH a day |
 | Gate | `gate.polarka.org` | stands before paid routes and sells lots of 100 calls, for x402 or for a quote of its own | receives payments; holds no buyer's coins |
 | x402 facilitator | the server, on loopback | checks an x402 payment, hands it to the node, waits for a block | no keys, no coins |
-| x402 facilitator for other sellers | from 0.2.3, not yet open: the server, on loopback, behind `gate.polarka.org/facilitator` | the same for sellers from outside, as a process apart under a user of the system and an RPC user of its own, with bounds on requests and on payments kept, and no catalog | no keys, no coins |
+| x402 facilitator for other sellers | from 0.2.3: the server, on loopback, behind `gate.polarka.org/facilitator` | the same for sellers from outside, as a process apart under a user of the system and an RPC user of its own, with bounds on requests and on payments kept, and no catalog | no keys, no coins |
 | Stamps | the server, on loopback, behind the gate | writes SHA-256s into the chain every ten minutes and gives proofs | a small wallet for fees |
 | Pool | `pool.polarka.org` | pays for each share; open to everybody since 21 November 2026 | what it owes miners, from a reserve |
 | Node | the server, on loopback | TrueNorth Core; every service that talks to it (the facilitator, the stamps service, the pool and both wallet servers) has an RPC user allowed only the calls it makes | no wallet |
@@ -29,7 +29,7 @@ checked against the code in this repository and the deployment notes in `deploy/
 
 ## An agent, from no coin to a paid call
 
-1. Its owner starts the MCP server: `uvx polarka-agent@0.2.2 --dir FOLDER mcp`. With no wallet in FOLDER it makes
+1. Its owner starts the MCP server: `uvx polarka-agent@0.2.3 --dir FOLDER mcp`. With no wallet in FOLDER it makes
    one on the main chain. The recovery words are in `FOLDER/wallet.json`, readable by the owner only. Nothing is
    paid yet.
 2. The owner writes `FOLDER/limits.json` by hand, for example `{"per_payment_north": "0.1", "per_day_north": "1"}`.
@@ -43,8 +43,8 @@ checked against the code in this repository and the deployment notes in `deploy/
    in the header `PAYMENT-SIGNATURE`. It pays nothing above `--most` or above the owner's limits, and a second
    fetch of the same URL shows the same payment again instead of paying anew. A seller that refuses a payment
    after it has passed it to the network can still make the next fetch pay again; the owner's limits bound
-   that. Our own gate did so after a restart when its price had moved meanwhile (review 8, L1); it keeps the
-   prices it asked since 22 November on main, and the fix goes out with the next release.
+   that. Our own gate did so after a restart when its price had moved meanwhile (review 8, L1); since 0.2.3
+   it keeps the prices it asked.
 6. The seller's facilitator checks the transaction and hands it to its node. While it waits for a block the
    seller answers `202` with `awaiting_confirmation`, and the agent shows the same payment again. Once it is in
    a block the service answers, and the header `PAYMENT-RESPONSE` names the transaction.
@@ -78,10 +78,10 @@ read-only routes are public again:
 ## A facilitator for other sellers (from 0.2.3)
 
 A seller that takes NORTH over x402 and runs no node of its own may name `https://gate.polarka.org/facilitator`
-as its facilitator once 0.2.3 is released and reviewed; until then it is not open. It is a process apart from
-our gate's own facilitator, so nothing done there reaches the gate. It takes at most 60 requests to check or
-settle a payment a minute from one address and 600 from all, lists nothing in a catalog, and takes no new
-payment once it keeps 20,000. The payment goes from the buyer to the seller; the facilitator only checks it and
+as its facilitator (from 0.2.3). It is a process apart from our gate's own facilitator, under a user of its
+own, so nothing done there reaches the gate. It takes at most 60 requests to check or settle a payment a
+minute from one address, 120 from one IPv6 /48 and 600 from all, lists nothing in a catalog, and takes no new
+payment once it keeps 20,000, of which one place brings at most 1,000 a day. The payment goes from the buyer to the seller; the facilitator only checks it and
 hands it to the network, and asks no fee. `deploy/x402/README.md` says how it is run.
 
 ## Mining for the pool
@@ -110,7 +110,7 @@ also a block goes to the network.
 ## Who holds what, and who sees what
 
 - **Your keys** stay in your wallet's folder. Nobody at Polarka sees them. Whoever can read `wallet.json` can
-  spend. With a signing service (from 0.2.3, on main) that folder belongs to a user of the system of its own and
+  spend. With a signing service (from 0.2.3) that folder belongs to a user of the system of its own and
   `limits.json` to root: the agent's user, which must not be one that can administer the machine, can ask the
   service to pay within the limits, not read the words.
 - **A wallet server** sees your wallet's addresses together and your internet address. It can show a false

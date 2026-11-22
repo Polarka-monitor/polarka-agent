@@ -2,19 +2,19 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "org.polarka/polarka-agent",
   "title": "Polarka Agent: a NORTH wallet for agents",
-  "description": "Pays x402 in NORTH. Owner limits do not bind an agent with shell or file tools as the same user.",
+  "description": "Pays x402 in NORTH. Owner limits bind agents with shell access only through a signing service.",
   "websiteUrl": "https://polarka.org",
   "repository": {
     "url": "https://github.com/Polarka-monitor/polarka-agent",
     "source": "github"
   },
-  "version": "0.2.2",
+  "version": "0.2.3",
   "packages": [
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "polarka-agent",
-      "version": "0.2.2",
+      "version": "0.2.3",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
@@ -29,6 +29,13 @@
         {
           "type": "positional",
           "value": "mcp"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "POLARKA_SIGNER",
+          "description": "The socket of a signing service (polarka-agent signer-setup): the agent then only asks it to pay, within the owner's limits, and cannot read the wallet's words",
+          "isRequired": false
         }
       ]
     }
