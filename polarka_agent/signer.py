@@ -485,8 +485,9 @@ LINUX = {"system": "linux", "venv": "/opt/polarka-signer/venv", "dir": "/var/lib
 MACOS = {"system": "macos", "venv": "/Library/Application Support/PolarkaSigner/venv",
          "dir": "/Library/Application Support/PolarkaSigner/wallet",
          "socket": "/Library/Application Support/PolarkaSigner/run/signer.sock", "user": "_polarkasigner", "group": "polarka-pay"}
-# groups whose members can make themselves root (with a password, or without one: docker, lxd, disk ...)
-ADMIN_GROUPS = ("root", "wheel", "sudo", "admin", "docker", "lxd", "incus", "disk", "libvirt")
+# groups whose members can make themselves root (with a password, or without one: docker, lxd, disk ...), or read
+# what only root may (shadow); sudo rules of a user's own are asked of sudo (review 10, N5)
+ADMIN_GROUPS = ("root", "wheel", "sudo", "admin", "docker", "lxd", "incus", "incus-admin", "disk", "libvirt", "shadow")
 PACKAGE = re.compile(r"^polarka-agent==[0-9]+(\.[0-9]+){1,3}((\.dev|rc|a|b|\.post)[0-9]+)?$")
 
 
@@ -585,44 +586,53 @@ PLIST = """<?xml version="1.0" encoding="UTF-8"?>
 # The pieces of the scripts. Pieces are put together first, then every @NAME@ is filled in one pass, so that nothing
 # filled in (a folder's name, say) is read again as a piece (review 10, L2).
 
-CLEAN = """# A clean start: nothing of the account that ran sudo (its HOME, its PATH, PYTHON* and PIP_* settings) reaches
-# root's Python and pip. The file is read again under an empty environment (review 10, H3). Behind a proxy, pip finds
-# it in root's own settings only: /etc/pip.conf, on macOS /Library/Application Support/pip/pip.conf.
-if [ "${POLARKA_SIGNER_SETUP:-}" != clean ]; then
-  [ -f "$0" ] || { echo "run it from its file: sudo sh FILE" >&2; exit 1; }
-  exec /usr/bin/env -i POLARKA_SIGNER_SETUP=clean HOME=@ROOT_HOME@ PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C /bin/sh "$0"
-fi
+CLEAN = """# Nothing of the account that ran sudo reaches what runs as root (review 10, H3): the commands come from the
+# system's own folders, and every Python and pip below runs through clean, in an empty environment, Python with -I
+# and pip with --isolated. The script is read once, as it runs, and never again from a file, so that it may be piped
+# too (review 10, N1). Behind a proxy, pip finds it in root's own settings only: /etc/pip.conf, on macOS
+# /Library/Application Support/pip/pip.conf.
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+clean() { /usr/bin/env -i HOME=@ROOT_HOME@ PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C "$@"; }
 cd /
 """
 
 ADMIN_CHECK = """# The agent's user must not be able to administer this machine: an agent that runs as such a user can wait for
-# its owner's password, and then nothing is kept from it (review 10, M4).
+# its owner's password, and then nothing is kept from it (review 10, M4). Its groups are looked at, and what sudo
+# lets it do (review 10, N5).
 id "$AGENT_USER" >/dev/null 2>&1 || { echo "there is no user $AGENT_USER on this machine" >&2; exit 1; }
+admin=""
 for g in $(id -Gn "$AGENT_USER"); do
   case " @ADMIN_GROUPS@ " in
-    *" $g "*)
-      if [ @ADMIN_AGENT@ != yes ]; then
-        echo "$AGENT_USER is in the group $g and can administer this machine. Run the agent as a user of its own, or print this script with --admin-agent, knowing that it then keeps from the agent only the simple ways in." >&2
-        exit 1
-      fi ;;
+    *" $g "*) admin="it is in the group $g" ;;
   esac
 done
+if [ -z "$admin" ] && command -v sudo >/dev/null 2>&1; then
+  LC_ALL=C sudo -n -l -U "$AGENT_USER" 2>&1 | grep -q "is not allowed to run sudo" || admin="sudo lets it run commands"
+fi
+if [ -n "$admin" ] && [ @ADMIN_AGENT@ != yes ]; then
+  echo "$AGENT_USER can administer this machine ($admin). Run the agent as a user of its own, or print this script with --admin-agent, knowing that it then keeps from the agent only the simple ways in." >&2
+  exit 1
+fi
 """
 
 FROM_PYPI = """pip_in install --quiet --upgrade pip
 pip_in install --quiet --upgrade "$PACKAGE"
 """
 
-FROM_WHEEL = """# the wheel named when this script was printed, used only if its SHA-256 is still the one written here
+FROM_WHEEL = """# the wheel named when this script was printed, used only if its SHA-256 is still the one written here. It is read
+# only as a plain file, at most 64 MiB of it, into a copy only root can read until it is checked (review 10, N2).
 WHEEL=@WHEEL@
 WHEEL_SHA256=@WHEEL_SHA256@
 install -d -o root -g @ROOT_GROUP@ -m 755 "$BASE/dist"
 COPY="$BASE/dist/$(basename "$WHEEL")"
 rm -f "$COPY"
-cp "$WHEEL" "$COPY"
+{ [ -f "$WHEEL" ] && [ ! -L "$WHEEL" ]; } || { echo "$WHEEL is not a plain file" >&2; exit 1; }
+(umask 077; head -c 67108865 < "$WHEEL" > "$COPY")
 if [ "$(@SHA256@ "$COPY" | cut -d ' ' -f 1)" != "$WHEEL_SHA256" ]; then
   rm -f "$COPY"; echo "$WHEEL is not the wheel this script was printed for" >&2; exit 1
 fi
+chmod 644 "$COPY"
 pip_in install --quiet --upgrade pip
 pip_in install --quiet --no-deps --force-reinstall "$COPY"
 """
@@ -634,13 +644,13 @@ LINUX_SCRIPT = """#!/bin/sh
 # only root can change it; makes the wallet's folder, which only the service can open; and starts the service.
 # Stop the agents that use the wallet before you run it.@ADMIN_NOTE@
 set -eu
-[ "$(id -u)" = 0 ] || { echo "run this as root: sudo sh $0" >&2; exit 1; }
 @CLEAN@
+[ "$(id -u)" = 0 ] || { echo "run this as root: sudo sh FILE" >&2; exit 1; }
 AGENT_USER=@AGENT@
 PACKAGE=@PACKAGE@
 BASE=/opt/polarka-signer
 DIR=/var/lib/polarka-signer
-pip_in() { "$BASE/venv/bin/python3" -I -m pip --isolated --disable-pip-version-check --no-input --no-cache-dir "$@"; }
+pip_in() { clean "$BASE/venv/bin/python3" -I -m pip --isolated --disable-pip-version-check --no-input --no-cache-dir "$@"; }
 
 @ADMIN_CHECK@
 # 1. the service's user, and the group whose members may ask it to pay
@@ -650,9 +660,9 @@ usermod -a -G polarka-pay polarka-signer
 usermod -a -G polarka-pay "$AGENT_USER"
 
 # 2. the program, where only root can change it: the service runs it with the wallet's words
-/usr/bin/python3 -I -c "import ensurepip" 2>/dev/null || { echo "python3-venv is needed (Debian, Ubuntu: apt install python3-venv)" >&2; exit 1; }
+clean /usr/bin/python3 -I -c "import ensurepip" 2>/dev/null || { echo "python3-venv is needed (Debian, Ubuntu: apt install python3-venv)" >&2; exit 1; }
 install -d -o root -g root -m 755 "$BASE"
-[ -x "$BASE/venv/bin/python3" ] || /usr/bin/python3 -I -m venv "$BASE/venv"
+[ -x "$BASE/venv/bin/python3" ] || clean /usr/bin/python3 -I -m venv "$BASE/venv"
 @INSTALL@chown -R root:root "$BASE"
 chmod -R go-w "$BASE"
 
@@ -683,14 +693,14 @@ MACOS_SCRIPT = """#!/bin/sh
 # with Apple's own Python where only root can change it; makes the wallet's folder, which only the service can open;
 # and starts the service with launchd. Stop the agents that use the wallet before you run it.@ADMIN_NOTE@
 set -eu
-[ "$(id -u)" = 0 ] || { echo "run this as root: sudo sh $0" >&2; exit 1; }
 @CLEAN@
+[ "$(id -u)" = 0 ] || { echo "run this as root: sudo sh FILE" >&2; exit 1; }
 AGENT_USER=@AGENT@
 PACKAGE=@PACKAGE@
 BASE="/Library/Application Support/PolarkaSigner"
 DIR="$BASE/wallet"
 RUN="$BASE/run"
-pip_in() { "$BASE/venv/bin/python3" -I -m pip --isolated --disable-pip-version-check --no-input --no-cache-dir "$@"; }
+pip_in() { clean "$BASE/venv/bin/python3" -I -m pip --isolated --disable-pip-version-check --no-input --no-cache-dir "$@"; }
 
 @ADMIN_CHECK@
 # 1. a hidden user for the service, and the group whose members may ask it to pay
@@ -735,9 +745,9 @@ for who in _polarkasigner "$AGENT_USER"; do
 done
 
 # 2. the program, where only root can change it: Apple's own Python, in a folder of root's
-/usr/bin/python3 -I -c "import sys; assert sys.version_info >= (3, 9)" || { echo "Apple's Python 3 is needed: xcode-select --install" >&2; exit 1; }
+clean /usr/bin/python3 -I -c "import sys; assert sys.version_info >= (3, 9)" || { echo "Apple's Python 3 is needed: xcode-select --install" >&2; exit 1; }
 install -d -o root -g wheel -m 755 "$BASE"
-[ -x "$BASE/venv/bin/python3" ] || /usr/bin/python3 -I -m venv "$BASE/venv"
+[ -x "$BASE/venv/bin/python3" ] || clean /usr/bin/python3 -I -m venv "$BASE/venv"
 @INSTALL@chown -R root:wheel "$BASE/venv"
 chmod -R go-w "$BASE/venv"
 [ ! -d "$BASE/dist" ] || { chown -R root:wheel "$BASE/dist"; chmod -R go-w "$BASE/dist"; }
@@ -769,14 +779,14 @@ NEW_WALLET = """# 4. a new wallet in the service's folder. Its words are shown h
 if [ -e "$DIR/wallet.json" ]; then
   echo "$DIR holds a wallet already; it is kept"
 else
-  @AS_SERVICE@ "$BASE/venv/bin/python3" -I -B -m polarka_agent --dir "$DIR" new --chain main
+  clean @AS_SERVICE@ "$BASE/venv/bin/python3" -I -B -m polarka_agent --dir "$DIR" new --chain main
 fi
 """
 
 MOVED_WALLET = """# 4. the wallet moved here from @FROM@.
 #    An agent that could read it there may know its words. For the whole of the gain, make a new wallet here instead
-#    (signer-setup without --move-from) and pay the coins over to it. Its files are read as $AGENT_USER, and only
-#    plain files: no link left there leads root anywhere (review 10, M1).
+#    (signer-setup without --move-from) and pay the coins over to it. Its files are read as $AGENT_USER, only plain
+#    files and at most 64 MiB of each: no link left there leads root anywhere (review 10, M1, N3).
 FROM=@FROM@
 [ ! -e "$DIR/wallet.json" ] || { echo "$DIR holds a wallet already; nothing is moved" >&2; exit 1; }
 for f in wallet.json journal.jsonl state.json; do
@@ -786,18 +796,24 @@ for f in wallet.json journal.jsonl state.json; do
 done
 @AS_AGENT@ test -f "$FROM/wallet.json" || { echo "$FROM has no wallet.json that $AGENT_USER can read" >&2; exit 1; }
 for f in wallet.json journal.jsonl state.json; do
+  rm -f "$DIR/$f.new"
   if @AS_AGENT@ test -f "$FROM/$f"; then
-    rm -f "$DIR/$f.new"
-    @AS_AGENT@ cat "$FROM/$f" > "$DIR/$f.new"
+    @AS_AGENT@ head -c 67108865 "$FROM/$f" > "$DIR/$f.new"
+    if [ "$(wc -c < "$DIR/$f.new" | tr -d ' ')" -gt 67108864 ]; then
+      rm -f "$DIR/wallet.json.new" "$DIR/journal.jsonl.new" "$DIR/state.json.new"
+      echo "$FROM/$f is larger than 64 MiB; nothing is moved" >&2; exit 1
+    fi
     chown @USER@:@USER@ "$DIR/$f.new"
     chmod 600 "$DIR/$f.new"
-    mv -f "$DIR/$f.new" "$DIR/$f"
   fi
+done
+for f in wallet.json journal.jsonl state.json; do
+  [ ! -e "$DIR/$f.new" ] || mv -f "$DIR/$f.new" "$DIR/$f"
 done
 for f in wallet.json journal.jsonl state.json; do
   @AS_AGENT@ rm -f "$FROM/$f"
 done
-echo "Moved. Its wallet server: $("$BASE/venv/bin/python3" -I -c 'import json, sys; print(json.load(open(sys.argv[1]))["server"])' "$DIR/wallet.json")"
+echo "Moved. Its wallet server, as written in it: $(clean "$BASE/venv/bin/python3" -I -c 'import json, sys; print(json.dumps(json.load(open(sys.argv[1]))["server"]))' "$DIR/wallet.json")"
 echo "limits.json stays where it was: the agent could change it there. The service's limits are written below."
 """
 
@@ -965,6 +981,17 @@ def _program(venv, ran=None):
     return sorted(set(found))
 
 
+def _may_sudo():
+    """Whether sudo has rules for this user (review 10, N5). It is asked without a password; only its plain "may not
+    run sudo" counts as no. No sudo on the machine: no."""
+    try:
+        said = subprocess.run(["sudo", "-n", "-l"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                              universal_newlines=True, timeout=10, env={"LC_ALL": "C", "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"})
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return "may not run sudo" not in str(said.stdout)
+
+
 def check(path=None, folder=None, venv=None, system=None):
     """What the agent's user sees of a service that is set up. Each point is ok true or false, or null where there was
     nothing to look at; the whole is ok only when every point is true (limits.json may be missing: then the service
@@ -1028,9 +1055,10 @@ def check(path=None, folder=None, venv=None, system=None):
         admin = sorted(groups_of(this_user()) & set(ADMIN_GROUPS))
     except KeyError:
         admin = []
-    point("admin", not admin, "this user is in the group %s and can administer this machine: an agent that runs as it can wait for "
-          "its owner's password, and then the service keeps nothing from it" % admin[0] if admin
-          else "this user is in no group that can administer this machine")
+    admin = ["the group %s" % admin[0]] if admin else (["sudo"] if _may_sudo() else [])
+    point("admin", not admin, "through %s this user can administer this machine: an agent that runs as it can wait for its "
+          "owner's password, and then the service keeps nothing from it" % admin[0] if admin
+          else "this user is in no group that can administer this machine, and sudo lets it run nothing")
     try:
         sudo = subprocess.run(["sudo", "-n", "true"], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                               stderr=subprocess.DEVNULL, timeout=10).returncode == 0

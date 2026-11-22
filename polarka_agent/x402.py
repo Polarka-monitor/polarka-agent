@@ -143,7 +143,9 @@ class Blocks:
                 while h in self.read and self.node.call("getblockhash", h) != self.read[h]:
                     h -= 1
                 self._forget_above(h if h in self.read else -1)
-            start = max(tip - self.most + 1, 0) if self.top is None else self.top + 1
+            # never more than the last `most`: after a quiet spell the blocks in between would be dropped at once
+            # (review 10, N6)
+            start = max(tip - self.most + 1, 0 if self.top is None else self.top + 1, 0)
             if start <= tip:
                 looked_for = waited()
                 for h in range(start, tip + 1):

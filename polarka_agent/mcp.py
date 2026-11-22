@@ -80,6 +80,9 @@ TOOLS = [
 ]
 
 
+NAT64 = ipaddress.ip_network("64:ff9b::/96")
+
+
 def outside(url, resolve=None):
     """Refuses an address that an agent's tool must not reach unless its owner said so (--allow-local): plain
     http, this machine and the networks of a home or an office. A page the agent reads could otherwise make it ask
@@ -104,8 +107,14 @@ def outside(url, resolve=None):
             ip = ipaddress.ip_address(address.split("%", 1)[0])
         except ValueError:
             raise Refused("INPUT", "an agent's tools reach public https addresses only")
-        if ip.version == 6 and ip.ipv4_mapped is not None:
-            ip = ip.ipv4_mapped
+        if ip.version == 6:
+            # the IPv4 address behind an IPv6 one: mapped, through a NAT64 gateway (review 10, N8), or 6to4
+            if ip.ipv4_mapped is not None:
+                ip = ip.ipv4_mapped
+            elif ip in NAT64:
+                ip = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+            elif ip.sixtofour is not None:
+                ip = ip.sixtofour
         if not ip.is_global:
             raise Refused("INPUT", "an agent's tools do not reach this machine or its network (the owner can allow it with --allow-local)")
 

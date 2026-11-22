@@ -73,9 +73,9 @@ socket at `/run/polarka-signer/signer.sock`. On macOS it is a LaunchDaemon run a
 with the wallet in `/Library/Application Support/PolarkaSigner/wallet` and the socket in `.../PolarkaSigner/run`.
 The program the service runs is installed where only root can change it (on macOS with Apple's own Python), from PyPI
 at the version the script names, or from a wheel named with `--wheel`, used only if its SHA-256 is still the one it
-had when the script was printed. The script runs in an empty environment, so that nothing of the account that ran
-sudo reaches root's Python and pip; behind a proxy, pip finds it only in root's own settings (`/etc/pip.conf`, on
-macOS `/Library/Application Support/pip/pip.conf`). It makes a new wallet in the service and shows its words
+had when the script was printed. The script takes its commands from the system's own folders and runs Python and
+pip in an empty environment, so that nothing of the account that ran sudo reaches them; behind a proxy, pip finds
+it only in root's own settings (`/etc/pip.conf`, on macOS `/Library/Application Support/pip/pip.conf`). It makes a new wallet in the service and shows its words
 once. `--move-from FOLDER` moves an existing one instead, reading only plain files and as the agent's user; but an
 agent that could read that wallet may know its words, so the whole of the gain is a new wallet and the coins paid
 over to it. `--check` looks, as the agent's user, at the socket, the service, who may open its folder, who may
@@ -84,8 +84,8 @@ machine. Run it with the service's own Python, as above: a copy that the agent c
 
 It keeps nothing from an agent whose user can administer the machine (sudo with a password or without, admin,
 docker and the like: such an agent can wait for its owner's password), nor on a machine that someone else took over;
-then what the wallet holds is at stake, so keep little in it. `signer-setup` refuses such an agent's user unless told
-`--admin-agent`, and the service then keeps only the simple ways in shut: reading the words, writing the limits.
+then what the wallet holds is at stake, so keep little in it. `signer-setup` refuses such an agent's user, by its groups
+and by what sudo lets it do, unless told `--admin-agent`, and the service then keeps only the simple ways in shut: reading the words, writing the limits.
 `forget` and making a wallet stay with the owner, run as the service's user on its folder. Without `--signer`
 everything works as before, and the MCP server says in its log that the words can be read by its user.
 

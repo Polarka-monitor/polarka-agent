@@ -228,7 +228,8 @@ class M1AMoveFollowsNoLink(unittest.TestCase):
         part = signer.MOVED_WALLET
         for name, value in (("@FROM@", old), ("@USER@", "nobody"), ("@AS_AGENT@", "")):
             part = part.replace(name, value)
-        return 'chown() { :; }\nAGENT_USER=me\nBASE=%s\nDIR=%s\n%s' % (base, new, part)      # chown needs root: stood in for
+        # chown needs root, and clean only empties the environment: stood in for
+        return 'chown() { :; }\nclean() { "$@"; }\nAGENT_USER=me\nBASE=%s\nDIR=%s\n%s' % (base, new, part)
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -258,7 +259,7 @@ class M1AMoveFollowsNoLink(unittest.TestCase):
         p = subprocess.run(["/bin/sh", "-e"], input=self.script(self.old, self.new, self.base), universal_newlines=True,
                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         self.assertEqual(p.returncode, 0, p.stderr)
-        self.assertIn("Its wallet server: http://127.0.0.1:9", p.stdout)
+        self.assertIn('Its wallet server, as written in it: "http://127.0.0.1:9"', p.stdout)
         with open(os.path.join(self.new, "wallet.json")) as f:
             self.assertEqual(f.read(), before)
         self.assertEqual(stat.S_IMODE(os.stat(os.path.join(self.new, "wallet.json")).st_mode), 0o600)
@@ -288,13 +289,20 @@ class M4H3TheAgentAndTheEnvironment(unittest.TestCase):
                     for option in re.findall(r'python3"? (-\S*)', line):
                         self.assertEqual(option, "-I", "%s: python without -I: %s" % (system, line))
             self.assertIn("pip --isolated", text)
-            self.assertIn("exec /usr/bin/env -i POLARKA_SIGNER_SETUP=clean HOME=%s " % ("/root" if system == "linux" else "/var/root"), text)
+            self.assertIn("clean() { /usr/bin/env -i HOME=%s " % ("/root" if system == "linux" else "/var/root"), text)
+            # the commands from the system's own folders before the first of them, the id of the one who runs it
+            self.assertLess(text.index("\nPATH=/usr/sbin:/usr/bin:/sbin:/bin\n"), text.index('"$(id -u)"'))
+            for line in text.splitlines():                  # every Python and pip of the script runs through clean
+                if "python3" in line and not line.lstrip().startswith(("#", "echo", "ExecStart=", "<string>")):
+                    self.assertIn("clean ", line, "%s: %s" % (system, line))
         script = os.path.join(tempfile.mkdtemp(), "clean.sh")
         with open(script, "w") as f:
-            f.write("set -eu\n" + signer.CLEAN.replace("@ROOT_HOME@", "/nowhere") + 'echo "HOME=$HOME PYTHONPATH=${PYTHONPATH:-} PIP=${PIP_INDEX_URL:-}"\n')
-        env = dict(os.environ, PYTHONPATH="/agent", PIP_INDEX_URL="https://agent.example/simple", HOME="/home/agent")
+            f.write("set -eu\n" + signer.CLEAN.replace("@ROOT_HOME@", "/nowhere") + 'echo "PATH=$PATH"\n'
+                    "clean /bin/sh -c 'echo \"HOME=$HOME PYTHONPATH=${PYTHONPATH:-} PIP=${PIP_INDEX_URL:-}\"'\n")
+        env = dict(os.environ, PYTHONPATH="/agent", PIP_INDEX_URL="https://agent.example/simple", HOME="/home/agent",
+                   PATH="/home/agent/bin:" + os.environ.get("PATH", ""))
         p = subprocess.run(["/bin/sh", script], env=env, stdout=subprocess.PIPE, universal_newlines=True, check=True)
-        self.assertEqual(p.stdout.strip(), "HOME=/nowhere PYTHONPATH= PIP=")
+        self.assertEqual(p.stdout.split(), ["PATH=/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/nowhere", "PYTHONPATH=", "PIP="])
 
 
 class LowsOfReview10(unittest.TestCase):
@@ -321,7 +329,8 @@ class LowsOfReview10(unittest.TestCase):
         with mock.patch.object(signer.os, "geteuid", return_value=os.geteuid() + 1), \
                 mock.patch.object(signer.Signer, "info", return_value=facts), \
                 mock.patch.object(signer, "groups_of", return_value=set(), create=True), \
-                mock.patch.object(signer.subprocess, "run", return_value=mock.Mock(returncode=1)):
+                mock.patch.object(signer.subprocess, "run",
+                                  return_value=mock.Mock(returncode=1, stdout="Sorry, user a may not run sudo on h.\n")):
             done = signer.check(path, "/nonexistent/dir", "/nonexistent/venv")
         self.assertEqual([c["ok"] for c in done["checks"] if c["check"] in ("words", "program")], [None, None])
         self.assertFalse(done["ok"])
@@ -373,6 +382,133 @@ class LowsOfReview10(unittest.TestCase):
         with mock.patch.dict(os.environ, {"USER": "somebody", "LOGNAME": "somebody"}):
             import pwd
             self.assertEqual(signer.this_user(), pwd.getpwuid(os.getuid()).pw_name)
+
+
+
+HOST = "macos" if sys.platform == "darwin" else "linux"
+
+
+class SecondLookOfReview10(unittest.TestCase):
+    """What the reviewer of review 10 found in the fixes (N1 to N8)."""
+
+    def test_a_piped_script_runs_no_file_named_sh(self):
+        # N1: `... | sudo sh` gives the script the name "sh"; it read itself again from there, a file in the folder
+        tmp = tempfile.mkdtemp()
+        marker = os.path.join(tmp, "ran")
+        with open(os.path.join(tmp, "sh"), "w") as f:
+            f.write("echo ran > %s\n" % marker)
+        for system in ("linux", "macos"):
+            text = signer.setup_script(system, "agent_1", package="polarka-agent==0.2.3")
+            head = text.split("\nAGENT_USER=", 1)[0] + "\nexit 0\n"
+            subprocess.run(["sh"], executable="/bin/sh", input="id() { echo 0; }\n" + head, cwd=tmp, universal_newlines=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+            self.assertFalse(os.path.exists(marker), system)
+
+    def test_a_wheel_is_read_as_a_plain_file_into_a_copy_only_root_can_read(self):
+        # N2: the copy followed a link and kept the mode of what it read
+        tmp = tempfile.mkdtemp()
+        wheel = os.path.join(tmp, "polarka_agent-0.2.3-py3-none-any.whl")
+        with open(wheel, "wb") as f:
+            f.write(b"not much of a wheel")
+        text = signer.setup_script(HOST, "agent_1", wheel=wheel)
+        self.assertIn("(umask 077; head -c 67108865", text)
+        block = text.split("# the wheel named", 1)[1].split("pip_in install --quiet --upgrade pip", 1)[0]
+        base = os.path.join(tmp, "base")
+
+        def run():
+            return subprocess.run(["/bin/sh", "-c", 'set -eu\ninstall() { for d; do :; done; mkdir -p "$d"; }\nBASE=%s\n#%s'
+                                   % (base, block)], universal_newlines=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        p = run()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        copy = os.path.join(base, "dist", os.path.basename(wheel))
+        self.assertEqual(stat.S_IMODE(os.stat(copy).st_mode), 0o644)
+        secret = os.path.join(tmp, "secret")
+        with open(secret, "w") as f:
+            f.write("only root's")
+        os.unlink(wheel)
+        os.symlink(secret, wheel)
+        p = run()
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("is not a plain file", p.stderr)
+        self.assertFalse(os.path.exists(copy))
+
+    def test_a_move_takes_at_most_64_mib_of_a_file_and_names_the_server_plainly(self):
+        # N3: a sparse file of the agent's became real blocks written by root; N4: the server named in the wallet
+        # reached the owner's terminal as it was, escape sequences and all
+        tmp = tempfile.mkdtemp()
+        old, base = os.path.join(tmp, "agent"), os.path.join(tmp, "base")
+        Wallet.create(old, "regtest", "http://127.0.0.1:9")
+        with open(os.path.join(old, "wallet.json")) as f:
+            wallet = json.load(f)
+        wallet["server"] = "\x1b[2K\x1b]0;owned\x07 all is well"
+        with open(os.path.join(old, "wallet.json"), "w") as f:
+            json.dump(wallet, f)
+        with open(os.path.join(old, "journal.jsonl"), "w") as f:
+            f.truncate((64 << 20) + 1)
+        text = signer.setup_script(HOST, "agent_1", move_from=old, package="polarka-agent==0.2.3")
+        block = text.split("# 4. the wallet moved here", 1)[1].split("\n# 5. ", 1)[0]
+        os.makedirs(os.path.join(base, "venv", "bin"))
+        os.symlink(sys.executable, os.path.join(base, "venv", "bin", "python3"))
+        folder = os.path.join(base, "wallet")
+        os.makedirs(folder)
+        stubs = 'runuser() { shift 3; "$@"; }\nsudo() { shift 2; "$@"; }\nchown() { :; }\nclean() { "$@"; }\n'
+
+        def run():
+            return subprocess.run(["/bin/sh", "-c", "set -eu\n%sAGENT_USER=agent_1\nBASE=%s\nDIR=%s\n#%s" % (stubs, base, folder, block)],
+                                  universal_newlines=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        p = run()
+        self.assertNotEqual(p.returncode, 0)
+        self.assertIn("larger than 64 MiB; nothing is moved", p.stderr)
+        self.assertEqual(os.listdir(folder), [])
+        self.assertTrue(os.path.exists(os.path.join(old, "wallet.json")))
+        with open(os.path.join(old, "journal.jsonl"), "w") as f:
+            f.truncate(10)
+        p = run()
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertEqual(sorted(os.listdir(folder)), ["journal.jsonl", "wallet.json"])
+        self.assertNotIn("\x1b", p.stdout)
+        self.assertIn("\\u001b[2K", p.stdout)
+
+    def test_an_agent_that_sudo_lets_run_commands_is_refused_unless_said(self):
+        # N5: a sudoers line of the agent's own was not seen
+        self.assertTrue({"incus-admin", "shadow"} <= set(signer.ADMIN_GROUPS))
+        block = signer.ADMIN_CHECK.replace("@ADMIN_GROUPS@", " ".join(signer.ADMIN_GROUPS))
+
+        def run(said, admin_agent="no"):
+            stubs = 'id() { [ "$1" = -Gn ] && echo agent_1; return 0; }\nsudo() { echo "%s"; }\n' % said
+            return subprocess.run(["/bin/sh", "-c", "set -eu\n" + stubs + "AGENT_USER=agent_1\n"
+                                   + block.replace("@ADMIN_AGENT@", admin_agent) + "echo passed\n"],
+                                  universal_newlines=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.assertEqual(run("User agent_1 is not allowed to run sudo on here.").stdout, "passed\n")
+        p = run("User agent_1 may run the following commands on here:")
+        self.assertEqual(p.stdout, "")
+        self.assertIn("sudo lets it run commands", p.stderr)
+        self.assertEqual(run("User agent_1 may run the following commands on here:", "yes").stdout, "passed\n")
+        said = lambda out: mock.patch.object(signer.subprocess, "run", return_value=mock.Mock(returncode=1, stdout=out))
+        with said("sudo: a password is required\n"):
+            self.assertTrue(signer._may_sudo())
+        with said("Sorry, user agent_1 may not run sudo on here.\n"):
+            self.assertFalse(signer._may_sudo())
+        with mock.patch.object(signer.subprocess, "run", side_effect=OSError("no sudo")):
+            self.assertFalse(signer._may_sudo())
+
+    def test_after_a_quiet_spell_only_the_last_blocks_are_read(self):
+        # N6: the blocks between were read once more, only to be dropped
+        node = ChainOfBlocks(400)
+        blocks = x402.Blocks(node, most=288)
+        blocks.depth("", lambda: set())
+        node.blocks.extend(("%064x" % (10000 + h), []) for h in range(5000))
+        node.calls.clear()
+        self.assertIsNone(blocks.depth("", lambda: set()))
+        self.assertLessEqual(node.calls["getblock"], 288)
+
+    def test_a_name_behind_nat64_that_leads_here_is_refused(self):
+        # N8: Python counts 64:ff9b::/96 as global, whatever IPv4 address is in it
+        for address in ("64:ff9b::7f00:1", "64:ff9b::a00:1", "2002:7f00:1::1"):
+            resolve = lambda host, port, address=address, **k: [(10, 1, 6, "", (address, port, 0, 0))]
+            with self.assertRaises(Refused, msg=address):
+                mcp.outside("https://nat64.example/", resolve)
+        mcp.outside("https://public.example/", lambda host, port, **k: [(10, 1, 6, "", ("64:ff9b::5db8:d70e", port, 0, 0))])
 
 
 if __name__ == "__main__":

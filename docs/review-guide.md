@@ -135,8 +135,17 @@ One review by a person, and six by AI models that did not write the code (five b
   user; a /48 has a bucket of its own over its /64s, the table of callers lets the longest idle go, and one place
   may add only a twentieth of the book's room a day; the program is a pinned version or a wheel whose SHA-256 the
   script checks, and `--check` follows every place the program takes modules from; an agent's user that can
-  administer the machine is refused unless the owner says `--admin-agent`. Open: I1 until the release, I2, I4 to
-  I7, and what a sender with many /48s can still do against the public facilitator (`deploy/x402/README.md`).
+  administer the machine is refused unless the owner says `--admin-agent`. The same reviewer read these fixes
+  again (858c22a, the same day): all mended, M2 and M4 in part. It found N1 (Medium: piped into `sudo sh`, the
+  script read itself again from a file named `sh` in the current folder, so root ran whatever was there), four
+  Low (N2 a wheel copied through a link and readable for a moment, N3 a moved file without a bound on its size,
+  N4 the moved wallet's server name printed raw to root's terminal, N5 a sudo rule of the agent's own user not
+  seen) and five Info. Mended on 22 November, in 0.2.3, with tests (`SecondLookOfReview10`): N1 to N6 and N8; the
+  script is no longer read again at all, takes its commands from the system's folders before the first of them,
+  and runs every Python and pip through `env -i`. Open: I1 until the release, I2, I4 to I7, N7 in part (sudo
+  finds `sh` by the caller's PATH), N10 (the gate's own facilitator keeps a replaced payment waiting for ever:
+  cheap now, but it grows), and what a sender with many /48s can still do against the public facilitator
+  (`deploy/x402/README.md`).
 
 Review 9 read the fixes of review 8 and found them sound, and review 10 found most of the fixes of the human
 review correct. Nobody but its author has read the fixes of review 9 and review 10. The facilitator for sellers
@@ -150,7 +159,7 @@ package that the first review by a person read.
 
     git clone https://github.com/Polarka-monitor/polarka-agent && cd polarka-agent   # or the copy you were given
     # a TrueNorth Core build (truenorthd, truenorth-cli) in a folder; tests start their own regtest node
-    TN_BIN=/path/to/bin python3 -m unittest discover -s tests -t .      # about 6 minutes, 309 tests
+    TN_BIN=/path/to/bin python3 -m unittest discover -s tests -t .      # about 6 minutes, 315 tests
     # as root on Linux, the signing service with real users of the system (it makes and removes three):
     sudo POLARKA_TEST_USERS=1 python3 -m unittest tests.test_signer.ApartOnLinux
 
