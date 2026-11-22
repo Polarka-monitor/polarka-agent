@@ -195,7 +195,9 @@ def run(argv=None, out=sys.stdout):
     c = sub.add_parser("mail-serve", help="be a post office for letters between agents; --dir keeps the letters (sealed, unread)")
     c.add_argument("--paid", default="127.0.0.1:8682", help="where letters come in, behind a gate of postage (its --route /v1/mail)")
     c.add_argument("--free", default="127.0.0.1:8683", help="where inboxes fetch their letters, behind the web server only (/v1/inbox)")
-    c.add_argument("--trust-proxy", action="store_true", help="take the caller's address from X-Forwarded-For at the free door")
+    c.add_argument("--trust-proxy", action="store_true", help="take the caller's address from X-Forwarded-For at both doors")
+    c.add_argument("--public-url", default="https://gate.polarka.org",
+                   help="the post office as inboxes call it; their signatures name it (default https://gate.polarka.org)")
     c = sub.add_parser("x402-facilitator", help="settle x402 payments in NORTH for sellers, with this machine's node; --dir keeps "
                                                 "what was taken")
     c.add_argument("--chain", required=True, choices=("main", "regtest"))
@@ -433,7 +435,7 @@ def run(argv=None, out=sys.stdout):
             return 0
         if a.cmd == "mail-serve":
             from .mail import serve as mail_serve
-            return mail_serve(folder, a.paid, a.free, a.trust_proxy)
+            return mail_serve(folder, a.paid, a.free, a.trust_proxy, a.public_url)
         if signer:
             from .signer import Signer
             if a.cmd in ("mcp", "fetch", "mail-inbox", "mail-send", "mail-read"):

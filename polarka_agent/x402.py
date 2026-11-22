@@ -738,7 +738,30 @@ def _next_lot(book, origin):
         book["lots"].pop(origin, None)
 
 
-def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.sleep, clock=time.time):
+def _lot_used(book, origin, claim, status, left):
+    """Called under BOOK, after a call made with the lot `claim`: what the gate said of it goes to that lot, wherever
+    it is now (the current one, or a spare), and to no other; another process of the same wallet may have moved on
+    meanwhile (review 11, M3). Used up, or not known to the gate: gone; else the calls left are written down."""
+    gone = (status == 402 and left is None) or left == 0
+    current = book["lots"].get(origin)
+    if isinstance(current, dict) and current.get("claim") == claim:
+        if gone:
+            _next_lot(book, origin)
+        elif left:
+            book["lots"][origin] = dict(current, left=left)
+        return
+    spare = book.setdefault("spare", {}).get(origin) or []
+    for i, held in enumerate(spare):
+        if isinstance(held, dict) and held.get("claim") == claim:
+            if gone:
+                del spare[i]
+            elif left:
+                spare[i] = dict(held, left=left)
+            break
+
+
+def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.sleep, clock=time.time, method="GET", body=None,
+          key=None):
     """GET url; when it answers 402 and takes NORTH on the wallet's chain for at most `most` base units, pays
     within the owner's limits and asks again, while the seller waits for a block for up to `wait` seconds.
 
@@ -746,7 +769,11 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
     shows the same payment again and pays nothing more, until the seller answers or refuses. The payment is handed to
     the seller, not to a server: until a server shows it in a block or waiting, the wallet's next payment stands
     against it. When a gate of postage answers that the payment bought a lot of calls (X-Postage-Calls-Left), the
-    rest of the lot is used for the next calls to the same place before anything is paid again."""
+    rest of the lot is used for the next calls to the same place before anything is paid again.
+
+    `method` and `body` (bytes of JSON) make the call a POST, the paying one included: a letter buys its own postage
+    (review 11, L5). `key` names the payment kept in the book (the url unless said): calls to several urls that buy
+    the same thing, such as letters to several inboxes, share one payment."""
     network = network or NETWORKS.get(wallet.chain)
     if network is None:
         raise Refused("X402", "x402 in NORTH on %s needs the network's name (network=)" % wallet.chain)
@@ -772,8 +799,13 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
                 raise Refused("X402", "the answer took longer than %d seconds" % (2 * timeout))
         return got[:2_000_000]
 
+    key = key or url
+    sent = {"User-Agent": "polarka-agent"}
+    if body is not None:
+        sent["Content-Type"] = "application/json"
+
     def get(headers):
-        req = urllib.request.Request(url, headers=dict(headers, **{"User-Agent": "polarka-agent"}))
+        req = urllib.request.Request(url, data=body, method=method, headers=dict(headers, **sent))
         try:
             with opener.open(req, timeout=timeout) as r:
                 return r.status, r.headers, read(r)            # headers are looked up whatever their case
@@ -792,23 +824,20 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
 
     with BOOK(wallet):
         book = _book(wallet)
-    held, lot = book["pending"].get(url), book["lots"].get(origin)
+    held, lot = book["pending"].get(key), book["lots"].get(origin)
     if held is None:
-        status, headers, body = get({"X-Postage": lot["claim"]} if lot else {})
+        status, headers, answer = get({"X-Postage": lot["claim"]} if lot else {})
         if lot:
             left = calls_left(headers)
             with BOOK(wallet):
                 book = _book(wallet)
-                if (status == 402 and left is None) or left == 0:
-                    _next_lot(book, origin)                 # used up, or the gate no longer knows it
-                elif left:
-                    book["lots"][origin] = dict(lot, left=left)
+                _lot_used(book, origin, lot["claim"], status, left)     # used up, or not known to the gate: gone
                 _keep_book(wallet, book)
             if status != 402 or left is not None:           # the gate let the call through, whatever the service said
-                return {"status": status, "paid": None, "calls_left": left, "body": body,
+                return {"status": status, "paid": None, "calls_left": left, "body": answer,
                         "note": "a call of a lot paid for before"}
         if status != 402:
-            return {"status": status, "paid": None, "body": body}
+            return {"status": status, "paid": None, "body": answer}
         try:
             needed = from_b64json(headers.get("PAYMENT-REQUIRED"))
         except Exception:
@@ -839,14 +868,14 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
         held = {"header": b64json(payment), "txid": made["id"], "amount": amount, "claim": claim, "made": int(clock())}
         with BOOK(wallet):                          # kept before the seller sees it: one payment for one resource
             book = _book(wallet)
-            book["pending"][url] = held
+            book["pending"][key] = held
             _keep_book(wallet, book)
         again = False
     else:
         again = True
     start = clock()
     while True:
-        status, headers, body = get({"PAYMENT-SIGNATURE": held["header"]})
+        status, headers, answer = get({"PAYMENT-SIGNATURE": held["header"]})
         settled = told(headers)
         # 202: the seller waits for a block; 503: the seller's facilitator could not settle just now. Both are asked
         # again, with the same payment, within `wait` (human review, 22 November)
@@ -867,7 +896,7 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
         paid = bool(settled and settled.get("success"))
         final = paid or status == 400 or (status == 402 and (settled is None or settled.get("errorReason") not in AGAIN + (AWAITING,)))
         if final:                                   # settled, or refused for good; anything else is asked again later
-            book["pending"].pop(url, None)
+            book["pending"].pop(key, None)
         left = calls_left(headers)
         if paid and left:                           # the lot is paid whatever the service behind the gate answered
             new, had = {"claim": held["claim"], "left": left}, book["lots"].get(origin)
@@ -878,7 +907,7 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
             else:
                 book["lots"][origin] = new
         _keep_book(wallet, book)
-    got = {"status": status, "paid": north(held["amount"]), "txid": held["txid"], "settlement": settled, "body": body}
+    got = {"status": status, "paid": north(held["amount"]), "txid": held["txid"], "settlement": settled, "body": answer}
     if again:
         got["note"] = "the payment made before was shown again; nothing more was paid"
     if calls_left(headers):

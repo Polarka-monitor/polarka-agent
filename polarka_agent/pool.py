@@ -380,7 +380,8 @@ class Pool:
         self.pay_script = script_for_address(chain, pay_to)
         self.ratio, self.fee, self.clock = ratio, fee_percent, clock
         self.ticks = time.monotonic if clock is time.time else clock       # ages, on a clock nobody can set back
-        self.tip_seen = None
+        self.best = self.tip_seen = None    # the node's tip, and when the node said so
+        self.template_tip = None            # the tip of the last template held, kept while the node is silent
         self.hasher = hasher or RxHasher()
         self.cap, self.guard, self.payouts = cap, guard, payouts
         self.folder, self.most_owed = folder, most_owed
@@ -469,18 +470,75 @@ class Pool:
         if self.template is not None and now - self.template_at < TEMPLATE_AGE:
             return self.template
         try:
-            template = self.node.call("getblocktemplate", {"rules": ["segwit"]})
-            seed = rxmod.seed_height(template["height"])
-            if seed != self.key_height:
-                self.key = bytes(32) if seed == 0 else bytes.fromhex(self.node.call("getblockhash", seed))[::-1]
-                self.key_height = seed
+            template, key, seed = self._ask(self.key_height)
         except (OSError, ValueError, KeyError, TypeError) as e:
             self.template = None
             raise PoolError("PAUSED", "the pool's node does not answer, so no work is handed out (%s)" % type(e).__name__, 503)
-        if self.template is None or template["previousblockhash"] != self.template["previousblockhash"]:
-            self.jobs, self.job_of, self.seen = {}, {}, set()       # a new tip: what was handed out is stale
-        self.template, self.template_at, self.template_good_at = template, now, now
+        self._put(template, key, seed, now)
         return template
+
+    def _ask(self, key_height):
+        """A template from the node, and the RandomX key for its height when that is not the one at key_height.
+        Needs no lock."""
+        template = self.node.call("getblocktemplate", {"rules": ["segwit"]})
+        seed, key = rxmod.seed_height(template["height"]), None
+        if seed != key_height:
+            key = bytes(32) if seed == 0 else bytes.fromhex(self.node.call("getblockhash", seed))[::-1]
+        return template, key, seed
+
+    def _put(self, template, key, seed, at):
+        """Called with the lock held: a template the node gave, asked for at `at`, becomes the pool's. What was handed
+        out over HTTP goes when the tip moved or after a pause (no template for longer than NODE_SILENCE), not when
+        the node was silent for a moment only (review 11, L2)."""
+        paused = self.template is None and (self.template_good_at is None or at - self.template_good_at > NODE_SILENCE)
+        if template["previousblockhash"] != self.template_tip or paused:
+            self.jobs, self.job_of, self.seen = {}, {}, set()       # a new tip, or a pause: what was handed out is stale
+        if key is not None:
+            self.key, self.key_height = key, seed
+        self.template, self.template_at, self.template_good_at = template, at, at
+        self.template_tip = template["previousblockhash"]
+        if self.tip_seen is None or at >= self.tip_seen:
+            self.best, self.tip_seen = template["previousblockhash"], at
+
+    def _saw(self, best, at):
+        """Called with the lock held: the node said, asked at `at`, that its tip is `best`. A tip that moved makes the
+        template old and what was handed out over HTTP stale at once, whatever the node says next. What the node
+        said later stands."""
+        if self.tip_seen is not None and at < self.tip_seen:
+            return
+        self.best, self.tip_seen = best, at
+        if self.template is not None and self.template["previousblockhash"] != best and self.template_at <= at:
+            self.template_at = at - TEMPLATE_AGE
+            self.jobs, self.job_of, self.seen = {}, {}, set()
+
+    def look(self, template=True):
+        """For stratum: asks the node outside the lock and puts the answers in under it, so that a slow node holds up
+        no HTTP miner (review 11, L2): its tip at most every TIP_AGE and, with `template`, a new template when the one
+        held is old (the tip moved, or TEMPLATE_AGE). Returns the node's tip as last seen (None: never seen). A node
+        that does not answer changes nothing, until it has been silent for NODE_SILENCE: then PoolError PAUSED."""
+        asked = self.ticks()
+        with self.lock:
+            ask_tip = self.template is None or self.tip_seen is None or asked - self.tip_seen >= TIP_AGE
+        try:
+            if ask_tip:
+                best = self.node.call("getbestblockhash")
+                with self.lock:
+                    self._saw(best, asked)
+            with self.lock:
+                old = template and (self.template is None or self.ticks() - self.template_at >= TEMPLATE_AGE)
+                key_height = self.key_height
+            if old:
+                new, key, seed = self._ask(key_height)
+                with self.lock:
+                    # unless a newer one came in meanwhile, or the key moved under it
+                    if (self.template is None or self.template_at < asked) and (key is not None or seed == self.key_height):
+                        self._put(new, key, seed, asked)
+        except (OSError, ValueError, KeyError, TypeError):
+            with self.lock:
+                if self.template_good_at is None or self.ticks() - self.template_good_at > NODE_SILENCE:
+                    raise PoolError("PAUSED", "the pool's node does not answer, so no shares are taken", 503)
+        with self.lock:
+            return self.best
 
     def _may_work(self, address):
         """Called with the lock held. The pool pays for shares whether or not blocks come of them, so it stops
@@ -560,10 +618,7 @@ class Pool:
         try:
             now = self.ticks()
             if self.template is not None and (self.tip_seen is None or now - self.tip_seen >= TIP_AGE):
-                if self.node.call("getbestblockhash") != self.template["previousblockhash"]:
-                    self.template_at = now - TEMPLATE_AGE
-                    self.jobs, self.job_of, self.seen = {}, {}, set()       # stale at once, whatever the node says next
-                self.tip_seen = now
+                self._saw(self.node.call("getbestblockhash"), now)
             self._fresh_template()
         except (PoolError, OSError):
             # a share for the tip the pool last knew still counts, but not for long: a pool that cannot see
@@ -605,7 +660,7 @@ class Pool:
         with self.lock:
             self._count(entry)
             if entry["accepted"]:
-                self.template_at = 0    # the tip has moved: the next asker gets a new template
+                self.template_at, self.tip_seen = 0, None   # the tip has moved: the next asker gets a new template
         return {"ok": True, "credited": north(entry["value"]), "block": entry["block"], "accepted": entry["accepted"]}
 
     def account(self, address):
@@ -854,13 +909,13 @@ def pay_for_ever(pool, every, sleep=time.sleep):
 
 def serve(pool, listen, trust_proxy=False, pay_every=0, stratum=None, welcome=None):
     server = make_server(pool, listen, trust_proxy)
+    if stratum:         # before the payouts: a stratum that cannot listen stops the pool before a round begins (review 11, L7)
+        from .stratum import Stratum
+        _say("stratum on port %d" % Stratum(pool, stratum, welcome=welcome).start())
     if pool.payouts is not None and pay_every > 0:
         threading.Thread(target=pay_for_ever, args=(pool, pay_every), daemon=True).start()
     _say("pool on %s:%d, chain %s, a share is 1/%d of a block, fee %d %%, blocks pay %s"
          % (server.server_address[0], server.server_address[1], pool.chain, pool.ratio, pool.fee, pool.pay_to))
-    if stratum:
-        from .stratum import Stratum
-        _say("stratum on port %d" % Stratum(pool, stratum, welcome=welcome).start())
     try:
         server.serve_forever()
     except KeyboardInterrupt:

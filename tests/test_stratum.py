@@ -13,6 +13,8 @@ import random
 import shutil
 import socket
 import tempfile
+import threading
+import time
 import unittest
 from fractions import Fraction
 
@@ -77,6 +79,11 @@ class Shape(unittest.TestCase):
         self.assertGreaterEqual(stratum.share_target(low), network * stratum.MIN_ODDS)
         self.assertLess(stratum.share_target(low - 1), network * stratum.MIN_ODDS)
         self.assertEqual(stratum.bounds(rx.target_of(0x207fffff), 2048), (31, 31))        # regtest: only the easiest
+        for ratio in (1, 2, 3):                 # never a share target below the network's (review 11, I3)
+            low, high = stratum.bounds(network, ratio)
+            self.assertLessEqual(low, high)
+            self.assertGreaterEqual(stratum.share_target(low), network)
+        self.assertEqual(stratum.bounds(network, 1), (6, 6))        # 2^230 + 2^128 - 1: a little easier than a block
 
     def test_the_branch_makes_the_merkle_root(self):
         rng = random.Random(5)
@@ -95,17 +102,19 @@ class Shape(unittest.TestCase):
         template = self.template(txs)
         script = pool.script_for_address("regtest", PAY)
         job = stratum.Job(1, template, bytes(32), 0, script, 0)
-        xn1, xn2 = bytes.fromhex("0a0b0c0d"), bytes.fromhex("01020304")
+        issue, xn1, xn2 = bytes.fromhex("00000007"), bytes.fromhex("0a0b0c0d"), bytes.fromhex("01020304")
         extranonce = int.from_bytes(xn1 + xn2, "little")
-        plain = pool.coinbase(template["height"], template["coinbasevalue"], script, extranonce, pool.commitment_of(template), False, stratum.MARK)
-        self.assertEqual(job.coinb1 + xn1 + xn2 + job.coinb2, plain)
+        plain = pool.coinbase(template["height"], template["coinbasevalue"], script, extranonce, pool.commitment_of(template), False,
+                              stratum.MARK + issue)
+        self.assertEqual(job.coinb1(issue) + xn1 + xn2 + job.tail, plain)
         # the same extranonce over HTTP makes another coinbase: no header can be both
         self.assertNotEqual(pool.coinbase(template["height"], template["coinbasevalue"], script, extranonce, pool.commitment_of(template), False), plain)
         # the header is the one the pool would make of the whole coinbase, and the block carries that coinbase
-        header = job.header(xn1, xn2, template["curtime"], 7)
-        self.assertEqual(header, pool.assemble(template, script, extranonce, stratum.MARK)[0] + (7).to_bytes(4, "little"))
+        header = job.header(issue, xn1, xn2, 7)
+        self.assertEqual(header, pool.assemble(template, script, extranonce, stratum.MARK + issue)[0] + (7).to_bytes(4, "little"))
+        self.assertNotEqual(job.header(bytes.fromhex("00000008"), xn1, xn2, 7), header)     # another issue, another header
         self.assertEqual(job.reward, 512 * UNITS)
-        block = job.block(xn1, xn2, header, script)
+        block = job.block(issue, xn1, xn2, header, script)
         self.assertEqual(block[:80], header)
         self.assertIn(plain[:4] + b"\x00\x01" + plain[4:-4], block)       # the coinbase with its witness
 
@@ -115,9 +124,11 @@ class Shape(unittest.TestCase):
         template["version"], template["previousblockhash"] = 0x20000004, "00000000a1b2c3d4" + "e5f60718" * 6
         script = pool.script_for_address("regtest", PAY)
         job = stratum.Job(1, template, bytes(32), 0, script, 0)
+        issue = bytes.fromhex("01020304")
         for n in (0, 1, 0x01020304, 0xfffffffe):
-            header, time_hex, nonce_hex = ironminer_header(job.notify("1", True), "0a0b0c0d", b"\x00\x00\x00\x05", n)
-            self.assertEqual(header, job.header(bytes.fromhex("0a0b0c0d"), b"\x00\x00\x00\x05", int(time_hex, 16), int(nonce_hex, 16)))
+            header, time_hex, nonce_hex = ironminer_header(job.notify("1", issue, True), "0a0b0c0d", b"\x00\x00\x00\x05", n)
+            self.assertEqual(int(time_hex, 16), job.time)               # the time it sends back is the job's
+            self.assertEqual(header, job.header(issue, bytes.fromhex("0a0b0c0d"), b"\x00\x00\x00\x05", int(nonce_hex, 16)))
             self.assertEqual(header[4:36], bytes.fromhex(template["previousblockhash"])[::-1])
             self.assertEqual(header[:4], (0x20000004).to_bytes(4, "little"))
             self.assertEqual(header[72:76], bytes.fromhex(template["bits"])[::-1])
@@ -255,7 +266,8 @@ class OverTheLine(unittest.TestCase):
         self.assertEqual(c.call("mining.submit", [BOB] + submit[1:])["error"][0], 24)       # not authorized here
         self.assertEqual(c.call("mining.submit", submit[:1] + ["ff"] + submit[2:])["error"][0], 21)
         self.assertEqual(c.call("mining.submit", submit[:2] + ["0102"] + submit[3:])["error"][0], 20)
-        self.assertEqual(c.call("mining.submit", submit[:3] + ["%08x" % (int(submit[3], 16) + 601)] + submit[4:])["error"][0], 20)
+        for later in (1, 601):                  # the time is the job's (review 11, H1)
+            self.assertEqual(c.call("mining.submit", submit[:3] + ["%08x" % (int(submit[3], 16) + later)] + submit[4:])["error"][0], 20)
         self.assertEqual(c.call("mining.submit", submit[:4] + ["0x123456"])["error"][0], 20)
         self.assertEqual(c.call("mining.submit", submit[:4])["error"][0], 20)
         self.assertEqual(c.call("mining.unknown", [])["error"][0], 20)
@@ -271,7 +283,9 @@ class OverTheLine(unittest.TestCase):
         self.assertEqual((entry["accepted"], entry["block"]), (True, dsha(header)[::-1].hex()))
         block = bytes.fromhex(self.node.sent[-1])
         self.assertEqual(block[:80], header)
-        self.assertIn(bytes([len(stratum.MARK) + 8]) + stratum.MARK + bytes.fromhex(c.extranonce1) + b"\x00\x00\x00\x01", block)
+        pushed = bytes.fromhex(c.job[2])[-(1 + len(stratum.MARK) + stratum.ISSUE):]     # the push, MARK and the issue
+        self.assertEqual(pushed[:1 + len(stratum.MARK)], bytes([len(stratum.MARK) + stratum.ISSUE + 8]) + stratum.MARK)
+        self.assertIn(pushed + bytes.fromhex(c.extranonce1) + b"\x00\x00\x00\x01", block)
         for client in (c, d):
             job = client.note("mining.notify")
             self.assertEqual((job[8], job[1]), (True, stratum.swapped(self.node.previous)))
@@ -297,6 +311,8 @@ class OverTheLine(unittest.TestCase):
         self.assertIn("address", c.note("client.show_message")[0])
         said = c.call("mining.authorize", ["north1zwfk57mzt9v2eqk7dg270drfs7afk5tksq42ga7anpaxackfl36pskryq05", "x"])
         self.assertEqual(said["error"][0], 24)      # an address of another network
+        said = c.call("mining.authorize", [ALICE[:6].upper() + ALICE[6:], "x"])
+        self.assertEqual(said["error"][0], 24)      # written in both cases at once: refused, as over HTTP (review 11, I2)
         self.assertEqual(c.call("mining.authorize", [ALICE + ".a", "x"])["result"], True)
         self.assertEqual(c.call("mining.extranonce.subscribe", [])["result"], False)
 
@@ -386,7 +402,11 @@ class Rules(unittest.TestCase):
         m = self.miner()
         self.assertEqual(m.k, 6)                                    # it starts at the easiest share
         self.assertEqual([s["method"] for s in m.writer.said], ["mining.set_difficulty", "mining.set_randomx_seed", "mining.notify"])
-        for _ in range(6):                                          # a share a second: fifteen times too fast
+        for _ in range(stratum.RETUNE_SHARES // 2):                 # a share a second: fifteen times too fast,
+            self.now[0] += 1
+            m.found.append(stratum.hashes(m.k))
+        self.assertFalse(self.s._retune(m))                         # but six shares in six seconds say too little
+        for _ in range(stratum.RETUNE_SHARES // 2):
             self.now[0] += 1
             m.found.append(stratum.hashes(m.k))
         self.assertTrue(self.s._retune(m))
@@ -396,6 +416,7 @@ class Rules(unittest.TestCase):
         self.assertEqual(m.writer.said[-1]["params"][8], False)
         self.assertEqual(m.jobs[m.writer.said[-1]["params"][0]][1], 2)        # the job given now is paid at its own k
         self.assertEqual(m.jobs["1"][1], 6)                                     # and the one before at the old one
+        self.assertNotEqual(m.jobs["1"][2], m.jobs["2"][2])                     # each with an issue, and so headers, of its own
         self.now[0] += 59
         self.assertFalse(self.s._retune(m))                         # quiet, but not long enough
         self.now[0] += 1
@@ -407,6 +428,25 @@ class Rules(unittest.TestCase):
         m.k = None
         self.s._suggest(m, ["0.0156"])
         self.assertEqual(m.k, 6)
+        self.s._suggest(m, [10 ** 400])                             # no float: passed over (review 11, L1)
+        self.assertEqual(m.k, 6)
+
+    def test_a_difficulty_decided_on_too_little_does_not_move(self):
+        """Review 11, M1: half the shares a decision needs, over five minutes, and only by a whole step or more."""
+        m = self.miner()
+        m.k = 2
+        self.s._give(m, self.s.job)
+        for _ in range(stratum.RETUNE_SHARES // 2):                 # a share a minute: four times too slow at k = 2
+            self.now[0] += 60
+            m.found.append(stratum.hashes(2))
+        self.assertTrue(self.s._retune(m))
+        self.assertEqual(m.k, 4)                                    # four times easier
+        self.s._give(m, self.s.job)
+        for _ in range(stratum.RETUNE_SHARES):                      # a share every 16 seconds at k = 4: near enough
+            self.now[0] += 16
+            m.found.append(stratum.hashes(4))
+        self.assertFalse(self.s._retune(m))
+        self.assertEqual(m.k, 4)
 
     def test_a_connection_that_sends_too_much(self):
         m = self.miner()
@@ -452,6 +492,237 @@ class Rules(unittest.TestCase):
         with self.assertRaises(pool.PoolError) as caught:
             self.s._may_mine("203.0.113.9", ALICE)
         self.assertEqual(caught.exception.kind, "CAP")
+
+
+class ValueHash:
+    """A proof of work whose answer the test chooses: every header hashes to `value`. It keeps what it hashed."""
+
+    def __init__(self):
+        self.value, self.hashed = 0, []
+
+    def hash(self, key, header80):
+        self.hashed.append(header80)
+        return self.value.to_bytes(32, "little")
+
+
+class OneHeaderOneId(unittest.TestCase):
+    """Review 11, H1 and M1: a header is good under one job id only, so the difficulty a hash is paid at is the one
+    its id was given with, not the hardest of several the miner holds; and a miner that starts a job over after a
+    new difficulty hashes headers it has not hashed before. A network target of 2^240: k from 20 to 26."""
+
+    def setUp(self):
+        self.folder = tempfile.mkdtemp(prefix="polarka-stratum-test-")
+        self.node, self.now, self.hasher = FakeNode(), [1000.0], ValueHash()
+        self.pool = pool.Pool(self.node, "regtest", PAY, self.folder, ratio=2048, fee_percent=5, hasher=self.hasher,
+                              clock=lambda: self.now[0])
+        self.s = stratum.Stratum(self.pool, "127.0.0.1:0")
+        template = self.node.call("getblocktemplate", {})
+        template["bits"] = "1f010000"
+        self.s.job = stratum.Job(1, template, bytes(32), 0, self.pool.pay_script, self.now[0])
+        self.s.number = 1
+        self.m = stratum.Miner(FakeWriter(), "203.0.113.9", b"\x0a\x0b\x0c\x0d")
+        self.m.workers = {ALICE: ALICE}
+
+    def tearDown(self):
+        shutil.rmtree(self.folder, ignore_errors=True)
+
+    def check(self, job_id, extranonce2="00000007", nonce=12345, later=0):
+        job, k, issue = self.m.jobs[job_id]
+        return self.s._check(self.m.extranonce1, ALICE, job, k, issue, extranonce2, "%08x" % (job.time + later), "%08x" % nonce)
+
+    def test_seven_difficulties_and_no_choice(self):
+        self.assertEqual(stratum.bounds(self.s.job.network, 2048), (20, 26))
+        ids = {}
+        for k in range(26, 19, -1):             # what vardiff or suggest_difficulty may give over a few minutes
+            self.m.k = k
+            self.s._give(self.m, self.s.job, False)
+            ids[k] = self.m.writer.said[-1]["params"][0]
+        self.assertEqual(len({issue for _, _, issue in self.m.jobs.values()}), 7)
+        self.assertEqual(len({note["params"][2] for note in self.m.writer.said if note["method"] == "mining.notify"}), 7)
+        # the same numbers under the easiest id and under the hardest are two headers, each found by work of its own,
+        # and each paid at its own id's difficulty
+        self.hasher.value = stratum.share_target(20)
+        self.assertEqual(self.check(ids[26])["work"], stratum.hashes(26))
+        self.assertEqual(self.check(ids[20])["work"], stratum.hashes(20))
+        self.assertNotEqual(self.hasher.hashed[0], self.hasher.hashed[1])
+        with self.assertRaises(pool.PoolError) as caught:
+            self.check(ids[26])
+        self.assertEqual(caught.exception.kind, "DUPLICATE")
+        with self.assertRaises(pool.PoolError) as caught:
+            self.check(ids[26], nonce=5, later=60)              # the time of a later job of the same template
+        self.assertEqual(caught.exception.kind, "INPUT")
+
+    def test_a_miner_that_starts_over_after_a_new_difficulty_hashes_new_headers(self):
+        self.s._give(self.m, self.s.job, True)
+        first = self.m.writer.said[-1]["params"]
+        self.hasher.value = stratum.share_target(25)            # every header a share, at k = 26 and at k = 25
+        # IronMiner: extranonce2 from 0 for a new job id (util.c stratum_notify), nonces from the thread's start
+        header, time_hex, nonce_hex = ironminer_header(first, self.m.extranonce1.hex(), b"\x00\x00\x00\x00", 1000)
+        self.assertEqual(self.check(first[0], "00000000", int.from_bytes(bytes.fromhex(nonce_hex), "big"))["work"],
+                         stratum.hashes(26))
+        self.m.k = 25                                           # a new difficulty: the same template under a new id
+        self.s._give(self.m, self.s.job, False)
+        second = self.m.writer.said[-1]["params"]
+        again, time2, nonce2 = ironminer_header(second, self.m.extranonce1.hex(), b"\x00\x00\x00\x00", 1000)
+        self.assertNotEqual(again, header)
+        self.assertEqual(self.check(second[0], "00000000", int.from_bytes(bytes.fromhex(nonce2), "big"))["work"],
+                         stratum.hashes(25))
+        self.assertEqual(self.hasher.hashed, [header, again])   # the pool checked what the miner hashed
+
+
+class Slots(unittest.TestCase):
+    """Review 11, H2: no place keeps the others out of stratum, and no slot is held for nothing."""
+
+    def setUp(self):
+        self.folder = tempfile.mkdtemp(prefix="polarka-stratum-test-")
+        self.now = [1000.0]
+        self.pool = pool.Pool(FakeNode(), "regtest", PAY, self.folder, ratio=16, hasher=FakeHash(), clock=lambda: self.now[0])
+        self.s = stratum.Stratum(self.pool, "127.0.0.1:0", most=8, per_place=4)
+        self.s.most_waiting, self.s.waiting_per_place = 4, 2
+
+    def tearDown(self):
+        shutil.rmtree(self.folder, ignore_errors=True)
+
+    def come(self, source, authorized=True):
+        """A connection, as _client lets it in; None when there is no room for it."""
+        place = pool.place(source)
+        if not self.s._room(place):
+            return None
+        m = stratum.Miner(FakeWriter(), source, b"\x00\x00\x00\x01", place, self.now[0])
+        self.s._enter(m)
+        if authorized:
+            m.workers = {ALICE: ALICE}
+            self.s._authorized(m)
+        self.now[0] += 1
+        return m
+
+    def test_a_place_that_holds_many_makes_room(self):
+        held = [self.come("198.51.100.%d" % (i // 4 + 1)) for i in range(8)]     # two places of four: all taken
+        self.assertTrue(all(held))
+        self.assertIsNone(self.come("198.51.100.1"))            # a place at its own limit
+        newcomer = self.come("203.0.113.9")                     # a place with none: the longest idle of a full place goes
+        self.assertIsNotNone(newcomer)
+        self.assertTrue(held[0].closed and held[0].writer.closed)
+        self.assertEqual(held[0].writer.said[-1]["method"], "client.show_message")
+        self.assertEqual((len(self.s.miners), self.s.places["198.51.100.1"], self.s.places["203.0.113.9"]), (8, 3, 1))
+        self.assertIsNone(self.come("198.51.100.1"))            # and it does not take the slot back: three against four
+        self.assertIsNotNone(self.come("203.0.113.9"))          # the newcomer's place may have one more: one against four
+        self.assertIsNone(self.come("203.0.113.9"))             # but not a third: two against three
+        self.assertEqual(sum(self.s.places.values()), len(self.s.miners))
+
+    def test_those_not_authorized_yet(self):
+        a = [self.come("198.51.100.1", False) for _ in range(2)]
+        self.assertIsNone(self.come("198.51.100.1", False))     # two from one place at most
+        b = [self.come("198.51.100.2", False) for _ in range(2)]
+        self.assertTrue(all(a + b))                             # four in all: the most
+        c = self.come("203.0.113.9", False)                     # a place with none waiting: room is made
+        self.assertIsNotNone(c)
+        self.assertTrue(a[0].closed)
+        self.s._authorized(c)
+        self.assertEqual(sum(self.s.waiting.values()), 3)
+        for m in a[1:] + b + [c]:
+            self.s._close(m)
+        self.assertEqual((self.s.places, self.s.waiting, self.s.miners), ({}, {}, set()))
+
+    def test_a_connection_without_shares_is_let_go(self):
+        m = self.come("198.51.100.1")
+        m.active = self.now[0]
+        self.now[0] += self.s.idle - 1
+        self.s._let_go_idle(self.now[0])
+        self.assertFalse(m.closed)
+        m.active = self.now[0]                                  # a share the pool took
+        self.now[0] += self.s.idle - 1
+        self.s._let_go_idle(self.now[0])
+        self.assertFalse(m.closed)
+        self.now[0] += 1
+        self.s._let_go_idle(self.now[0])
+        self.assertTrue(m.closed)
+        self.assertEqual(m.writer.said[-1]["method"], "client.show_message")
+        self.assertEqual((self.s.places, self.s.miners), ({}, set()))
+
+
+class QuietOverTheLine(unittest.TestCase):
+    """A connection that is not authorized in time is let go, however much it says meanwhile (review 11, H2)."""
+
+    def setUp(self):
+        self.folder = tempfile.mkdtemp(prefix="polarka-stratum-test-")
+        self.pool = pool.Pool(FakeNode(), "regtest", PAY, self.folder, ratio=16, hasher=FakeHash())
+        self.stratum = stratum.Stratum(self.pool, "127.0.0.1:0", quiet=1)
+        self.port = self.stratum.start()
+
+    def tearDown(self):
+        self.stratum.stop()
+        shutil.rmtree(self.folder, ignore_errors=True)
+
+    def test_talk_is_no_authorization(self):
+        c = Client(self.port)
+        try:
+            started = time.monotonic()
+            with self.assertRaises((EOFError, ConnectionError)):
+                for _ in range(30):
+                    c.call("mining.extranonce.subscribe", [])
+                    time.sleep(0.2)
+            self.assertLess(time.monotonic() - started, 3)
+        finally:
+            c.close()
+        d = Client(self.port)                                   # whoever authorizes in time stays
+        try:
+            self.assertEqual(d.start(ALICE)["result"], True)
+            time.sleep(1.5)
+            self.assertEqual(d.call("mining.extranonce.subscribe", [])["result"], False)
+        finally:
+            d.close()
+
+
+class TheNodeOutsideTheLock(unittest.TestCase):
+    """Review 11, L2: stratum asks the node outside the pool's lock, and a silent moment keeps the HTTP jobs."""
+
+    def setUp(self):
+        self.folder = tempfile.mkdtemp(prefix="polarka-stratum-test-")
+        self.node, self.now = FakeNode(), [1000.0]
+        self.pool = pool.Pool(self.node, "regtest", PAY, self.folder, ratio=16, hasher=FakeHash(), clock=lambda: self.now[0])
+
+    def tearDown(self):
+        shutil.rmtree(self.folder, ignore_errors=True)
+
+    def test_a_slow_node_holds_up_nobody(self):
+        slow, asked, call = threading.Event(), threading.Event(), self.node.call
+
+        def slowly(method, *params):
+            if method == "getbestblockhash":
+                asked.set()
+                slow.wait(10)
+            return call(method, *params)
+        self.node.call = slowly
+        looking = threading.Thread(target=self.pool.look)
+        looking.start()
+        try:
+            self.assertTrue(asked.wait(5))
+            self.assertTrue(self.pool.lock.acquire(timeout=2))  # the pool's lock is free while the node thinks
+            self.pool.lock.release()
+        finally:
+            slow.set()
+            looking.join(10)
+        self.assertEqual(self.pool.best, self.node.previous)
+        self.assertEqual(self.pool.template["previousblockhash"], self.node.previous)
+
+    def test_a_silent_moment_keeps_the_jobs_handed_out(self):
+        job = self.pool.work(ALICE)["job"].split(".")[0]
+        self.now[0] += pool.TEMPLATE_AGE
+        self.node.down = True
+        with self.assertRaises(pool.PoolError):
+            self.pool.work(ALICE)                               # the node is silent: no template for a moment
+        self.assertIsNone(self.pool.template)
+        self.pool.look()                                        # nor does stratum's look change anything
+        self.node.down = False
+        self.now[0] += 1
+        self.pool.work(ALICE)
+        self.assertIn(job, self.pool.jobs)                      # the same tip: what was handed out still counts
+        self.node.previous = "44" * 32
+        self.now[0] += pool.TIP_AGE
+        self.assertEqual(self.pool.look(), "44" * 32)
+        self.assertNotIn(job, self.pool.jobs)                   # a new tip: stale at once
+        self.assertEqual(self.pool.template["previousblockhash"], "44" * 32)
 
 
 if __name__ == "__main__":

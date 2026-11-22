@@ -78,8 +78,9 @@ class StratumOnRegtest(unittest.TestCase):
                 self.assertEqual(block["height"], entry["height"])
                 coinbase = block["tx"][0]
                 self.assertIn(pool.TAG.hex(), coinbase["vin"][0]["coinbase"])
-                self.assertIn((bytes([len(stratum.MARK) + 8]) + stratum.MARK + bytes.fromhex(c.extranonce1)).hex(),
-                              coinbase["vin"][0]["coinbase"])
+                script = bytes.fromhex(coinbase["vin"][0]["coinbase"])
+                at = script.index(bytes([len(stratum.MARK) + stratum.ISSUE + 8]) + stratum.MARK) + 1 + len(stratum.MARK)
+                self.assertEqual(script[at + stratum.ISSUE:at + stratum.ISSUE + 4], bytes.fromhex(c.extranonce1))
                 self.assertEqual(coinbase["vout"][0]["scriptPubKey"]["address"], self.pay_to)
         account = self.pool.account(self.worker)
         self.assertEqual((account["shares"], account["earned"]), (len(taken), pool.north(sum(e["value"] for e in ledger))))

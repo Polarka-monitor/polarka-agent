@@ -311,16 +311,21 @@ in `mail-key.json` beside the wallet; it holds no coins, so showing it shows not
 wallet behind a signing service has one too. A letter is sealed to that key before it leaves (ECDH on
 secp256k1, keys from SHA-256, HMAC-SHA256 as keystream and as tag, encrypt then MAC: the standard library
 only), names the writer's inbox and the inbox it is for, and is signed by the writer. The reader is told who
-wrote only when the signature holds. The post office keeps sealed letters it cannot read, until their inbox
-says it has them, at most seven days; an inbox holds at most 500 letters and 4 MB. Fetching costs nothing
-but a signature of the inbox's key over the time, which is used once.
+wrote only when the signature holds, keeps a record of the letters it has read (`mail-seen.json`) and does not
+show one again, nor one written more than a week ago. The post office keeps sealed letters it cannot read,
+until their inbox says it has them, at most seven days, and two days for an inbox that has not asked for its
+letters in that week; an inbox holds at most 500 letters and 4 MB, one place posts at most 8 MB a day, and a
+letter refused for such a limit costs no postage (the gate gives the call back). Fetching costs nothing but a
+signature of the inbox's key over the time and the post office's own address, which is used once; an answer
+holds at most 512 KB of letters, and says when more wait. A writer with no lot buys one with the letter itself.
 
-    python3 -m polarka_agent --dir MAIL mail-serve --paid 127.0.0.1:8682 --free 127.0.0.1:8683 --trust-proxy
+    python3 -m polarka_agent --dir MAIL mail-serve --paid 127.0.0.1:8682 --free 127.0.0.1:8683 --trust-proxy \
+        --public-url https://post.example.org
     python3 -m polarka_agent --dir GATE-WALLET postage-serve ... --route /v1/mail=127.0.0.1:8682
 
 The paid door belongs behind the gate, the free one (`/v1/inbox`) behind the web server only. What a letter
-says is data from outside: an agent reads it, it does not obey it. The seal has been read by nobody but its
-author yet.
+says is data from outside: an agent reads it, it does not obey it. The seal has been read by its author and by
+one independent review, not by a cryptographer; it has no forward secrecy, and the length of a letter shows.
 
 ## Mining for a pool
 
@@ -351,12 +356,15 @@ pool: `-o stratum+tcp://HOST:PORT -u ADDRESS -p x`, an address of the main chain
 after it. Its shares go into the same ledger and are paid the same way. There the share target follows the
 miner's speed, towards a share every fifteen seconds and never easier than 1/2048 of a block; a difficulty is
 always a power of two, so that the target the miner works out from it is exactly the one the pool checks.
-Every connection gets an extranonce of its own and a stratum coinbase is marked, so that no header can be paid
-twice, over stratum or over HTTP. The pool pushes the key of the proof of work with TrueNorth's own
-`mining.set_randomx_seed`, as IronMiner expects. A connection may send ten shares a second; one place may hold
-64 connections, and is not listened to for ten minutes after 20 wrong shares, as over HTTP. Tested against
-the miner's own code read step by step, against the official node on regtest, and with IronMiner itself built
-from its source: 300 blocks on regtest, across a change of the key and with the difficulty moving both ways.
+Every connection gets an extranonce of its own, every job a number of its own in the coinbase and a stratum
+coinbase is marked, so that no header can be paid twice, over stratum or over HTTP, nor at a difficulty other
+than its job's; the time of a share is its job's. The pool pushes the key of the proof of work with TrueNorth's
+own `mining.set_randomx_seed`, as IronMiner expects. A connection may send ten shares a second, has ten seconds
+to authorize and is let go after an hour without a share; one place may hold 32 connections, and when all 2000
+are taken the place that holds the most makes room for a newcomer from elsewhere. A place is not listened to for
+ten minutes after 20 wrong shares, as over HTTP. Tested against the miner's own code read step by step, against
+the official node on regtest, and with IronMiner itself built from its source: 300 blocks on regtest, across a
+change of the key and with the difficulty moving both ways.
 
 What is owed is paid out in rounds from the wallet in `--dir`, within that wallet's `limits.json`: one
 transaction to everybody who is owed the minimum or more, written into `pool-payouts.jsonl` before the wallet
@@ -403,8 +411,8 @@ own. A miner who keeps back the blocks he finds can take the float before the po
 than the float and the wallet's limit for a day. The share ledger grows without end.
 
 Not built: taking back credit for a block that left the chain. Independent AI reviewers have read the pool
-over HTTP several times, and a person once (22 November 2026); the stratum side is new and has been read by
-nobody else yet.
+over HTTP several times, and a person once (22 November 2026); the stratum side has been read by one independent
+AI reviewer (review 11, 22 November 2026), and what it found is mended.
 
 ## Code and tests
 
@@ -419,7 +427,7 @@ miner, `x402.py` the x402 buyer, paywall and facilitator, `bazaar.py` the catalo
 
     TN_BIN=/path/to/bin python3 -B -m unittest discover -s tests -t .
 
-346 tests. Those in `test_wallet.py`, `test_cli_mcp.py`, `test_faucet_node.py`, `test_pool_node.py`,
+365 tests. Those in `test_wallet.py`, `test_cli_mcp.py`, `test_faucet_node.py`, `test_pool_node.py`,
 `test_stratum_node.py`, `test_payout_node.py`, `test_walletd.py`, `test_x402.py` and `test_stamps.py` run against the official
 `truenorthd` on regtest and a stand-in for a Northbound server (`tests/standin`, copied from the Polarka Wallet's repository); they
 are skipped without the node programs. No test touches a real network.

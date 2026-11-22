@@ -116,14 +116,19 @@ class Limiter:
     the bucket of all (review 10, M2). A request that is refused takes nothing from any bucket. A caller is forgotten
     a minute after its last request, when its bucket is full again; none is written down. When `most_callers` are
     held all the same, the one heard from longest ago makes room: a newcomer is never turned away because the table
-    is full (review 10, M2)."""
+    is full (review 10, M2). `everyone` sizes the bucket of all, a minute (ten times per_minute unless said; 0: none),
+    where all callers together are bounded only by what the machine can do, so that a few cannot shut the door for
+    the rest (review 11, H4)."""
 
-    def __init__(self, per_minute, clock=time.monotonic, most_callers=10000, wide=2):
+    def __init__(self, per_minute, clock=time.monotonic, most_callers=10000, wide=2, everyone=None):
         if not 1 <= per_minute <= 600:
             raise ValueError("per_minute is 1 to 600")
         self.per_minute, self.clock, self.most, self.wide = per_minute, clock, most_callers, wide
+        self.everyone = per_minute * 10 if everyone is None else everyone
+        if self.everyone < 0:
+            raise ValueError("everyone is 0 or more")
         self.buckets = collections.OrderedDict()        # caller -> (tokens, when); the one heard from last at the end
-        self.all = (float(per_minute * 10), clock())
+        self.all = (float(self.everyone), clock())
         self.swept = clock()
         self.lock = threading.Lock()
 
@@ -142,11 +147,12 @@ class Limiter:
             if wider is not None and wider != who:
                 asked.append((("wider", wider), self.per_minute * self.wide))
             held = [(key, size, self._refill(self.buckets.pop(key, (float(size), now)), size, now)) for key, size in asked]
-            everyone = self._refill(self.all, self.per_minute * 10, now)
+            everyone = self._refill(self.all, self.everyone, now) if self.everyone else (1.0, now)
             ok = everyone[0] >= 1 and all(tokens >= 1 for _, _, (tokens, _) in held)
             for key, size, (tokens, when) in held:
                 self.buckets[key] = (tokens - 1 if ok else tokens, when)
             while len(self.buckets) > self.most:
                 self.buckets.popitem(last=False)
-            self.all = (everyone[0] - 1, now) if ok else everyone
+            if self.everyone:
+                self.all = (everyone[0] - 1, now) if ok else everyone
             return ok

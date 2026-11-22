@@ -29,6 +29,16 @@ most 1/ratio of a block, and at least 1/MIN_ODDS.
 Every connection gets an extranonce1 of its own, and the coinbase carries MARK in front of the extranonces, so a
 header made here is neither one made for another connection nor one handed out over HTTP; a header taken once is
 not taken again. A share is paid once.
+
+A header also belongs to exactly one job id, and so to exactly one difficulty: every job handed out, a new
+difficulty for the same template included, gets an issue number of its own in the coinbase after MARK, and the time
+of a share is its job's (IronMiner does not roll it). Without that, a miner could hold one template under several
+ids at several difficulties and claim each hash at the hardest one it meets, about four times what its work is worth
+(review 11, H1); and an honest miner would hash the same headers again after a change of difficulty (M1).
+
+A connection that is not authorized within QUIET seconds, or sends no share the pool takes for IDLE seconds, is let
+go; one place holds at most PER_PLACE connections, and when all are taken the place that holds the most gives one up
+to a newcomer from elsewhere (review 11, H2).
 """
 import asyncio
 import collections
@@ -48,18 +58,23 @@ from .pool import PoolError, dsha
 EXTRANONCE1 = 4             # bytes the pool gives a connection
 EXTRANONCE2 = 4             # bytes the miner counts through
 MARK = b"S"                 # in the coinbase before the extranonces: a header made here is never one made over HTTP
+ISSUE = 4                   # bytes of the issue number after MARK: one coinbase, and so one header, for one job id
 TARGET_SECONDS = 15         # a share about this often from a connection
 JOB_REFRESH = 60            # seconds between two jobs on the same tip (new transactions, a new time)
 JOBS_KEPT = 8               # jobs of one connection that still take shares, all on the newest tip
 MIN_ODDS = 16               # a share is never more than this part of a block
-TIME_AHEAD = 600            # seconds the time in a share may be after its job's
 MOST_LINE = 4096            # bytes in one line from a miner
-MOST_CONNECTIONS = 500      # each one an open file; a service gets 1024 of them unless told otherwise
-PER_PLACE = 64              # connections from one place (pool.place: an IPv4 address, or an IPv6 /48)
+MOST_CONNECTIONS = 2000     # each one an open file: the pool's service has LimitNOFILE=8192
+PER_PLACE = 32              # connections from one place (pool.place: an IPv4 address, or an IPv6 /48)
+MOST_WAITING = 200          # connections not yet authorized, in all
+WAITING_PER_PLACE = 8       # and from one place
 MOST_WORKERS = 4            # names authorized on one connection
-QUIET = 30                  # seconds a connection has to subscribe and authorize
+QUIET = 10                  # seconds a connection has to subscribe and authorize
+IDLE = 3600                 # seconds an authorized connection may go without a share the pool takes
+RETUNE_SHARES = 12          # shares the difficulty is decided on (or half as many over RETUNE_SECONDS)
+RETUNE_SECONDS = 300
 RATE, BURST = 10.0, 20.0    # shares a second one connection may send, after a burst
-OUT_MOST = 256 * 1024       # bytes waiting to go out to one miner before it is let go
+OUT_MOST = 64 * 1024        # bytes waiting to go out to one miner before it is let go (2000 of them: 128 MB at most)
 EASIEST, HARDEST = 31, -16  # the k of a difficulty 2^-k
 TIPS_KEPT = 4               # tips for which the headers taken are remembered
 HEX8 = re.compile(r"\A[0-9a-fA-F]{8}\Z")
@@ -86,6 +101,8 @@ def bounds(network, ratio):
     a chain as easy as regtest only the easiest is left."""
     easiest = min(network * ratio, poolmod.MOST)
     high = next((k for k in range(EASIEST, HARDEST - 1, -1) if share_target(k) <= easiest), HARDEST)
+    while high < EASIEST and share_target(high) < network:
+        high += 1           # never a share target below the network's: a block's hash would be refused as LOW (review 11, I3)
     low = next((k for k in range(HARDEST, EASIEST + 1) if share_target(k) >= network * MIN_ODDS), high)
     return min(low, high), high
 
@@ -124,18 +141,26 @@ def swapped(previous):
     return b"".join(raw[i:i + 4][::-1] for i in range(0, 32, 4)).hex()
 
 
+def _less(counter, key):
+    counter[key] -= 1
+    if counter[key] <= 0:
+        del counter[key]
+
+
 class Job:
-    """One block template cut for stratum: the coinbase before and after the extranonces, the branch, and what a
-    share of it is worth. The same for every connection; the extranonce1 makes the headers differ."""
+    """One block template cut for stratum: the coinbase before the issue number and after the extranonces, the
+    branch, and what a share of it is worth. The same for every connection and every job id given of it: the issue
+    number (one for every job id) and the connection's extranonce1 make the headers differ."""
 
     def __init__(self, number, template, key, key_height, pay_script, made):
         self.number, self.template, self.key, self.key_height, self.made = number, template, key, key_height, made
         txs = template.get("transactions", [])
-        probe = bytes(range(1, 9))
-        plain = poolmod.coinbase(template["height"], template["coinbasevalue"], pay_script, int.from_bytes(probe, "little"),
-                                 poolmod.commitment_of(template), False, MARK)
-        at = plain.index(bytes([len(MARK) + 8]) + MARK + probe) + 1 + len(MARK)
-        self.coinb1, self.coinb2 = plain[:at], plain[at + 8:]
+        probe = bytes(range(1, ISSUE + 9))          # the issue number, then the eight bytes of the extranonces
+        plain = poolmod.coinbase(template["height"], template["coinbasevalue"], pay_script,
+                                 int.from_bytes(probe[ISSUE:], "little"), poolmod.commitment_of(template), False,
+                                 MARK + probe[:ISSUE])
+        at = plain.index(bytes([len(MARK) + ISSUE + 8]) + MARK + probe) + 1 + len(MARK)
+        self.head, self.tail = plain[:at], plain[at + ISSUE + 8:]
         self.branch = branch([bytes.fromhex(t["txid"])[::-1] for t in txs])
         self.previous, self.height = template["previousblockhash"], template["height"]
         self.version, self.bits, self.time = template["version"], template["bits"], template["curtime"]
@@ -144,30 +169,37 @@ class Job:
         self.network = rxmod.target_of(int(self.bits, 16))
         self.reward = template["coinbasevalue"] - sum(int(t.get("fee", 0)) for t in txs)
 
-    def notify(self, job_id, clean):
-        return [job_id, swapped(self.previous), self.coinb1.hex(), self.coinb2.hex(), [b.hex() for b in self.branch],
+    def coinb1(self, issue):
+        """The coinbase before the extranonces, for one issue (ISSUE bytes)."""
+        return self.head + issue
+
+    def notify(self, job_id, issue, clean):
+        return [job_id, swapped(self.previous), self.coinb1(issue).hex(), self.tail.hex(), [b.hex() for b in self.branch],
                 "%08x" % self.version, self.bits, "%08x" % self.time, clean]
 
-    def header(self, extranonce1, extranonce2, ntime, nonce):
-        coinbase = self.coinb1 + extranonce1 + extranonce2 + self.coinb2
+    def header(self, issue, extranonce1, extranonce2, nonce):
+        """The 80 bytes a miner hashes for one issue of this job; the time is always the job's."""
+        coinbase = self.head + issue + extranonce1 + extranonce2 + self.tail
         return (self.version.to_bytes(4, "little") + bytes.fromhex(self.previous)[::-1] + root(dsha(coinbase), self.branch)
-                + ntime.to_bytes(4, "little") + bytes.fromhex(self.bits)[::-1] + nonce.to_bytes(4, "little"))
+                + self.time.to_bytes(4, "little") + bytes.fromhex(self.bits)[::-1] + nonce.to_bytes(4, "little"))
 
-    def block(self, extranonce1, extranonce2, header, pay_script):
+    def block(self, issue, extranonce1, extranonce2, header, pay_script):
         """The whole block for a header of this job: the coinbase is the one the header's merkle root was made of."""
         extranonce = int.from_bytes(extranonce1 + extranonce2, "little")
-        return header + poolmod.assemble(self.template, pay_script, extranonce, MARK)[1]
+        return header + poolmod.assemble(self.template, pay_script, extranonce, MARK + issue)[1]
 
 
 class Miner:
     """One connection, and what the pool knows of it."""
 
-    def __init__(self, writer, source, extranonce1):
-        self.writer, self.source, self.extranonce1 = writer, source, extranonce1
+    def __init__(self, writer, source, extranonce1, place=None, now=0.0):
+        self.writer, self.source, self.extranonce1, self.place = writer, source, extranonce1, place
         self.subscribed = self.closed = False
+        self.waiting = True                         # not authorized yet
+        self.came = self.active = now               # when it came, and when the pool last took a share of it
         self.workers = {}                           # the name the miner gave -> the address its shares are paid to
         self.k = self.k_sent = self.seed_sent = self.last = None
-        self.jobs = collections.OrderedDict()       # a job id given to this miner -> (Job, k)
+        self.jobs = collections.OrderedDict()       # a job id given to this miner -> (Job, k, issue)
         self.given = 0
         self.since, self.found = None, []           # for the difficulty: since when, and what each share since stood for
         self.tokens, self.tokens_at = BURST, None
@@ -178,7 +210,7 @@ class Stratum:
     worker threads, so that a slow node or a slow check holds up no connection."""
 
     def __init__(self, pool, listen, target_seconds=TARGET_SECONDS, refresh=JOB_REFRESH, most=MOST_CONNECTIONS,
-                 per_place=PER_PLACE, welcome=None, span=None, sock=None):
+                 per_place=PER_PLACE, welcome=None, span=None, sock=None, quiet=QUIET, idle=IDLE):
         """`listen` is HOST:PORT (":3333" for every address), or "systemd" for the socket systemd hands over;
         `sock` a listening socket made already."""
         self.sock = sock
@@ -194,13 +226,17 @@ class Stratum:
         self.pool, self.ticks = pool, pool.ticks
         self.span = span                            # (hardest k, easiest k) in place of bounds(): only for trying a miner on regtest
         self.target_seconds, self.refresh_every, self.most, self.per_place = target_seconds, refresh, most, per_place
+        self.most_waiting, self.waiting_per_place = MOST_WAITING, WAITING_PER_PLACE
+        self.quiet, self.idle = quiet, idle
         self.welcome = welcome                      # said to a miner once it is authorized; {address} is its address
         self.lock = threading.Lock()                # the newest job and the headers taken, also from the worker threads
         self.refreshing = threading.Lock()          # one new job at a time
         self.job, self.number = None, 0
         self.taken = collections.OrderedDict()      # a tip -> the headers taken on it
-        self.miners, self.places = set(), collections.Counter()
+        self.miners = set()
+        self.places, self.waiting = collections.Counter(), collections.Counter()    # connections, and those not authorized yet, of a place
         self.next_extranonce = int.from_bytes(os.urandom(EXTRANONCE1), "big")
+        self.next_issue = int.from_bytes(os.urandom(ISSUE), "big")
         self.checks = None                          # worker threads for shares, and for the node, made in start()
         self.calls = None
         self.loop = self.server = self.wake = self.task = self.thread = None
@@ -290,42 +326,96 @@ class Stratum:
     async def _client(self, reader, writer):
         source = (writer.get_extra_info("peername") or ("?",))[0]
         place = poolmod.place(source)
-        if len(self.miners) >= self.most or (place is not None and self.places[place] >= self.per_place):
-            writer.close()
-            return
         if self.pool.guard is not None:
             try:
                 self.pool.guard.check(source)
             except PoolError:
                 writer.close()
                 return
+        if not self._room(place):
+            writer.close()
+            return
         sock = writer.get_extra_info("socket")
         if sock is not None:
             try:
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
             except OSError:
                 pass
-        miner = Miner(writer, source, self._extranonce())
-        self.miners.add(miner)
-        self.places[place] += 1
+        miner = Miner(writer, source, self._extranonce(), place, self.ticks())
+        self._enter(miner)
         try:
             while not miner.closed:
+                wait = None
+                if miner.waiting:           # QUIET seconds from when it came, however much it says meanwhile
+                    wait = miner.came + self.quiet - self.ticks()
+                    if wait <= 0:
+                        break
                 try:
-                    line = await asyncio.wait_for(reader.readline(), None if miner.workers else QUIET)
+                    line = await asyncio.wait_for(reader.readline(), wait)
                 except (asyncio.TimeoutError, ValueError, OSError):
-                    break           # silent too long before it was authorized, a line too long, or the line is gone
+                    break           # not authorized in time, a line too long, or the line is gone
                 if not line.endswith(b"\n") or not await self._said(miner, line):
                     break
         finally:
-            self.miners.discard(miner)
-            self.places[place] -= 1
-            if self.places[place] <= 0:
-                del self.places[place]
             self._close(miner)
+
+    def _enter(self, miner):
+        self.miners.add(miner)
+        self.places[miner.place] += 1
+        if miner.waiting:
+            self.waiting[miner.place] += 1
+
+    def _forget(self, miner):
+        """A connection that ended is no longer counted; once, whoever ends it."""
+        if miner not in self.miners:
+            return
+        self.miners.discard(miner)
+        _less(self.places, miner.place)
+        if miner.waiting:
+            _less(self.waiting, miner.place)
+
+    def _authorized(self, miner):
+        if miner.waiting and miner in self.miners:
+            _less(self.waiting, miner.place)
+        miner.waiting = False
+
+    def _room(self, place):
+        """Whether a new connection from `place` may come in. A place holds at most per_place connections, and at
+        most waiting_per_place that are not authorized yet; when all are taken, the place that holds the most gives
+        up its longest idle connection to a newcomer from a place that holds fewer, so that no place can keep the
+        others out (review 11, H2). The pool's own machine (place None) is nobody's place, as for the guard."""
+        if place is not None and (self.places[place] >= self.per_place or self.waiting[place] >= self.waiting_per_place):
+            return False
+        if sum(self.waiting.values()) >= self.most_waiting and not self._make_room(place, True):
+            return False
+        if len(self.miners) >= self.most and not self._make_room(place, False):
+            return False
+        return True
+
+    def _make_room(self, place, waiting):
+        """Lets go the longest idle connection (of those not authorized yet, when `waiting`) of the place that holds
+        the most, when that place holds at least two more than `place`. False: there is no room for `place`."""
+        held = self.waiting if waiting else self.places
+        most = max((p for p in held if p is not None), key=held.__getitem__, default=None)
+        if most is None or held[most] < held[place] + 2:
+            return False
+        idle = [m for m in self.miners if m.place == most and not m.closed and (m.waiting or not waiting)]
+        if not idle:
+            return False
+        miner = min(idle, key=lambda m: m.active)
+        self._message(miner, "the pool is full: a connection of a place that holds many makes room for a miner from elsewhere")
+        self._close(miner)
+        return True
 
     def _extranonce(self):
         self.next_extranonce = (self.next_extranonce + 1) % (1 << (8 * EXTRANONCE1))
         return self.next_extranonce.to_bytes(EXTRANONCE1, "big")
+
+    def _issue(self):
+        """A number of its own for every job id given: between MARK and the extranonces in the coinbase, so that no
+        header belongs to two job ids (review 11, H1)."""
+        self.next_issue = (self.next_issue + 1) % (1 << (8 * ISSUE))
+        return self.next_issue.to_bytes(ISSUE, "big")
 
     async def _said(self, miner, line):
         """One line from a miner. False: the connection ends."""
@@ -365,17 +455,20 @@ class Stratum:
             return self._answer(miner, rid, True)
         if len(miner.workers) >= MOST_WORKERS or len(name) > 200:
             return self._error(miner, rid, 24, "too many names, or too long a one, on one connection")
-        address = name.split(".", 1)[0].strip().lower()
         try:
-            await self._call(self._may_mine, miner.source, address)
+            address = await self._call(self._may_mine, miner.source, name.split(".", 1)[0].strip())
         except PoolError as e:
             self._message(miner, str(e))
             return self._error(miner, rid, 24, str(e))
+        if miner.closed:
+            return
         first = not miner.workers
         miner.workers[name] = address
         self._answer(miner, rid, True)
         if not first:
             return
+        self._authorized(miner)
+        miner.active = self.ticks()
         if self.welcome:
             self._message(miner, self.welcome.replace("{address}", address))
         if self.job is None:
@@ -388,28 +481,33 @@ class Stratum:
             self._give(miner, self.job, True)
 
     def _may_mine(self, source, address):
-        """In a worker thread: the pool's rules for whoever asks for work, as pool.work() keeps them."""
+        """In a worker thread: the pool's rules for whoever asks for work, as pool.work() keeps them: the address
+        as it was given is checked, and then written small (review 11, I2). Returns the address written small."""
         p = self.pool
         try:
             script_for_address(p.chain, address)
         except BadInput as e:
             raise PoolError("ADDRESS", "the user name is your address of this network, if you like with .worker after it: %s" % e)
+        address = address.lower()
         if p.miners is not None and address not in p.miners:
             raise PoolError("CLOSED", "this pool takes only its owner's miners for now; it will open to others later", 403)
         if p.cap is not None and p.cap.is_closed():
             raise PoolError("CAP", "the pool has found as large a part of the network's blocks as it allows itself and hands out "
                                    "no work until that part is smaller; mine alone or elsewhere meanwhile", 503)
+        p.look()                    # the node is asked outside the pool's lock (review 11, L2)
         with p.lock:
-            template = p._fresh_template()
+            if p.template is None:
+                raise PoolError("PAUSED", "the pool's node does not answer, so no work is handed out", 503)
             if p.guard is not None:
-                p.guard.asked(source, address, template["previousblockhash"])
+                p.guard.asked(source, address, p.template["previousblockhash"])
             p._may_work(address)
+        return address
 
     def _suggest(self, miner, params):
         """A miner may say what difficulty it would like; the pool starts there, within its bounds."""
         try:
             wanted = float(params[0])
-        except (IndexError, TypeError, ValueError):
+        except (IndexError, TypeError, ValueError, OverflowError):     # a number of 309 digits (review 11, L1)
             return
         if wanted > 0 and math.isfinite(wanted):
             miner.k = max(HARDEST, min(EASIEST, int(round(-math.log2(wanted)))))
@@ -434,10 +532,10 @@ class Stratum:
         held = miner.jobs.get(params[1])
         if held is None:
             return self._error(miner, rid, 21, "stale: that job is not for the newest block")
-        job, k = held
+        job, k, issue = held
         try:
             entry = await self.loop.run_in_executor(self.checks, functools.partial(
-                self._check, miner.extranonce1, address, job, k, params[2], params[3], params[4]))
+                self._check, miner.extranonce1, address, job, k, issue, params[2], params[3], params[4]))
         except PoolError as e:
             if e.kind in ("LOW", "INPUT"):
                 return self._wrong(miner, rid, CODES.get(e.kind, 20), str(e))
@@ -449,23 +547,22 @@ class Stratum:
             return self._error(miner, rid, 20, "the pool could not check that share")
         self._answer(miner, rid, True)
         miner.found.append(hashes(k))
+        miner.active = self.ticks()
         if entry["accepted"]:
             self.wake.set()
         if self._retune(miner) and self.job is not None:
-            self._give(miner, self.job, False)
+            self._give(miner, self.job)
 
-    def _check(self, extranonce1, address, job, k, extranonce2, ntime, nonce):
+    def _check(self, extranonce1, address, job, k, issue, extranonce2, ntime, nonce):
         """In a worker thread: what was written down for a share, or PoolError."""
         p = self.pool
         if not (HEX8.match(extranonce2) and HEX8.match(ntime) and HEX8.match(nonce)):
             raise PoolError("INPUT", "extranonce2, time and nonce are eight hexadecimal digits each")
         extranonce2, ntime, nonce = bytes.fromhex(extranonce2), int(ntime, 16), int(nonce, 16)
-        if not job.time <= ntime <= job.time + TIME_AHEAD:
-            raise PoolError("INPUT", "the time of a share is its job's, or at most %d seconds later" % TIME_AHEAD)
-        with p.lock:
-            p._check_tip()
-            tip = p.template["previousblockhash"] if p.template is not None else None
-        header = job.header(extranonce1, extranonce2, ntime, nonce)
+        if ntime != job.time:               # IronMiner never moves it; one header, one job id (review 11, H1)
+            raise PoolError("INPUT", "the time of a share is its job's")
+        tip = p.look(template=False)        # the node's tip, asked at most every TIP_AGE, outside the pool's lock
+        header = job.header(issue, extranonce1, extranonce2, nonce)
         with self.lock:
             if tip is None and self.job is not None:
                 tip = self.job.previous     # the node was silent for a moment: the last tip known stands
@@ -486,7 +583,7 @@ class Stratum:
         if proof <= job.network:
             entry["block"] = dsha(header)[::-1].hex()
             try:
-                refused = p.node.call("submitblock", job.block(extranonce1, extranonce2, header, p.pay_script).hex())
+                refused = p.node.call("submitblock", job.block(issue, extranonce1, extranonce2, header, p.pay_script).hex())
                 entry["accepted"] = refused is None
                 if refused is not None:
                     entry["refused"] = str(refused)[:60]
@@ -496,7 +593,7 @@ class Stratum:
         with p.lock:
             p._count(entry)
             if entry["accepted"]:
-                p.template_at = 0           # the tip has moved: the next look asks the node again
+                p.template_at, p.tip_seen = 0, None     # the tip has moved: the next look asks the node again
         return entry
 
     def _wrong(self, miner, rid, code, why):
@@ -529,8 +626,8 @@ class Stratum:
         made, else what the pool now refuses: {"*": why} for everybody, {address: why} for some."""
         p = self.pool
         with self.refreshing:
+            p.look()                        # the node is asked outside the pool's lock (review 11, L2)
             with p.lock:
-                p._check_tip()
                 template, key, key_height = p.template, p.key, p.key_height
             if template is None:
                 return None                 # the node was silent for a moment: the job there is stands
@@ -567,6 +664,7 @@ class Stratum:
             except asyncio.TimeoutError:
                 pass
             self.wake.clear()
+            self._let_go_idle(self.ticks())
             working = [m for m in self.miners if m.workers and not m.closed]
             if not working:
                 continue
@@ -594,14 +692,27 @@ class Stratum:
                     self._message(miner, why)
                     self._close(miner)
                 elif miner.last is not job:
-                    self._give(miner, job, miner.last is None or miner.last.previous != job.previous)
+                    self._give(miner, job)
                 elif look and self._retune(miner, now):
-                    self._give(miner, job, False)
+                    self._give(miner, job)
 
-    def _give(self, miner, job, clean):
-        """Work for one miner: its difficulty and the key when they changed, then the job under an id of its own."""
+    def _let_go_idle(self, now):
+        """Connections that sent no share the pool took for `idle` seconds end: a slot is not held for nothing
+        (review 11, H2). Those not authorized yet end after `quiet` seconds, in _client."""
+        for miner in [m for m in self.miners if m.workers and not m.closed and now - m.active >= self.idle]:
+            self._message(miner, "no share for %d minutes: the pool lets this connection go; connect again to mine"
+                          % (self.idle // 60))
+            self._close(miner)
+
+    def _give(self, miner, job, clean=None):
+        """Work for one miner: its difficulty and the key when they changed, then the job under an id of its own and
+        with an issue number of its own in the coinbase, so that no header is valid under two ids and so at two
+        difficulties (review 11, H1). Clean, unless the caller says, when the tip moved since the miner's last job
+        (review 11, I4)."""
         if miner.closed:
             return
+        if clean is None:
+            clean = miner.last is None or miner.last.previous != job.previous
         low, high = self.span or bounds(job.network, self.pool.ratio)
         miner.k = high if miner.k is None else min(max(miner.k, low), high)
         if miner.k != miner.k_sent:
@@ -610,27 +721,30 @@ class Stratum:
         if job.key != miner.seed_sent:
             self._notify(miner, "mining.set_randomx_seed", [job.key[::-1].hex(), job.key_height])
             miner.seed_sent = job.key
-        for old in [i for i, (j, _) in miner.jobs.items() if j.previous != job.previous]:
+        for old in [i for i, (j, _, _) in miner.jobs.items() if j.previous != job.previous]:
             del miner.jobs[old]
         miner.given += 1
-        job_id = "%x" % miner.given
-        miner.jobs[job_id] = (job, miner.k)
+        job_id, issue = "%x" % miner.given, self._issue()
+        miner.jobs[job_id] = (job, miner.k, issue)
         while len(miner.jobs) > JOBS_KEPT:
             miner.jobs.popitem(last=False)
         miner.last = job
-        self._notify(miner, "mining.notify", job.notify(job_id, clean))
+        self._notify(miner, "mining.notify", job.notify(job_id, issue, clean))
 
     def _retune(self, miner, now=None):
-        """Moves a miner's difficulty towards a share every target_seconds. True when it moved."""
+        """Moves a miner's difficulty towards a share every target_seconds, on enough shares to tell and only by a
+        whole step or more (review 11, M1): RETUNE_SHARES of them, or half as many over RETUNE_SECONDS; a miner
+        with at most one share in four times target_seconds gets easier work. True when it moved."""
         job = self.job
         if miner.since is None or miner.k is None or job is None:
             return False
         now = self.ticks() if now is None else now
         elapsed, n = now - miner.since, len(miner.found)
         want = miner.k
-        if n >= 6:
+        if n >= RETUNE_SHARES or (n >= RETUNE_SHARES // 2 and elapsed >= RETUNE_SECONDS):
             ideal = 32 - math.log2(max(sum(miner.found) / max(elapsed, 1.0) * self.target_seconds, 1.0))
-            want = max(miner.k - 4, min(miner.k + 2, int(round(ideal))))
+            if abs(ideal - miner.k) >= 1:
+                want = max(miner.k - 4, min(miner.k + 2, int(round(ideal))))
         elif n <= 1 and elapsed >= 4 * self.target_seconds:
             want = miner.k + 1
         low, high = self.span or bounds(job.network, self.pool.ratio)
@@ -668,6 +782,7 @@ class Stratum:
 
     def _close(self, miner):
         miner.closed = True
+        self._forget(miner)
         try:
             miner.writer.close()
         except RuntimeError:

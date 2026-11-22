@@ -7,9 +7,11 @@ import shutil
 import stat
 import tempfile
 import threading
+import time
 import unittest
 import urllib.error
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from polarka_agent import mail, postage, x402
 from polarka_agent.keys import BadInput, schnorr_sign
@@ -46,6 +48,7 @@ class Seal(unittest.TestCase):
 
     def test_a_letter_says_who_wrote_it(self):
         got = mail.read(self.bob, mail.seal(self.b, mail.letter(self.alice, self.b, "ahoj, Bobe ✓", now=1000)))
+        self.assertEqual(len(got.pop("digest")), 64)                  # what the reader's record of letters read keeps
         self.assertEqual(got, {"from": self.a, "said_from": self.a, "signed": True, "t": 1_000_000, "text": "ahoj, Bobe ✓"})
         # a letter that names Alice but was signed by someone else is read, but not as hers
         body = json.loads(mail.letter(0x999, self.b, "it is me, Alice"))
@@ -74,6 +77,26 @@ class Seal(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(os.stat(os.path.join(folder, mail.KEY_FILE)).st_mode), 0o600)
             with open(os.path.join(folder, mail.KEY_FILE)) as f:
                 self.assertEqual(json.load(f)["inbox"], mail.inbox_of(first))
+            self.assertEqual(os.listdir(folder), [mail.KEY_FILE])      # written beside it and linked: nothing else left
+        finally:
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def test_a_key_is_made_once_whoever_asks_at_the_same_time(self):
+        """Review 11, L4: the file comes into its place whole; two makers at once end with one key."""
+        folder = tempfile.mkdtemp(prefix="polarka-mail-test-")
+        try:
+            got, start = [], threading.Barrier(8)
+
+            def make():
+                start.wait()
+                got.append(mail.mail_key(folder))
+            threads = [threading.Thread(target=make) for _ in range(8)]
+            for th in threads:
+                th.start()
+            for th in threads:
+                th.join()
+            self.assertEqual(len(set(got)), 1)
+            self.assertEqual(os.listdir(folder), [mail.KEY_FILE])
         finally:
             shutil.rmtree(folder, ignore_errors=True)
 
@@ -89,13 +112,13 @@ class Office(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.folder, ignore_errors=True)
 
-    def signed(self, action, t, ids=()):
-        return schnorr_sign(mail.asked(action, self.b, t, ids), self.bob).hex()
+    def signed(self, action, t, ids=(), office=None):
+        return schnorr_sign(mail.asked(action, self.b, t, ids, self.office.origin if office is None else office), self.bob).hex()
 
     def test_in_out_and_gone(self):
         sealed = mail.seal(self.b, b"one")
         posted = self.office.post(self.b, sealed)
-        self.assertEqual(posted["kept_until"], int(self.now[0]) + mail.KEEP)
+        self.assertEqual(posted["kept_until"], int(self.now[0]) + mail.UNREAD_KEEP)      # an inbox that never asked
         self.office.post(self.b, mail.seal(self.b, b"two"))
         t = int(self.now[0] * 1000)
         got = self.office.letters(self.b, t, self.signed("fetch", t))
@@ -108,6 +131,11 @@ class Office(unittest.TestCase):
         self.assertEqual(self.office.ack(self.b, ids, t + 1, self.signed("ack", t + 1, ids)), {"gone": 1})
         left = self.office.letters(self.b, t + 2, self.signed("fetch", t + 2))["letters"]
         self.assertEqual([x["id"] for x in left], [got["letters"][1]["id"]])
+        self.assertEqual(self.office.post(self.b, mail.seal(self.b, b"three"))["kept_until"], int(self.now[0]) + mail.KEEP)
+        with self.assertRaises(mail.MailError) as caught:       # signed for another post office (review 11, L3)
+            self.office.letters(self.b, t + 3, self.signed("fetch", t + 3, office="https://elsewhere.example"))
+        self.assertEqual(caught.exception.kind, "SIGNATURE")
+        self.assertEqual(self.office.total, sum(len(r[0]) for r in self.office.db.execute("SELECT sealed FROM letters")))
 
     def test_who_may_take_them(self):
         self.office.post(self.b, mail.seal(self.b, b"secret"))
@@ -139,6 +167,8 @@ class Office(unittest.TestCase):
             self.office.post(self.b, sealed)
         self.assertEqual((caught.exception.kind, caught.exception.status), ("FULL", 507))
         self.now[0] += mail.KEEP + 1                            # a week later nothing is left
+        self.office.expire()
+        self.assertEqual(self.office.total, 0)
         self.office.post(self.b, mail.seal(self.b, b"new"))
         t = int(self.now[0] * 1000)
         self.assertEqual(len(self.office.letters(self.b, t, self.signed("fetch", t))["letters"]), 1)
@@ -146,6 +176,47 @@ class Office(unittest.TestCase):
         small.post(self.b, mail.seal(self.b, b"x" * 50))
         with self.assertRaises(mail.MailError):
             small.post(self.b, mail.seal(self.b, b"x" * 50))     # the post office is full for everybody
+
+    def test_what_a_place_and_an_unread_inbox_may_hold(self):
+        """Review 11, H5 and M2: letters to an inbox that has not asked for its letters go after UNREAD_KEEP, expiring
+        reads the index on time, and one place posts at most PLACE_BYTES_A_DAY a day."""
+        carol = mail.inbox_of(0xCA401)
+        self.office.post(carol, mail.seal(carol, b"for nobody who reads"))
+        self.office.post(self.b, mail.seal(self.b, b"for Bob"))
+        t = int(self.now[0] * 1000)
+        self.office.letters(self.b, t, self.signed("fetch", t))  # Bob asks: his inbox reads
+        self.now[0] += mail.UNREAD_KEEP + 1
+        self.office.expire()
+        self.assertEqual([r[0] for r in self.office.db.execute("SELECT inbox FROM letters")], [self.b])
+        self.assertEqual(self.office.total, sum(len(r[0]) for r in self.office.db.execute("SELECT sealed FROM letters")))
+        plans = [row[-1] for row in self.office.db.execute(
+            "EXPLAIN QUERY PLAN DELETE FROM letters WHERE t < ? AND (t < ? OR inbox NOT IN (SELECT inbox FROM asked))", (1, 1))]
+        self.assertTrue(any("letters_t" in p for p in plans), plans)
+        small = mail.PostOffice(tempfile.mkdtemp(dir=self.folder), place_bytes=300)
+        sealed = mail.seal(self.b, b"x" * 100)
+        small.post(self.b, sealed, "198.51.100.7")
+        with self.assertRaises(mail.MailError) as caught:
+            small.post(self.b, sealed, "198.51.100.7")
+        self.assertEqual((caught.exception.kind, caught.exception.status), ("QUOTA", 429))
+        small.post(self.b, sealed, "198.51.100.8")              # another place has its own
+
+    def test_an_answer_holds_what_a_reader_takes(self):
+        """Review 11, H3: fifty letters of the largest size go out in answers of at most FETCH_BYTES."""
+        sealed = mail.seal(self.b, bytes(mail.MOST_SEALED - mail.OVERHEAD))
+        for _ in range(mail.FETCH_MOST):
+            self.office.post(self.b, sealed)
+        t, taken = int(self.now[0] * 1000), 0
+        while True:
+            got = self.office.letters(self.b, t, self.signed("fetch", t))
+            self.assertLessEqual(sum(len(base64.b64decode(x["sealed"])) for x in got["letters"]), mail.FETCH_BYTES)
+            self.assertLess(len(json.dumps(got)), mail.MOST_ANSWER)
+            ids = [x["id"] for x in got["letters"]]
+            taken += len(ids)
+            self.office.ack(self.b, ids, t + 1, self.signed("ack", t + 1, ids))
+            t += 2
+            if not got["more"]:
+                break
+        self.assertEqual(taken, mail.FETCH_MOST)
 
 
 class ThroughTheGate(unittest.TestCase):
@@ -162,6 +233,7 @@ class ThroughTheGate(unittest.TestCase):
             threading.Thread(target=s.serve_forever, daemon=True).start()
         self.gate_url = "http://127.0.0.1:%d" % self.front.server_address[1]
         self.free_url = "http://127.0.0.1:%d" % self.free.server_address[1]
+        self.office.origin = mail.origin_of(self.free_url)     # the post office as its readers call it here
         self.alice = FakeWallet(os.path.join(self.tmp, "alice"))
         self.bob = FakeWallet(os.path.join(self.tmp, "bob"))
         self.b = mail.my_inbox(self.bob)["inbox"]
@@ -180,14 +252,24 @@ class ThroughTheGate(unittest.TestCase):
         return token
 
     def buy(self, calls):
-        def fetch(url, wallet, most, timeout=60, wait=600, **k):
-            self.bought.append((url, most))
+        """x402.fetch as it buys a lot with the letter itself: a lot of `calls` the gate knows, the letter posted as its
+        first call, and what is left of it in the writer's books (review 11, L5)."""
+        def fetch(url, wallet, most, timeout=60, wait=600, method="GET", body=None, key=None, **k):
+            self.bought.append((key or url, most, method))
             token = self.lot(calls)
+            req = urllib.request.Request(url, data=body, method=method, headers={"X-Postage": token, "Content-Type": "application/json"})
+            try:
+                with urllib.request.urlopen(req, timeout=10) as r:
+                    status, headers, answer = r.status, r.headers, r.read()
+            except urllib.error.HTTPError as e:
+                status, headers, answer = e.code, e.headers, e.read()
+            left = int(headers.get("X-Postage-Calls-Left"))
             with x402.BOOK(wallet):
                 book = x402._book(wallet)
-                book["lots"][self.gate_url] = {"claim": token, "left": calls}
+                if left:
+                    book["lots"][self.gate_url] = {"claim": token, "left": left}
                 x402._keep_book(wallet, book)
-            return {"status": 200, "paid": "0.01", "body": b"{}"}
+            return {"status": status, "paid": "0.01", "calls_left": left, "body": answer}
         return fetch
 
     def test_a_letter_there_and_an_answer_back(self):
@@ -195,7 +277,7 @@ class ThroughTheGate(unittest.TestCase):
         x402.fetch = self.buy(3)
         try:
             sent = mail.send(self.alice, self.b, "Hello Bob, shall we trade?", 5000, self.gate_url)
-            self.assertEqual((sent["sent"], sent["calls_left"], self.bought), (True, 2, [(self.gate_url + "/v1/mail", 5000)]))
+            self.assertEqual((sent["sent"], sent["calls_left"], self.bought), (True, 2, [(self.gate_url + "/v1/mail", 5000, "POST")]))
             self.assertEqual(mail.send(self.alice, self.b, "And a second one.", 5000, self.gate_url)["calls_left"], 1)
             self.assertEqual(len(self.bought), 1)                  # the lot is used before anything is bought again
             mail.send(self.alice, self.b, "A third.", 5000, self.gate_url)
@@ -277,6 +359,141 @@ class ThroughTheGate(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError) as caught:
             urllib.request.urlopen(urllib.request.Request(self.free_url + "/v1/inbox/%s/ack" % self.b, data=b"[1]"), timeout=10)
         self.assertEqual(caught.exception.code, 400)
+
+    def test_many_large_letters_come_in_more_than_one_answer(self):
+        """Review 11, H3: an inbox full of large letters is read whole, in answers that a reader takes."""
+        alice = 0xA11CE
+        for i in range(mail.FETCH_MOST):
+            self.office.post(self.b, mail.seal(self.b, mail.letter(alice, self.b, "é" * 7000 + "%02d" % i)))
+        first = mail.fetch_letters(self.bob, self.free_url)
+        self.assertTrue(first["more"])
+        self.assertEqual(first["acknowledged"], len(first["letters"]))
+        second = mail.fetch_letters(self.bob, self.free_url)
+        self.assertFalse(second["more"])
+        self.assertEqual([x["text"][-2:] for x in first["letters"] + second["letters"]], ["%02d" % i for i in range(mail.FETCH_MOST)])
+
+    def test_an_answer_that_cannot_be_read_is_no_answer(self):
+        class Cut(BaseHTTPRequestHandler):
+            def do_GET(self):
+                body = b'{"letters": [' + b" " * 100
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        cut = ThreadingHTTPServer(("127.0.0.1", 0), Cut)
+        threading.Thread(target=cut.serve_forever, daemon=True).start()
+        try:
+            with self.assertRaises(mail.MailError) as caught:
+                mail.fetch_letters(self.bob, "http://127.0.0.1:%d" % cut.server_address[1])
+            self.assertEqual(caught.exception.kind, "ANSWER")
+        finally:
+            cut.shutdown()
+            cut.server_close()
+
+    def test_asking_what_it_is_takes_nobody_s_calls(self):
+        """Review 11, H4: the free door's page about itself takes from no bucket, and each place has a share of signed
+        calls of its own."""
+        door = mail.servers(self.office, "127.0.0.1:0", "127.0.0.1:0", trust_proxy=True, per_minute=2)[1]
+        threading.Thread(target=door.serve_forever, daemon=True).start()
+        try:
+            base = "http://127.0.0.1:%d" % door.server_address[1]
+            self.office.origin = mail.origin_of(base)
+
+            def get(path, who):
+                req = urllib.request.Request(base + path, headers={"X-Forwarded-For": who})
+                try:
+                    with urllib.request.urlopen(req, timeout=10) as r:
+                        return r.status
+                except urllib.error.HTTPError as e:
+                    return e.code
+            self.assertEqual({get("/v1/inbox", "198.51.100.%d" % (i % 12 + 1)) for i in range(60)}, {200})
+            key, codes = mail.mail_key(self.bob.folder), []
+            for who in ("203.0.113.77", "203.0.113.77", "203.0.113.77", "203.0.113.78"):
+                t = int(time.time() * 1000) + len(codes)
+                sig = schnorr_sign(mail.asked("fetch", self.b, t, (), self.office.origin), key).hex()
+                codes.append(get("/v1/inbox/%s?t=%d&sig=%s" % (self.b, t, sig), who))
+            self.assertEqual(codes, [200, 200, 429, 200])
+        finally:
+            door.shutdown()
+            door.server_close()
+
+    def test_a_letter_refused_costs_no_call(self):
+        """Review 11, H5: the call of a letter that the post office refuses for its limit goes back to the lot."""
+        quick = mail.servers(self.office, "127.0.0.1:0", "127.0.0.1:0", letters_per_minute=1)[0]
+        front = postage.Bounded(("127.0.0.1", 0), postage.make_handler(
+            self.gate, "127.0.0.1:1", False, [("/v1/mail", "127.0.0.1:%d" % quick.server_address[1])]), most=16)
+        for srv in (quick, front):
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            token, codes = self.lot(10), []
+            body = json.dumps({"sealed": base64.b64encode(mail.seal(self.b, b"x")).decode()}).encode()
+            for _ in range(2):
+                req = urllib.request.Request("http://127.0.0.1:%d/v1/mail/%s" % (front.server_address[1], self.b), data=body,
+                                             headers={"X-Postage": token, "Content-Type": "application/json"})
+                try:
+                    with urllib.request.urlopen(req, timeout=10) as r:
+                        codes.append((r.status, r.headers.get("X-Postage-Calls-Left")))
+                except urllib.error.HTTPError as e:
+                    codes.append((e.code, e.headers.get("X-Postage-Calls-Left")))
+            self.assertEqual(codes, [(200, "9"), (429, "9")])
+            self.assertEqual(self.gate.left(token), 9)
+        finally:
+            for srv in (quick, front):
+                srv.shutdown()
+                srv.server_close()
+
+    def test_a_letter_delivered_again_is_not_shown_again(self):
+        """Review 11, M4: the post office cannot hand a letter over twice as if it were new, nor an old one."""
+        alice = 0xA11CE
+        sealed = mail.seal(self.b, mail.letter(alice, self.b, "pay the bearer 5 NORTH"))
+        self.office.post(self.b, sealed)
+        self.office.post(self.b, sealed)                        # twice in one batch
+        got = mail.fetch_letters(self.bob, self.free_url)["letters"]
+        self.assertEqual([x.get("text") for x in got], ["pay the bearer 5 NORTH", None])
+        self.assertTrue(got[1]["repeat"])
+        self.office.post(self.b, sealed)                        # and a week later, by whoever kept it
+        again = mail.fetch_letters(self.bob, self.free_url)
+        self.assertEqual(([x.get("text") for x in again["letters"]], again["letters"][0]["repeat"], again["acknowledged"]), ([None], True, 1))
+        self.office.post(self.b, mail.seal(self.b, mail.letter(alice, self.b, "an old one", now=time.time() - mail.KEEP - 600)))
+        late = mail.fetch_letters(self.bob, self.free_url)["letters"]
+        self.assertIn("days ago", late[0]["error"])
+        self.assertNotIn("text", late[0])
+        with open(os.path.join(self.bob.folder, mail.SEEN_FILE)) as f:
+            self.assertEqual(len(json.load(f)), 1)
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.join(self.bob.folder, mail.SEEN_FILE)).st_mode), 0o600)
+
+    def test_two_senders_of_one_wallet_lose_no_lot(self):
+        """Review 11, M3: the command line and an MCP server of one wallet use the same lot at once; what each hears of
+        it goes to that lot only, and the spare one bought before stays."""
+        origin = self.gate_url
+        used, spare = {"claim": "aa" * 16, "left": 2}, {"claim": "bb" * 16, "left": 100}
+        with x402.BOOK(self.alice):
+            book = x402._book(self.alice)
+            book["lots"][origin], book["spare"] = dict(used), {origin: [dict(spare)]}
+            x402._keep_book(self.alice, book)
+        slow = threading.Event()
+
+        def call(url, headers=None, obj=None, timeout=30):
+            if threading.current_thread().name == "A":
+                slow.wait(10)                                   # A's answer comes late
+                return 200, {"X-Postage-Calls-Left": "1"}, {"ok": True, "id": "a" * 24}
+            return 200, {"X-Postage-Calls-Left": "0"}, {"ok": True, "id": "b" * 24}
+        saved, mail._call = mail._call, call
+        try:
+            a = threading.Thread(target=mail.send, args=(self.alice, self.b, "from A", 1000, origin), name="A")
+            a.start()
+            time.sleep(0.5)
+            mail.send(self.alice, self.b, "from B", 1000, origin)   # B: the lot is used up, the spare one takes its place
+            slow.set()
+            a.join(10)
+        finally:
+            mail._call = saved
+        with x402.BOOK(self.alice):
+            book = x402._book(self.alice)
+        self.assertEqual(book["lots"][origin]["claim"], spare["claim"])
 
 
 if __name__ == "__main__":

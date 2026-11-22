@@ -54,6 +54,7 @@ PRICE_LIFE = 600                # seconds a price worked out from the network is
 PRICE_STALE = 6 * 3600          # when the server gives no template: a price older than this is not quoted
 MAX_BODY = 1 << 20              # the largest request passed on
 MAX_ANSWER = 8 << 20            # the largest answer of the service behind that is passed back
+GIVE_BACK = (429, 503, 507)     # answers of the service behind for which the call of a lot is given back: it could not take it
 X402_PER_MINUTE = 30            # x402 payments that reach the facilitator, a minute from one place (ten times that from all)
 KEEP_SPENT = 30 * 86400         # a lot whose calls are used up is forgotten this long after its quote ran out
 SAVE_EVERY = 5                  # seconds: a call taken from a lot is written down with the next save, at most this late
@@ -195,6 +196,11 @@ class Gate:
 
     def spend(self, token, source):
         """One call. True when it may pass."""
+        return self.spend_from(token, source) is not None
+
+    def spend_from(self, token, source):
+        """One call: "lot" when it was taken from the token's lot, "free" when from the free calls of the place, None
+        when there is none."""
         with self.lock:
             t = self.state["tokens"].get(mark(token)) if token else None
             if t is not None:
@@ -202,7 +208,7 @@ class Gate:
                 if t["calls"] > 0:
                     t["calls"] -= 1
                     self._save(lazy=True)
-                    return True
+                    return "lot"
             if self.free and source is not None:
                 # one place is an IPv4 address or an IPv6 /48, as at the faucet and the pool (human review, 22 November)
                 day, key = int(self.clock() // 86400), hashlib.sha256(self.salt + place(source).encode()).hexdigest()[:16]
@@ -211,8 +217,17 @@ class Gate:
                 used = self.free_used.get(key, 0)
                 if used < self.free:
                     self.free_used[key] = used + 1
-                    return True
-            return False
+                    return "free"
+            return None
+
+    def give_back(self, token):
+        """The call of a lot back, when the service behind the gate could not take it (GIVE_BACK): a letter the post
+        office refuses for a limit or for a full inbox costs no postage (review 11, H5)."""
+        with self.lock:
+            t = self.state["tokens"].get(mark(token)) if token else None
+            if t is not None and t["paid"]:
+                t["calls"] += 1
+                self._save()                # at once: a lazy save may only ever give calls back after a fall, never take
 
     def flush(self):
         """Writes what a lazy save left unwritten."""
@@ -319,7 +334,8 @@ class Gate:
         a = {"error": "POSTAGE", "message": "this service asks for postage in NORTH",
              "price": north(price), "for_calls": self.calls, "free_calls_a_day": self.free,
              "how": ["POST /_postage/quote", "pay the price to the address it names", "send the token in the header X-Postage"],
-             "note": "postage is counted in calls and is not given back; NORTH has no market price"}
+             "note": "postage is counted in calls and is not paid back; a call the service behind could not take (429, 503, "
+                     "507) goes back to the lot; NORTH has no market price"}
         if self.x402 is not None:
             a["x402"] = {"network": self.x402.network, "how": "or pay one lot with x402 (PAYMENT-REQUIRED is in this answer's headers); "
                          "the claim in your payment's payload is then the token for the rest of the lot",
@@ -386,7 +402,7 @@ def make_handler(gate, upstream, trust_proxy, routes=()):
                 if self.path == "/_postage/status":
                     what, outcome = "status", "ok"
                     return self.send(200, gate.status(self.headers.get("X-Postage")))
-                token, signed, more = self.headers.get("X-Postage"), self.headers.get("PAYMENT-SIGNATURE"), {}
+                token, signed, more, spent = self.headers.get("X-Postage"), self.headers.get("PAYMENT-SIGNATURE"), {}, None
                 if gate.x402 is not None and signed and not token:
                     what = "x402"
                     try:
@@ -412,13 +428,15 @@ def make_handler(gate, upstream, trust_proxy, routes=()):
                         outcome = "x402 %s" % str(done.get("errorReason"))[:40]
                         more["PAYMENT-REQUIRED"] = b64json(gate.x402_needed(self.path))
                         return self.send(402, gate.about(), more)
-                    token = payment["payload"]["claim"]
-                elif not gate.spend(token, self.source() if target(self.path) is default else None):
+                    token, spent = payment["payload"]["claim"], "lot"
+                else:
                     # calls for nothing are for the service before the gate; what it routes elsewhere costs postage
-                    outcome = "402"
-                    if gate.x402 is not None:
-                        more["PAYMENT-REQUIRED"] = b64json(gate.x402_needed(self.path))
-                    return self.send(402, gate.about(), more)
+                    spent = gate.spend_from(token, self.source() if target(self.path) is default else None)
+                    if spent is None:
+                        outcome = "402"
+                        if gate.x402 is not None:
+                            more["PAYMENT-REQUIRED"] = b64json(gate.x402_needed(self.path))
+                        return self.send(402, gate.about(), more)
                 if token:
                     left = gate.left(token)
                     if left is not None:
@@ -432,6 +450,12 @@ def make_handler(gate, upstream, trust_proxy, routes=()):
                     answer = r.read(MAX_ANSWER + 1)
                     if len(answer) > MAX_ANSWER:
                         raise ValueError("the service behind the gate answered more than %d bytes" % MAX_ANSWER)
+                    if spent == "lot" and r.status in GIVE_BACK:
+                        gate.give_back(token)       # the service could not take the call: it costs nothing (review 11, H5)
+                        outcome = "given back %d" % r.status
+                        left = gate.left(token)
+                        if left is not None:
+                            more["X-Postage-Calls-Left"] = str(left)
                     self.send_response(r.status)
                     for k, v in r.getheaders():
                         if k.lower() not in HOP and k.lower() not in ("payment-response", "x-postage-calls-left"):

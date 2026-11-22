@@ -315,6 +315,7 @@ class X402Deep(X402OnRegtest):
         office = mail.PostOffice(os.path.join(self.tmp, "office"))
         paid, free = mail.servers(office, "127.0.0.1:0", "127.0.0.1:0", per_minute=600)
         free_url = self.start(free)
+        office.origin = mail.origin_of(free_url)
         self.start(paid)
         gate = postage.Gate(self.make("gate-mail"), PRICE, 3, x402=self.patient)
         front = self.start(ThreadingHTTPServer(("127.0.0.1", 0), postage.make_handler(
@@ -326,8 +327,8 @@ class X402Deep(X402OnRegtest):
         self.assertEqual((first["sent"], first["pending"]), (False, True))
         self.node.mine(1, SINK)
         sent = mail.send(self.buyer, to, "first letter", units("1"), front, wait=0, network=self.network)
-        self.assertEqual((sent["sent"], sent["calls_left"]), (True, 1))         # one call bought the lot, one sent the letter
-        self.assertEqual(mail.send(self.buyer, to, "second", units("1"), front, wait=0, network=self.network)["calls_left"], 0)
+        self.assertEqual((sent["sent"], sent["calls_left"]), (True, 2))         # the letter was the lot's first call (review 11, L5)
+        self.assertEqual(mail.send(self.buyer, to, "second", units("1"), front, wait=0, network=self.network)["calls_left"], 1)
         self.assertEqual(len(self.buyer.payments()), made + 1)
         got = mail.fetch_letters(reader, free_url)
         me = mail.my_inbox(self.buyer)["inbox"]
