@@ -263,6 +263,9 @@ def run(argv=None, out=sys.stdout):
     c.add_argument("--keep", default="5000", help="NORTH the wallet keeps as its reserve beyond what it owes (with --surplus-to)")
     c.add_argument("--surplus-most", default="1000", help="NORTH sent to --surplus-to at a time, at most")
     c.add_argument("--surplus-every", type=int, default=21600, help="seconds between two payments to --surplus-to, at least")
+    c.add_argument("--stratum", help="also take miners over stratum (IronMiner) on HOST:PORT, for example 0.0.0.0:3333; "
+                                     "the port is then open to the internet itself, not behind the web server")
+    c.add_argument("--public-url", default=DEFAULT_POOL, help="where miners look up their account, said to them over stratum")
     a = p.parse_args(argv)
     folder = os.path.expanduser(a.dir)
     signer = getattr(a, "mcp_signer", None) or a.signer
@@ -355,9 +358,13 @@ def run(argv=None, out=sys.stdout):
                     raise Refused("INPUT", "--surplus-most is more than 0")
                 surplus = Surplus(a.surplus_to, units(a.keep), units(a.surplus_most), a.surplus_every)
             payouts = Payouts(wallet, folder, units(a.minimum), depth=depth_by(node), deep=a.deep, surplus=surplus) if a.pay_every else None
+            welcome = None
+            if a.stratum:
+                welcome = "Polarka pool: every share is paid (PPS), fee %d %%%s. Your account: %s/v1/account?address={address}" % (
+                    a.fee, ", paid out from %s NORTH" % a.minimum if a.pay_every else "", a.public_url.rstrip("/"))
             return pool_serve(Pool(node, a.chain, pay_to, folder, a.ratio, a.fee, cap=cap, guard=Guard(), payouts=payouts, miners=miners,
                                    most_owed=units(a.most_owed) if a.pay_every else None),
-                              a.listen, a.trust_proxy, a.pay_every)
+                              a.listen, a.trust_proxy, a.pay_every, a.stratum, welcome)
         if a.cmd == "stamp-verify":
             from .stamps import verify
             with open(os.path.expanduser(a.file)) as f:

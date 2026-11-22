@@ -6,9 +6,10 @@ for it and hands a share that is also a block to the node. What it owes is paid 
 Cap keeps the pool under a part of the network, Guard bounds what one place may ask and send.
 
 It runs on main since 20 November 2026, open to everybody since 21 November; a programmer read it on 22 November 2026,
-a security expert has not yet. The speed it shows (`speed`, GET /v1/stats) is estimated from the shares it took. Not here: a
-share target that follows the miner's speed, anything against a miner who keeps back the blocks he finds,
-and taking back what was credited for a block that later left the chain.
+a security expert has not yet. The speed it shows (`speed`, GET /v1/stats) is estimated from the shares it took. Miners
+that speak stratum (IronMiner) come in through stratum.py, into the same ledger; there the share target follows the
+miner's speed. Not here: anything against a miner who keeps back the blocks he finds, and taking back what was
+credited for a block that later left the chain.
 
 A share is a header whose hash is at or below the share target, which is `ratio` times the network's target
 (2048: a block is worth 2048 shares on average). The pool owes the reward of a block without the fees,
@@ -112,8 +113,10 @@ def merkle_root(hashes):
     return layer[0]
 
 
-def coinbase(height, value, pay_script, extranonce, commitment, with_witness):
-    sig = height_push(height) + push(extranonce.to_bytes(8, "little")) + push(TAG)
+def coinbase(height, value, pay_script, extranonce, commitment, with_witness, mark=b""):
+    """`mark` goes in front of the extranonce: stratum.MARK for a coinbase made for stratum, so that no header made
+    there can be one handed out here."""
+    sig = height_push(height) + push(mark + extranonce.to_bytes(8, "little")) + push(TAG)
     outs = [value.to_bytes(8, "little") + varint(len(pay_script)) + pay_script]
     if commitment is not None:
         script = bytes([0x6a, 0x24, 0xaa, 0x21, 0xa9, 0xed]) + commitment
@@ -126,15 +129,20 @@ def coinbase(height, value, pay_script, extranonce, commitment, with_witness):
     return version + body + locktime
 
 
-def assemble(template, pay_script, extranonce):
+def commitment_of(template):
+    """The witness commitment of a template's transactions (the coinbase's own counts as zeros), or None."""
+    if "default_witness_commitment" not in template:
+        return None
+    wroot = merkle_root([bytes(32)] + [bytes.fromhex(t["hash"])[::-1] for t in template.get("transactions", [])])
+    return dsha(wroot + bytes(32))
+
+
+def assemble(template, pay_script, extranonce, mark=b""):
     """(the 76 bytes of the header before the nonce, the block after the header, the network's target)."""
     txs = template.get("transactions", [])
-    commitment = None
-    if "default_witness_commitment" in template:
-        wroot = merkle_root([bytes(32)] + [bytes.fromhex(t["hash"])[::-1] for t in txs])
-        commitment = dsha(wroot + bytes(32))
-    plain = coinbase(template["height"], template["coinbasevalue"], pay_script, extranonce, commitment, False)
-    full = coinbase(template["height"], template["coinbasevalue"], pay_script, extranonce, commitment, True)
+    commitment = commitment_of(template)
+    plain = coinbase(template["height"], template["coinbasevalue"], pay_script, extranonce, commitment, False, mark)
+    full = coinbase(template["height"], template["coinbasevalue"], pay_script, extranonce, commitment, True, mark)
     root = merkle_root([dsha(plain)] + [bytes.fromhex(t["txid"])[::-1] for t in txs])
     header = (template["version"].to_bytes(4, "little") + bytes.fromhex(template["previousblockhash"])[::-1] + root
               + template["curtime"].to_bytes(4, "little") + bytes.fromhex(template["bits"])[::-1])
@@ -392,8 +400,9 @@ class Pool:
         self.template, self.template_at, self.key, self.key_height = None, 0, None, None
         self.jobs, self.job_of, self.seen = {}, {}, set()
         self.accounts, self.blocks, self.taken = {}, [], set()
-        self.recent = collections.deque()   # (time, address) of the shares of the last day, for the speed shown
+        self.recent = collections.deque()   # (time, address, hashes or None) of the shares of the last day, for the speed shown
         self.share_target = None            # the share target of the newest job: what one share stands for
+        self.stratum = None                 # stratum.Stratum, when the pool also takes miners over stratum
         if cap is not None and cap.is_ours is None:
             cap.is_ours = self.taken.__contains__
         self.boot, self.counter = int.from_bytes(os.urandom(4), "little"), 0
@@ -439,7 +448,7 @@ class Pool:
         self.expected_total += 1.0 / max(int(entry.get("odds", self.ratio)), 1)
         self.found_total += 1 if entry.get("accepted") else 0
         self.earned_total += int(entry["value"])
-        self.recent.append((int(entry["t"]), entry["address"]))
+        self.recent.append((int(entry["t"]), entry["address"], entry.get("work")))
         while self.recent[0][0] < self.recent[-1][0] - SPEED_WINDOWS[-1]:
             self.recent.popleft()
         if entry.get("block"):
@@ -545,25 +554,29 @@ class Pool:
                 self.guard.wrong(source)
             raise
 
+    def _check_tip(self):
+        """Called with the lock held, when a share comes in: a share for a block that is no longer the tip is worth
+        nothing, so the node is asked (at most every TIP_AGE), not the clock."""
+        try:
+            now = self.ticks()
+            if self.template is not None and (self.tip_seen is None or now - self.tip_seen >= TIP_AGE):
+                if self.node.call("getbestblockhash") != self.template["previousblockhash"]:
+                    self.template_at = now - TEMPLATE_AGE
+                    self.jobs, self.job_of, self.seen = {}, {}, set()       # stale at once, whatever the node says next
+                self.tip_seen = now
+            self._fresh_template()
+        except (PoolError, OSError):
+            # a share for the tip the pool last knew still counts, but not for long: a pool that cannot see
+            # the chain cannot know what its shares are worth
+            if self.template_good_at is None or self.ticks() - self.template_good_at > NODE_SILENCE:
+                raise PoolError("PAUSED", "the pool's node does not answer, so no shares are taken", 503)
+
     def _share(self, token, nonce):
         if not isinstance(token, str) or token.count(".") != 1 or type(nonce) is not int or not 0 <= nonce <= 0xFFFFFFFF:
             raise PoolError("INPUT", 'a share is {"job": the job as it was given, "nonce": a number below 2^32}')
         job_id, mark = token.split(".")
         with self.lock:
-            try:
-                now = self.ticks()
-                if self.template is not None and (self.tip_seen is None or now - self.tip_seen >= TIP_AGE):
-                    # a share for a block that is no longer the tip is worth nothing: ask the node, not the clock
-                    if self.node.call("getbestblockhash") != self.template["previousblockhash"]:
-                        self.template_at = now - TEMPLATE_AGE
-                        self.jobs, self.job_of, self.seen = {}, {}, set()       # stale at once, whatever the node says next
-                    self.tip_seen = now
-                self._fresh_template()
-            except (PoolError, OSError):
-                # a share for the tip the pool last knew still counts, but not for long: a pool that cannot see
-                # the chain cannot know what its shares are worth
-                if self.template_good_at is None or self.ticks() - self.template_good_at > NODE_SILENCE:
-                    raise PoolError("PAUSED", "the pool's node does not answer, so no shares are taken", 503)
+            self._check_tip()
             job = self.jobs.get(job_id)
             if job is None:
                 raise PoolError("STALE", "that job is not for the block being looked for now; ask for work again", 409)
@@ -655,9 +668,12 @@ class Pool:
         per_share = (1 << 256) / (target + 1) if target else None
         windows = {}
         for window in SPEED_WINDOWS:
-            addresses = [a for t, a in recent if t > now - window]
-            windows[str(window)] = {"shares": len(addresses), "miners": len(set(addresses)),
-                                    "hashrate": None if per_share is None else round(len(addresses) * per_share / window)}
+            shares = [(a, w) for t, a, w in recent if t > now - window]
+            # a share over stratum says itself what it stands for (its difficulty follows the miner); one over
+            # HTTP stands for what a share of the newest job does
+            plain = sum(1 for _, w in shares if w is None)
+            hashrate = None if per_share is None and plain else round((plain * (per_share or 0) + sum(w for _, w in shares if w)) / window)
+            windows[str(window)] = {"shares": len(shares), "miners": len({a for a, _ in shares}), "hashrate": hashrate}
         return {"hashes_a_share": None if per_share is None else round(per_share), "windows": windows,
                 "how": "shares taken in the window times the hashes a share stands for, divided by the window: an estimate"}
 
@@ -674,6 +690,8 @@ class Pool:
         chain_speed = None
         if blocks and speed["hashes_a_share"] and self.share_target is not None and self.share_target < MOST:
             chain_speed = round(blocks * speed["hashes_a_share"] * self.ratio / 86400)
+        elif blocks and self.template is not None and self.template.get("bits"):
+            chain_speed = round(blocks * (1 << 256) / (rxmod.target_of(int(self.template["bits"], 16)) + 1) / 86400)
         with self.lock:
             found = [b for b in self.blocks if b.get("accepted")]
         last = found[-1] if found else None
@@ -681,7 +699,8 @@ class Pool:
                 "pool": {"hashrate": hour["hashrate"], "miners": hour["miners"], "hashrate_10m": speed["windows"]["600"]["hashrate"],
                          "hashrate_24h": day["hashrate"], "miners_24h": day["miners"], "fee_percent": self.fee, "payout_scheme": "PPS",
                          "min_payout": None if self.payouts is None else north(self.payouts.minimum), "blocks_found": len(found),
-                         "last_block": None if last is None else {"height": last["height"], "hash": last["hash"], "time": last["time"]}},
+                         "last_block": None if last is None else {"height": last["height"], "hash": last["hash"], "time": last["time"]},
+                         "stratum": None if self.stratum is None else self.stratum.shown()},
                 "chain": {"height": height, "blocks_24h": blocks, "hashrate": chain_speed},
                 "how": "hashrates are hashes a second over the last hour unless named otherwise, estimated from the shares the pool "
                        "took; miners are the addresses that sent a share in the window; the chain's hashrate is its blocks of the "
@@ -706,7 +725,10 @@ class Pool:
                 "height": height, "paused": paused, "shares": shares, "earned": north(earned), "paid": north(paid),
                 "on_the_way": north(flying), "owed": north(earned - paid - flying), "blocks": len(self.blocks), "speed": speed,
                 "how": ["GET /v1/work?address=YOURS", "look for a nonce whose hash is at or below share_target",
-                        'POST /v1/share {"job", "nonce"}', "GET /v1/account?address=YOURS"]}
+                        'POST /v1/share {"job", "nonce"}', "GET /v1/account?address=YOURS"],
+                "stratum": None if self.stratum is None else {
+                    "port": self.stratum.port, "user": "your address, if you like with .worker after it", "password": "anything",
+                    "miner": "IronMiner (truenorth-ironminer) 1.0.8 or later: -o stratum+tcp://HOST:%d -u YOURS -p x" % self.stratum.port}}
 
 
 def _say(text):
@@ -830,12 +852,15 @@ def pay_for_ever(pool, every, sleep=time.sleep):
         sleep(every)
 
 
-def serve(pool, listen, trust_proxy=False, pay_every=0):
+def serve(pool, listen, trust_proxy=False, pay_every=0, stratum=None, welcome=None):
     server = make_server(pool, listen, trust_proxy)
     if pool.payouts is not None and pay_every > 0:
         threading.Thread(target=pay_for_ever, args=(pool, pay_every), daemon=True).start()
     _say("pool on %s:%d, chain %s, a share is 1/%d of a block, fee %d %%, blocks pay %s"
          % (server.server_address[0], server.server_address[1], pool.chain, pool.ratio, pool.fee, pool.pay_to))
+    if stratum:
+        from .stratum import Stratum
+        _say("stratum on port %d" % Stratum(pool, stratum, welcome=welcome).start())
     try:
         server.serve_forever()
     except KeyboardInterrupt:
