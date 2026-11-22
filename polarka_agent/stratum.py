@@ -52,6 +52,7 @@ import threading
 
 from . import pool as poolmod
 from . import rx as rxmod
+from .httpguard import Limiter
 from .keys import BadInput, script_for_address
 from .pool import PoolError, dsha
 
@@ -71,6 +72,8 @@ WAITING_PER_PLACE = 8       # and from one place
 MOST_WORKERS = 4            # names authorized on one connection
 QUIET = 10                  # seconds a connection has to subscribe and authorize
 IDLE = 3600                 # seconds an authorized connection may go without a share the pool takes
+STALE_SLOT = 300            # when all are taken, one that went this long without a share makes room for a newcomer
+CONNECTS_PER_MINUTE = 20    # new connections a minute from one place
 RETUNE_SHARES = 12          # shares the difficulty is decided on (or half as many over RETUNE_SECONDS)
 RETUNE_SECONDS = 300
 RATE, BURST = 10.0, 20.0    # shares a second one connection may send, after a burst
@@ -227,7 +230,8 @@ class Stratum:
         self.span = span                            # (hardest k, easiest k) in place of bounds(): only for trying a miner on regtest
         self.target_seconds, self.refresh_every, self.most, self.per_place = target_seconds, refresh, most, per_place
         self.most_waiting, self.waiting_per_place = MOST_WAITING, WAITING_PER_PLACE
-        self.quiet, self.idle = quiet, idle
+        self.quiet, self.idle, self.stale_slot = quiet, idle, STALE_SLOT
+        self.arrivals = Limiter(CONNECTS_PER_MINUTE, clock=pool.ticks, everyone=0)     # new connections of a place
         self.welcome = welcome                      # said to a miner once it is authorized; {address} is its address
         self.lock = threading.Lock()                # the newest job and the headers taken, also from the worker threads
         self.refreshing = threading.Lock()          # one new job at a time
@@ -380,32 +384,47 @@ class Stratum:
         miner.waiting = False
 
     def _room(self, place):
-        """Whether a new connection from `place` may come in. A place holds at most per_place connections, and at
-        most waiting_per_place that are not authorized yet; when all are taken, the place that holds the most gives
-        up its longest idle connection to a newcomer from a place that holds fewer, so that no place can keep the
-        others out (review 11, H2). The pool's own machine (place None) is nobody's place, as for the guard."""
-        if place is not None and (self.places[place] >= self.per_place or self.waiting[place] >= self.waiting_per_place):
-            return False
-        if sum(self.waiting.values()) >= self.most_waiting and not self._make_room(place, True):
-            return False
-        if len(self.miners) >= self.most and not self._make_room(place, False):
+        """Whether a new connection from `place` may come in (review 11, H2; review 11b, N7). A place opens at most
+        CONNECTS_PER_MINUTE connections a minute, holds at most per_place, and at most waiting_per_place that are not
+        authorized yet. When those not authorized fill their table, the one that came first goes: an honest miner
+        authorizes in well under a second, so whoever holds that table must keep coming faster than that. When all
+        connections are taken, the one that went longest without a share makes room once that is stale_slot or more;
+        else the place that holds the most gives one up to a newcomer from a place that holds at least two fewer. The
+        pool's own machine (place None) is nobody's place, as for the guard."""
+        if place is not None:
+            if not self.arrivals.take(place):
+                return False
+            if self.places[place] >= self.per_place or self.waiting[place] >= self.waiting_per_place:
+                return False
+        if sum(self.waiting.values()) >= self.most_waiting:
+            first = min((m for m in self.miners if m.waiting and not m.closed), key=lambda m: m.came, default=None)
+            if first is not None:
+                self._let_go(first, "the pool is busy: a connection that did not authorize in time makes room")
+        if len(self.miners) >= self.most and not self._make_room(place):
             return False
         return True
 
-    def _make_room(self, place, waiting):
-        """Lets go the longest idle connection (of those not authorized yet, when `waiting`) of the place that holds
-        the most, when that place holds at least two more than `place`. False: there is no room for `place`."""
-        held = self.waiting if waiting else self.places
+    def _make_room(self, place):
+        """All connections are taken: lets one go for `place`. False: there is no room for it."""
+        stalest = min((m for m in self.miners if not m.waiting and not m.closed), key=lambda m: m.active, default=None)
+        if stalest is not None and self.ticks() - stalest.active >= self.stale_slot:
+            self._let_go(stalest, "the pool is full and this connection sent no share for %d minutes: it makes room"
+                         % (self.stale_slot // 60))
+            return True
+        held = self.places
         most = max((p for p in held if p is not None), key=held.__getitem__, default=None)
         if most is None or held[most] < held[place] + 2:
             return False
-        idle = [m for m in self.miners if m.place == most and not m.closed and (m.waiting or not waiting)]
+        idle = [m for m in self.miners if m.place == most and not m.closed]
         if not idle:
             return False
-        miner = min(idle, key=lambda m: m.active)
-        self._message(miner, "the pool is full: a connection of a place that holds many makes room for a miner from elsewhere")
-        self._close(miner)
+        self._let_go(min(idle, key=lambda m: m.active),
+                     "the pool is full: a connection of a place that holds many makes room for a miner from elsewhere")
         return True
+
+    def _let_go(self, miner, why):
+        self._message(miner, why)
+        self._close(miner)
 
     def _extranonce(self):
         self.next_extranonce = (self.next_extranonce + 1) % (1 << (8 * EXTRANONCE1))
@@ -593,7 +612,7 @@ class Stratum:
         with p.lock:
             p._count(entry)
             if entry["accepted"]:
-                p.template_at, p.tip_seen, p.tip_tried = 0, None, None     # the tip has moved: the next look asks the node
+                p._found(entry["block"])    # the tip has moved: the next look asks the node
         return entry
 
     def _wrong(self, miner, rid, code, why):

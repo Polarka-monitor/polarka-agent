@@ -462,7 +462,8 @@ class ThroughTheGate(unittest.TestCase):
         self.assertIn("days ago", late[0]["error"])
         self.assertNotIn("text", late[0])
         with open(os.path.join(self.bob.folder, mail.SEEN_FILE)) as f:
-            self.assertEqual(len(json.load(f)), 1)
+            kept = json.load(f)
+        self.assertEqual((kept["v"], len(kept["seen"])), (1, 1))
         self.assertEqual(stat.S_IMODE(os.stat(os.path.join(self.bob.folder, mail.SEEN_FILE)).st_mode), 0o600)
 
     def test_two_senders_of_one_wallet_lose_no_lot(self):

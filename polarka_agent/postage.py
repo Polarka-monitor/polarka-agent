@@ -86,6 +86,7 @@ class Gate:
         self.free_day = None
         self.x402_limiter = Limiter(X402_PER_MINUTE) if x402 is not None else None
         self.saved, self.dirty = 0, False
+        self.reserved = {}          # mark of a token -> calls taken by requests not yet answered
         self.looked = {}            # address -> when the wallet was last asked about it
         try:
             with open(self.book) as f:
@@ -116,10 +117,17 @@ class Gate:
         if lazy and now - self.saved < SAVE_EVERY:
             self.dirty = True
             return
+        state = self.state
+        if self.reserved:           # calls of requests still to be answered are written as not spent
+            tokens = dict(state["tokens"])
+            for key, n in self.reserved.items():
+                if key in tokens:
+                    tokens[key] = dict(tokens[key], calls=tokens[key]["calls"] + n)
+            state = dict(state, tokens=tokens)
         tmp = self.book + ".new"
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as f:
-            json.dump(self.state, f, separators=(",", ":"))
+            json.dump(state, f, separators=(",", ":"))
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, self.book)
@@ -129,7 +137,8 @@ class Gate:
         """Tokens never paid whose time is long over, and lots whose calls are used up a month after their quote
         ran out, are dropped. A payment over x402 shown again after that buys nothing: its facilitator knows it."""
         self.state["tokens"] = {k: t for k, t in self.state["tokens"].items()
-                                if (t["paid"] and (t["calls"] > 0 or now < t["expires"] + KEEP_SPENT)) or now < t["expires"] + 3600}
+                                if (t["paid"] and (t["calls"] > 0 or now < t["expires"] + KEEP_SPENT)) or now < t["expires"] + 3600
+                                or k in self.reserved}
 
     def _price(self):
         """The price of one lot in base units: the fixed one, or so many hashes' worth of NORTH at what the
@@ -195,19 +204,25 @@ class Gate:
             return {"paid": t["paid"], "calls_left": t["calls"]}
 
     def spend(self, token, source):
-        """One call. True when it may pass."""
-        return self.spend_from(token, source) is not None
+        """One call, spent at once. True when it may pass."""
+        how = self.reserve(token, source)
+        if how == "lot":
+            self.done(token)
+        return how is not None
 
-    def spend_from(self, token, source):
-        """One call: "lot" when it was taken from the token's lot, "free" when from the free calls of the place, None
-        when there is none."""
+    def reserve(self, token, source):
+        """One call for a request that is still to be answered: "lot" when it was taken from the token's lot (it is
+        spent with done(), or goes back with give_back()), "free" when from the free calls of the place, None when
+        there is none. A call taken and not yet done is written to the book as not spent, so that a fall of the gate
+        in between gives it back to the buyer and never takes it (review 11b, N3)."""
         with self.lock:
-            t = self.state["tokens"].get(mark(token)) if token else None
+            key = mark(token) if token else None
+            t = self.state["tokens"].get(key) if token else None
             if t is not None:
                 self._settle(t)
                 if t["calls"] > 0:
                     t["calls"] -= 1
-                    self._save(lazy=True)
+                    self.reserved[key] = self.reserved.get(key, 0) + 1
                     return "lot"
             if self.free and source is not None:
                 # one place is an IPv4 address or an IPv6 /48, as at the faucet and the pool (human review, 22 November)
@@ -220,14 +235,32 @@ class Gate:
                     return "free"
             return None
 
-    def give_back(self, token):
-        """The call of a lot back, when the service behind the gate could not take it (GIVE_BACK): a letter the post
-        office refuses for a limit or for a full inbox costs no postage (review 11, H5)."""
+    def _unreserve(self, key):
+        """Called with the lock held. False when no call of that lot was waiting."""
+        n = self.reserved.get(key, 0)
+        if n <= 0:
+            return False
+        if n == 1:
+            del self.reserved[key]
+        else:
+            self.reserved[key] = n - 1
+        return True
+
+    def done(self, token):
+        """The call reserved for a request is spent: written with the next save, at most SAVE_EVERY late."""
         with self.lock:
-            t = self.state["tokens"].get(mark(token)) if token else None
-            if t is not None and t["paid"]:
+            if token and self._unreserve(mark(token)):
+                self._save(lazy=True)
+
+    def give_back(self, token):
+        """The call reserved for a request goes back to its lot, when the service behind the gate could not take it
+        (GIVE_BACK, or no answer): a letter the post office refuses for a limit or a full inbox costs no postage
+        (review 11, H5). Nothing is written: in the book that call was never spent (review 11b, N3)."""
+        with self.lock:
+            key = mark(token) if token else None
+            t = self.state["tokens"].get(key) if key else None
+            if t is not None and self._unreserve(key):
                 t["calls"] += 1
-                self._save()                # at once: a lazy save may only ever give calls back after a fall, never take
 
     def flush(self):
         """Writes what a lazy save left unwritten."""
@@ -289,7 +322,8 @@ class Gate:
         return needed
 
     def x402_pay(self, payment, path=None, source=None):
-        """A payment of x402 for one lot. (what came of it, True when this call may pass). What the payment says it
+        """A payment of x402 for one lot. (what came of it, True when this call may pass: a call of the lot is then
+        reserved, and the caller says done() or give_back() when the service has answered). What the payment says it
         buys (resource, extensions) is put back to what the gate states for `path`, so that a buyer cannot have the
         facilitator write something else into its catalog. A payment that is not one of a paid lot goes to the
         facilitator at most X402_PER_MINUTE times a minute from one place (`source`; human review, 22 November)."""
@@ -307,7 +341,7 @@ class Gate:
             t = self.state["tokens"].get(mark(claim))
         if t is not None:                   # the lot is paid already: the payment shown again is one more call of it
             done = {"success": True, "transaction": t.get("txid", ""), "network": self.x402.network, "payer": None}
-            return done, self.spend(claim, None)
+            return done, self.reserve(claim, None) is not None     # the caller then says done() or give_back()
         if source is not None and self.x402_limiter is not None and not self.x402_limiter.take(place(source)):
             return {"success": False, "errorReason": TOO_MANY, "transaction": "", "network": self.x402.network, "payer": None}, False
         accepted = payment.get("accepted")
@@ -320,7 +354,7 @@ class Gate:
                 self.state["tokens"][key] = {"address": self.state["x402_address"], "expires": int(self.clock()) + QUOTE_LIFE, "paid": True,
                                              "calls": self.calls, "price": int(accepted["amount"]), "txid": done.get("transaction", "")}
                 self._save()
-        return done, self.spend(claim, None)
+        return done, self.reserve(claim, None) is not None
 
     def left(self, token):
         with self.lock:
@@ -380,6 +414,7 @@ def make_handler(gate, upstream, trust_proxy, routes=()):
 
         def handle_one(self):
             what, outcome, t0 = "call", "passed", time.time()
+            token = spent = None        # spent "lot": a call reserved, to be done or given back before the end
             try:
                 if self.headers.get("Transfer-Encoding") is not None:
                     # a body in pieces is not read here: without this answer the service behind would get an empty one
@@ -411,6 +446,8 @@ def make_handler(gate, upstream, trust_proxy, routes=()):
                         outcome = "unreadable"
                         return self.send(400, {"error": "INPUT", "message": "the payment cannot be read"})
                     done, may = gate.x402_pay(payment, self.path, self.source())
+                    if may:                 # a call of the lot is reserved now: it is done or given back below
+                        token, spent = payment["payload"]["claim"], "lot"
                     more["PAYMENT-RESPONSE"] = b64json(done)
                     if not may and done.get("errorReason") == TOO_MANY:
                         outcome = "x402 too many"
@@ -428,10 +465,9 @@ def make_handler(gate, upstream, trust_proxy, routes=()):
                         outcome = "x402 %s" % str(done.get("errorReason"))[:40]
                         more["PAYMENT-REQUIRED"] = b64json(gate.x402_needed(self.path))
                         return self.send(402, gate.about(), more)
-                    token, spent = payment["payload"]["claim"], "lot"
                 else:
                     # calls for nothing are for the service before the gate; what it routes elsewhere costs postage
-                    spent = gate.spend_from(token, self.source() if target(self.path) is default else None)
+                    spent = gate.reserve(token, self.source() if target(self.path) is default else None)
                     if spent is None:
                         outcome = "402"
                         if gate.x402 is not None:
@@ -456,6 +492,9 @@ def make_handler(gate, upstream, trust_proxy, routes=()):
                         left = gate.left(token)
                         if left is not None:
                             more["X-Postage-Calls-Left"] = str(left)
+                    elif spent == "lot":
+                        gate.done(token)
+                    spent = None
                     self.send_response(r.status)
                     for k, v in r.getheaders():
                         if k.lower() not in HOP and k.lower() not in ("payment-response", "x-postage-calls-left"):
@@ -480,6 +519,9 @@ def make_handler(gate, upstream, trust_proxy, routes=()):
                 except Exception:
                     pass
             finally:
+                if spent == "lot":
+                    gate.give_back(token)       # the service behind did not answer: the call goes back to the lot
+                    outcome += ", given back"
                 sys.stderr.write("%s %s %s %.0f ms\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), what, outcome, (time.time() - t0) * 1000))
 
         do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = do_HEAD = handle_one

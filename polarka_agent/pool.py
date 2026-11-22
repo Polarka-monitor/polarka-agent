@@ -512,6 +512,11 @@ class Pool:
             self.template_at = at - TEMPLATE_AGE
             self.jobs, self.job_of, self.seen = {}, {}, set()
 
+    def _found(self, block):
+        """Called with the lock held, when the node took a block of the pool's: that block is the tip from now on, and
+        the next look asks the node at once (review 11b, N1)."""
+        self.best, self.tip_seen, self.tip_tried, self.template_at = block, self.ticks(), None, 0
+
     def look(self, template=True):
         """For stratum: asks the node outside the lock and puts the answers in under it, so that a slow node holds up
         no HTTP miner (review 11, L2): its tip at most every TIP_AGE and, with `template`, a new template when the one
@@ -532,11 +537,15 @@ class Pool:
                 old = template and (self.template is None or self.ticks() - self.template_at >= TEMPLATE_AGE)
                 key_height = self.key_height
             if old:
+                sent = self.ticks()             # the template shows the node as it was at this time or later
                 new, key, seed = self._ask(key_height)
                 with self.lock:
-                    # unless a newer one came in meanwhile, or the key moved under it
-                    if (self.template is None or self.template_at < asked) and (key is not None or seed == self.key_height):
-                        self._put(new, key, seed, asked)
+                    # unless a newer one came in meanwhile, the key moved under it, or the pool learned of another tip
+                    # from a question asked after this one (review 11b, N1)
+                    gone = self.tip_seen is not None and self.tip_seen > sent and new["previousblockhash"] != self.best
+                    if (not gone and (self.template is None or self.template_at < sent)
+                            and (key is not None or seed == self.key_height)):
+                        self._put(new, key, seed, sent)
         except (OSError, ValueError, KeyError, TypeError):
             with self.lock:
                 if self.template_good_at is None or self.ticks() - self.template_good_at > NODE_SILENCE:
@@ -664,7 +673,7 @@ class Pool:
         with self.lock:
             self._count(entry)
             if entry["accepted"]:
-                self.template_at, self.tip_seen, self.tip_tried = 0, None, None    # the tip has moved: the next asker gets a new template
+                self._found(entry["block"])     # the tip has moved: the next asker gets a new template
         return {"ok": True, "credited": north(entry["value"]), "block": entry["block"], "accepted": entry["accepted"]}
 
     def account(self, address):

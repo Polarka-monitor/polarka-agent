@@ -312,10 +312,13 @@ wallet behind a signing service has one too. A letter is sealed to that key befo
 secp256k1, keys from SHA-256, HMAC-SHA256 as keystream and as tag, encrypt then MAC: the standard library
 only), names the writer's inbox and the inbox it is for, and is signed by the writer. The reader is told who
 wrote only when the signature holds, keeps a record of the letters it has read (`mail-seen.json`) and does not
-show one again, nor one written more than a week ago. The post office keeps sealed letters it cannot read,
+show one again, nor one written more than a week ago or dated more than a day ahead; two readers of one wallet
+at once never both show a letter as new, and letters read are shown even when telling the post office fails
+(the next read lets them go). The post office keeps sealed letters it cannot read,
 until their inbox says it has them, at most seven days, and two days for an inbox that has not asked for its
 letters in that week; an inbox holds at most 500 letters and 4 MB, one place posts at most 8 MB a day, and a
-letter refused for such a limit costs no postage (the gate gives the call back). Fetching costs nothing but a
+letter refused for such a limit costs no postage (the gate gives the call back: a call counts as spent only once
+the service behind has taken it, also in the gate's book). Fetching costs nothing but a
 signature of the inbox's key over the time and the post office's own address, which is used once; an answer
 holds at most 512 KB of letters, and says when more wait. A writer with no lot buys one with the letter itself.
 
@@ -360,8 +363,9 @@ Every connection gets an extranonce of its own, every job a number of its own in
 coinbase is marked, so that no header can be paid twice, over stratum or over HTTP, nor at a difficulty other
 than its job's; the time of a share is its job's. The pool pushes the key of the proof of work with TrueNorth's
 own `mining.set_randomx_seed`, as IronMiner expects. A connection may send ten shares a second, has ten seconds
-to authorize and is let go after an hour without a share; one place may hold 32 connections, and when all 2000
-are taken the place that holds the most makes room for a newcomer from elsewhere. A place is not listened to for
+to authorize and is let go after an hour without a share; one place may open 20 connections a minute and hold 32.
+When the 200 connections not yet authorized fill their table, the one that came first makes room; when all 2000
+are taken, one that has sent no share for five minutes does, else the place that holds the most. A place is not listened to for
 ten minutes after 20 wrong shares, as over HTTP. Tested against the miner's own code read step by step, against
 the official node on regtest, and with IronMiner itself built from its source: 300 blocks on regtest, across a
 change of the key and with the difficulty moving both ways.
@@ -411,8 +415,9 @@ own. A miner who keeps back the blocks he finds can take the float before the po
 than the float and the wallet's limit for a day. The share ledger grows without end.
 
 Not built: taking back credit for a block that left the chain. Independent AI reviewers have read the pool
-over HTTP several times, and a person once (22 November 2026); the stratum side has been read by one independent
-AI reviewer (review 11, 22 November 2026), and what it found is mended.
+over HTTP several times, and a person once (22 November 2026); the stratum side and the letters have been read by
+one independent AI reviewer twice (review 11 and a second look at its mending, 22 November 2026), and what both
+found is mended; the mending of the second look has been read by its author only.
 
 ## Code and tests
 
@@ -427,7 +432,7 @@ miner, `x402.py` the x402 buyer, paywall and facilitator, `bazaar.py` the catalo
 
     TN_BIN=/path/to/bin python3 -B -m unittest discover -s tests -t .
 
-365 tests. Those in `test_wallet.py`, `test_cli_mcp.py`, `test_faucet_node.py`, `test_pool_node.py`,
+384 tests. Those in `test_wallet.py`, `test_cli_mcp.py`, `test_faucet_node.py`, `test_pool_node.py`,
 `test_stratum_node.py`, `test_payout_node.py`, `test_walletd.py`, `test_x402.py` and `test_stamps.py` run against the official
 `truenorthd` on regtest and a stand-in for a Northbound server (`tests/standin`, copied from the Polarka Wallet's repository); they
 are skipped without the node programs. No test touches a real network.
