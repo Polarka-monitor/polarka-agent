@@ -152,7 +152,8 @@ class CliMcpTest(unittest.TestCase):
         self.assertEqual(replies[1]["result"], {})
         names = [t["name"] for t in replies[2]["result"]["tools"]]
         self.assertEqual(names, ["north_balance", "north_address", "north_received", "north_wait", "north_pay", "north_stamp", "north_payments",
-                                 "north_history", "north_limits", "north_faucet", "north_fetch", "north_postage"])
+                                 "north_history", "north_limits", "north_faucet", "north_fetch", "north_postage",
+                                 "north_mail_inbox", "north_mail_send", "north_mail_read"])
         self.assertEqual([replies[3]["error"]["code"], replies[4]["error"]["code"], replies[5]["error"]["code"], replies[6]["error"]["code"]],
                          [-32700, -32601, -32600, -32600])
         other = self.ask(w, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "1999-01-01"}})

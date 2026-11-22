@@ -182,6 +182,20 @@ def run(argv=None, out=sys.stdout):
     c.add_argument("--out", help="write what came back to this file (else up to 4000 characters of it are shown)")
     c.add_argument("--wait", type=int, default=600, help="seconds to wait while the seller waits for a block (default 600); "
                    "fetching the same url again later pays nothing more")
+    sub.add_parser("mail-inbox", help="the id of this wallet's inbox for letters (its key is made the first time, in mail-key.json)")
+    c = sub.add_parser("mail-send", help="write a letter to an inbox; it is sealed so that only that inbox reads it, and costs a "
+                                         "call of postage, bought with x402 within the limits and never for more than --most")
+    c.add_argument("to", help="the inbox: 64 hexadecimal digits")
+    c.add_argument("text", help="the letter (up to 8000 characters); - reads it from standard input")
+    c.add_argument("--most", required=True, help="the most NORTH to pay for a lot of postage, when one is needed")
+    c.add_argument("--office", default=None, help="the post office (default %s)" % "https://gate.polarka.org")
+    c = sub.add_parser("mail-read", help="the letters waiting in this wallet's inbox, opened; then the post office lets them go")
+    c.add_argument("--keep", action="store_true", help="leave them at the post office (they are kept at most seven days)")
+    c.add_argument("--office", default=None, help="the post office (default %s)" % "https://gate.polarka.org")
+    c = sub.add_parser("mail-serve", help="be a post office for letters between agents; --dir keeps the letters (sealed, unread)")
+    c.add_argument("--paid", default="127.0.0.1:8682", help="where letters come in, behind a gate of postage (its --route /v1/mail)")
+    c.add_argument("--free", default="127.0.0.1:8683", help="where inboxes fetch their letters, behind the web server only (/v1/inbox)")
+    c.add_argument("--trust-proxy", action="store_true", help="take the caller's address from X-Forwarded-For at the free door")
     c = sub.add_parser("x402-facilitator", help="settle x402 payments in NORTH for sellers, with this machine's node; --dir keeps "
                                                 "what was taken")
     c.add_argument("--chain", required=True, choices=("main", "regtest"))
@@ -417,9 +431,12 @@ def run(argv=None, out=sys.stdout):
                                 ", at most %d payments kept" % most_payments if most_payments is not None else ""))
             server.serve_forever()
             return 0
+        if a.cmd == "mail-serve":
+            from .mail import serve as mail_serve
+            return mail_serve(folder, a.paid, a.free, a.trust_proxy)
         if signer:
             from .signer import Signer
-            if a.cmd in ("mcp", "fetch"):
+            if a.cmd in ("mcp", "fetch", "mail-inbox", "mail-send", "mail-read"):
                 os.makedirs(folder, mode=0o700, exist_ok=True)      # this program's own records: x402 payments under way
             wallet = Signer(signer, folder)
         else:
@@ -450,6 +467,18 @@ def run(argv=None, out=sys.stdout):
         if a.cmd == "postage":
             from .postage import buy
             return show(buy(wallet, a.url, units(a.most)))
+        if a.cmd in ("mail-inbox", "mail-send", "mail-read"):
+            from . import mail
+            try:
+                if a.cmd == "mail-inbox":
+                    return show(mail.my_inbox(wallet))
+                if a.cmd == "mail-send":
+                    text = sys.stdin.read() if a.text == "-" else a.text
+                    done = mail.send(wallet, a.to, text, units(a.most), a.office)
+                    return show(done, 0 if done.get("sent") else 3)
+                return show(mail.fetch_letters(wallet, a.office, keep=a.keep))
+            except mail.MailError as e:
+                raise Refused(e.kind, str(e))
         if a.cmd == "fetch":
             from .x402 import fetch
             if a.wait < 0:
