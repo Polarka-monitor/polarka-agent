@@ -54,8 +54,15 @@ keep the node and the gate's own facilitator out of it; they do not make this on
 
 The web server passes it `/facilitator/supported`, `/facilitator/verify` and `/facilitator/settle`
 (`../postage/gate.caddy`); a seller names `https://gate.polarka.org/facilitator` as its facilitator. Check
-through the web server that an X-Forwarded-For the caller writes counts for nothing: from one machine, the 61st
-request within a minute is answered `429`, whatever address it names.
+through the web server that an X-Forwarded-For the caller writes counts for nothing: from one machine, requests
+sent one after another that each ask the node (a transaction the node can read; a malformed one does not count)
+are answered `429` after about 60, whatever address each names; the bucket fills again by one a second. On 22
+November 2026 such a run, each request naming another address, was refused after 55 requests in ten seconds (the
+bucket was not full when it began).
+
+After the gate's own facilitator starts again, start the gate only once that facilitator answers: the gate asks it
+when it starts and stops for good if nobody answers (it happened on 22 November, and `systemctl start polarka-gate`
+was all it took).
 
 A payment it settles pays the seller directly: the facilitator checks it and hands the buyer's own signed
 transaction to the network, as any node does. It asks no fee, holds nothing, and is an experiment that may stop.
