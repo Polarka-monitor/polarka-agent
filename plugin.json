@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "polarka",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "Free tools about TrueNorth (NORTH) through the remote MCP connector at https://polarka.org/mcp: the network and the pool now, a guide, SHA-256 stamps into the chain and the check of their proofs. No account, no key, no wallet.",
   "author": {
     "name": "Severka (Polarka)",

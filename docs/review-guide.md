@@ -208,9 +208,17 @@ these with a second look):
   Open: T6 and N1, N4 of review 11c as above; L5 in part (twenty places can still hold the gate's twenty addresses
   for forty minutes; x402 is not touched); walletd's own limits (the wallet's review, N5).
 
+- the human review of 23 November 2026 (people outside this project, whose names are not given here; a security
+  review of the Polarka Wallet 0.7.1 together with `walletd.py` and `faucet.py` as they run on the server): of its
+  findings two low ones, L-4 and L-5, are in this package. Mended in 0.2.6 with tests (`tests/test_walletd.py`,
+  `tests/test_faucet.py`): walletd gives a whole request a time to arrive (`--request-time`, 20 seconds), starts its
+  revision at a number drawn at random, names an address back as it was asked and reads ids in a history cursor in
+  either case; with `--trust-proxy` the faucet listens on loopback only, and its asker keeps to its own bounds. The
+  wallet's own findings are mended in the wallet (its `review/changes-0.7.md`).
+
 Review 9 read the fixes of review 8 and found them sound; review 10 found most of the fixes of the human review
 correct, and its reviewer read the fixes of its own findings again; review 11c and review 12 read the fixes of the
-looks before them. Nobody but their author has read the fixes of review 12. The facilitator for sellers from outside (item 2 above) opened with 0.2.3.
+looks before them. Nobody but their author has read the fixes of review 12 and of the human review of 23 November. The facilitator for sellers from outside (item 2 above) opened with 0.2.3.
 
 Their reports can be had on request. Low findings that are still open are listed in them. Earlier parts of the
 project (wallet, pool) went through four further AI reviews. No person outside has read the code since the
