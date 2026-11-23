@@ -24,7 +24,8 @@ program with test switches on top, so every test of the wallet and the pool runs
 - it answers wallet data with 503 while the node is catching up, and on main also when the node has no
   peers or has not seen a block for --max-tip-age seconds: a payout must not rest on an old picture;
 - a request body is read only with a valid Content-Length of at most 1 MB, a connection that sends nothing
-  for --idle seconds is closed, and at most --most-connections connections are served at once;
+  for --idle seconds is closed, a request has --request-time seconds to arrive whole once its first byte is
+  there, and at most --most-connections connections are served at once;
 - of the waiting transactions it remembers only those that still wait.
 
 It keeps no database: every answer is worked out from the node at that moment. The blocks it has read are
@@ -34,6 +35,7 @@ import argparse
 import base64
 import ipaddress
 import json
+import os
 import socket
 import sys
 import threading
@@ -86,6 +88,7 @@ MAX_CURSOR = 1_024
 MAX_BODY = 1_000_000
 MAX_HEX = 800_000
 MAX_AGE_SECONDS = 30
+REQUEST_TIME = 20.0               # seconds a request (its line, its headers, its body) has to arrive once its first byte is there
 NO_BLOCK = (1 << 63) - 1          # where the real server sorts a waiting transaction: above every block
 NODE_ERROR = "The blockchain node is unavailable or returned an invalid response."
 CHANGED = "The index changed; restart pagination."
@@ -371,6 +374,7 @@ class Picture:
             after = read_cursor(cursor)
             if after["tip_hash"] != self.tip_hash or after["pending_revision"] != self.revision:
                 raise Answer(409, CHANGED)
+            after["txid"] = after["txid"].lower()             # compared with ids in lower case, as in coins() (human review, L-4)
         touched = set()
         for script in mine:
             for key in list(self.chain.by_script.get(script, ())) + list(self.w_by_script.get(script, ())):
@@ -436,7 +440,10 @@ class Index:
         self.pending = {}           # txid -> a waiting transaction read earlier
         self.first_seen = {}        # txid -> when it was first seen waiting
         self.moment = None          # the tip, the node's count of changes to its waiting transactions, and their ids
-        self.revision = 0           # goes up whenever the moment changes; a history cursor holds for one revision
+        # goes up whenever the moment changes; a history cursor holds for one revision. It starts at a number drawn
+        # at random, so that a cursor from before a restart does not match the same tip and revision again by
+        # chance (human review of 23 November, L-4); 48 bits leave room below the cursors' 63.
+        self.revision = int.from_bytes(os.urandom(6), "big")
 
     def block(self, block_hash):
         block = self.blocks.get(block_hash)
@@ -597,14 +604,17 @@ class App:
                 raise Answer(400, "address is too long")
             if self.network is None:
                 self.network = self.node.call("getblockchaininfo")["chain"]
+            # An address is named back as the request wrote it: a client checks that every used address is one it
+            # asked about, and an address in upper case is still that address (human review of 23 November, L-4).
+            shown = address
             if _script_for is not None:
                 try:
-                    script, shown = _script_for(self.network, address).hex(), address.lower()
+                    script = _script_for(self.network, address).hex()
                 except _NotAnAddress:
                     script = None
             else:
                 checked = self.node.call("validateaddress", address)
-                script, shown = (checked["scriptPubKey"], checked.get("address", address)) if checked.get("isvalid") else (None, None)
+                script = checked["scriptPubKey"] if checked.get("isvalid") else None
             if script is None:
                 # the real server tells a good address of another network from something that is no address
                 foreign = bech32_checksum_holds(address) and address.lower().rpartition("1")[0] != HRPS.get(self.network)
@@ -706,7 +716,41 @@ class Handler(OneRequestWithBody, BaseHTTPRequestHandler):
 
     def setup(self):
         self.timeout = self.server.idle         # a connection that sends nothing for so long is closed
+        self._late = None
         super().setup()
+
+    def handle_one_request(self):
+        """
+        One request. Waiting for its first byte is the connection's idle time (--idle); from that byte on, the whole
+        request, its line, its headers and its body, has --request-time to arrive. A caller that sends a byte every
+        few seconds holds no thread and no slot for long (human review of 23 November, L-4).
+        """
+        try:
+            if not self.rfile.peek(1):
+                self.close_connection = True
+                return
+        except (OSError, ValueError):                         # idle for too long, or gone
+            self.close_connection = True
+            return
+        self._late = threading.Timer(self.server.request_time, self._drop)
+        self._late.daemon = True
+        self._late.start()
+        try:
+            super().handle_one_request()
+        finally:
+            self.arrived()
+
+    def _drop(self):
+        try:
+            self.connection.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+
+    def arrived(self):
+        """The request is here: what follows (the node, the answer) is not cut off by the time it had to arrive."""
+        if self._late is not None:
+            self._late.cancel()
+            self._late = None
 
     def log_message(self, fmt, *args):
         if self.server.verbose:
@@ -751,7 +795,10 @@ class Handler(OneRequestWithBody, BaseHTTPRequestHandler):
         started = time.monotonic()
         status = 500
         try:
-            raw = self.body() if method == "POST" else b""
+            try:
+                raw = self.body() if method == "POST" else b""
+            finally:
+                self.arrived()
             status, answer = self.server.app.handle(method, self.path, self.headers.get("Content-Type"), raw)
             self.reply(status, answer)
         except Answer as answer:
@@ -785,8 +832,8 @@ class Listener(ThreadingHTTPServer):
 
     daemon_threads = True
 
-    def __init__(self, address, app, most=32, idle=30.0, verbose=False, report=True):
-        self.app, self.idle, self.verbose, self.report = app, idle, verbose, report
+    def __init__(self, address, app, most=32, idle=30.0, verbose=False, report=True, request_time=REQUEST_TIME):
+        self.app, self.idle, self.verbose, self.report, self.request_time = app, idle, verbose, report, request_time
         self.slots = threading.BoundedSemaphore(most)
         self.address_family = socket.AF_INET6 if ":" in address[0] else socket.AF_INET
         super().__init__(address, Handler)
@@ -806,6 +853,13 @@ class Listener(ThreadingHTTPServer):
             super().process_request_thread(request, client_address)
         finally:
             self.slots.release()
+
+    def handle_error(self, request, client_address):
+        # a connection cut off while its request arrived, or whose caller went away: one line, not a traceback
+        if self.verbose:
+            super().handle_error(request, client_address)
+        elif self.report:
+            sys.stderr.write("connection failed: %s\n" % getattr(sys.exc_info()[0], "__name__", "error"))
 
 
 def loopback(listen):
@@ -828,6 +882,7 @@ def main(argv=None):
     parser.add_argument("--listen", default=DEFAULT_LISTEN, help="a loopback address and port (default %s; port 0 takes a free one)" % DEFAULT_LISTEN)
     parser.add_argument("--max-tip-age", type=int, default=7200, help="on main: seconds without a new block after which wallet data is answered 503 (default 7200)")
     parser.add_argument("--idle", type=float, default=30.0, help="seconds a connection may send nothing before it is closed (default 30)")
+    parser.add_argument("--request-time", type=float, default=REQUEST_TIME, help="seconds a request has to arrive whole once its first byte is there (default %g)" % REQUEST_TIME)
     parser.add_argument("--most-connections", type=int, default=32, help="connections served at once (default 32)")
     parser.add_argument("--rpc-timeout", type=float, default=60.0, help="seconds to wait for the node (default 60)")
     parser.add_argument("--verbose", action="store_true", help="write every request to standard error")
@@ -836,8 +891,8 @@ def main(argv=None):
         host, port = loopback(a.listen)
     except ValueError:
         parser.error("--listen must be a loopback address and a port, such as 127.0.0.1:9560 or [::1]:9560")
-    if a.most_connections < 1 or a.idle <= 0 or a.rpc_timeout <= 0 or a.max_tip_age < 60:
-        parser.error("--most-connections must be at least 1, --idle and --rpc-timeout above 0, --max-tip-age at least 60")
+    if a.most_connections < 1 or a.idle <= 0 or a.rpc_timeout <= 0 or a.request_time <= 0 or a.max_tip_age < 60:
+        parser.error("--most-connections must be at least 1, --idle, --request-time and --rpc-timeout above 0, --max-tip-age at least 60")
     node = Node(a.rpc_url, a.cookie, a.rpc_timeout)
     try:
         chain = node.call("getblockchaininfo")["chain"]
@@ -855,7 +910,7 @@ def main(argv=None):
     except (NodeDown, Refused, Answer) as e:
         sys.stderr.write("walletd: could not read the chain: %s\n" % e)
         return 75
-    server = Listener((host, port), app, a.most_connections, a.idle, a.verbose)
+    server = Listener((host, port), app, a.most_connections, a.idle, a.verbose, request_time=a.request_time)
     sys.stderr.write("walletd: %s, block %d read in %.0f s, %s; listening on %s port %d\n" % (
         a.chain, picture.height, time.monotonic() - started, "ready" if ready else "NOT READY (the node is catching up or cut off)",
         host, server.server_address[1]))

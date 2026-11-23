@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import ThreadingHTTPServer
 
@@ -140,6 +141,56 @@ class FaucetTest(unittest.TestCase):
             srv.shutdown()
             srv.server_close()
             asker.server.close()
+
+    def test_with_trust_proxy_it_listens_on_loopback_only(self):
+        """Human review of 23 November, L-5: with --trust-proxy the asker's address is the web server's word."""
+        for listen in ("0.0.0.0:0", "10.0.0.5:0", "localhost:0", "[::]:0"):
+            self.refused("LISTEN", faucet.serve, self.w, 2 * N, listen, True)
+        # on loopback it gets as far as the limits (here: an amount that the limits never let through)
+        self.refused("LIMITS", faucet.serve, self.w, 0, "127.0.0.1:0", True)
+        self.refused("LIMITS", faucet.serve, self.w, 0, "[::1]:0", True)
+
+    def test_a_server_that_fails_after_signing_does_not_open_the_challenge_again(self):
+        """Human review, L-5: the challenge goes back only when the wallet failed before it signed anything."""
+        from polarka_agent.server import ServerError
+
+        def silent(*a, **k):
+            raise ServerError(0, "no answer")
+        self.w.server.validate = silent
+        self.w.server.broadcast = silent
+        self.w.server.known = silent
+        to = address(0)
+        c = self.f.challenge("s", to)
+        answer = faucet.solve(c["challenge"], c["bits"])
+        self.refused("NOT_NOW", self.f.claim, "s", to, c["challenge"], answer)     # signed, outcome not known
+        self.refused("ALREADY", self.f.claim, "s", to, c["challenge"], answer)     # the challenge stays used
+        self.assertIn(to, self.f.paid)                                              # the address stays closed today
+
+    def test_the_asker_works_no_longer_than_a_challenge_lives_and_no_harder_than_it_says(self):
+        """Human review, L-5: faucet.ask() bounds what a faucet says with its own numbers."""
+        import inspect
+        self.assertEqual(inspect.signature(faucet.ask).parameters["most_bits"].default, faucet.ASK_BITS)
+        seen = {}
+        real = faucet.solve
+
+        def solve(challenge, bits, most=None, until=None):
+            seen["until"] = until
+            return None                                     # no answer: the claim is never made
+        faucet.solve = solve
+        try:
+            srv = ThreadingHTTPServer(("127.0.0.1", 0), faucet.make_handler(self.f, False))
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            url = "http://127.0.0.1:%d" % srv.server_address[1]
+            ten_days = self.now[0] + 10 * 24 * 3600
+            original = self.f.challenge
+            self.f.challenge = lambda source, address: dict(original(source, address), expires=ten_days)
+            started = int(time.time())
+            self.refused("FAUCET", faucet.ask, url, address(1))
+            self.assertLessEqual(seen["until"], started + faucet.CHALLENGE_LIFE + 5)
+        finally:
+            faucet.solve = real
+            srv.shutdown()
+            srv.server_close()
 
     def test_over_http_from_asking_to_a_coin(self):
         srv = ThreadingHTTPServer(("127.0.0.1", 0), faucet.make_handler(self.f, False))

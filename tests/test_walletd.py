@@ -149,6 +149,25 @@ class WalletdTest(unittest.TestCase):
         self.assertNotIn(done["id"], app.index.pending)
         self.assertNotIn(done["id"], app.index.first_seen)
 
+    def test_an_address_is_named_back_as_it_was_asked(self):
+        """Human review, L-4: an address in upper case is that address, and a client checks for the name it asked with."""
+        status, answer = ask(self.server.url, "/v1/addresses/activity", {"addresses": [self.address.upper()]})
+        self.assertEqual(status, 200, answer)
+        self.assertEqual(answer["used_addresses"], [self.address.upper()])
+
+    def test_a_history_cursor_reads_its_id_in_either_case(self):
+        """Human review, L-4: the id in a history cursor is compared in lower case, as in a cursor of coins."""
+        body = {"addresses": [self.address], "limit": 1}
+        status, first = ask(self.server.url, "/v1/transactions", body)
+        self.assertEqual(status, 200, first)
+        self.assertIsNotNone(first["next_cursor"])
+        cursor = json.loads(bytes.fromhex(first["next_cursor"]).decode())
+        cursor["txid"] = cursor["txid"].upper()
+        upper = json.dumps(cursor, separators=(",", ":")).encode().hex()
+        lower = ask(self.server.url, "/v1/transactions", dict(body, cursor=first["next_cursor"]))
+        self.assertEqual(lower[0], 200, lower)
+        self.assertEqual(ask(self.server.url, "/v1/transactions", dict(body, cursor=upper)), lower)
+
 
 @unittest.skipUnless(bench.find_bin(), "truenorthd and truenorth-cli are needed (TN_BIN names their folder)")
 class WalletdEdgesTest(unittest.TestCase):
@@ -216,6 +235,46 @@ class WalletdEdgesTest(unittest.TestCase):
                 h.close()
         time.sleep(0.5)
         self.assertEqual(ask(s.url, "/v1/chain/tip"), (200, {"height": 1}))
+
+
+    def test_a_request_that_trickles_in_is_cut_off(self):
+        """Human review of 23 November, L-4: once its first byte is there, a request has --request-time to arrive."""
+        s = self.start("--request-time", "1", "--idle", "10")
+        with socket.create_connection(("127.0.0.1", s.port), timeout=10) as slow:
+            slow.sendall(b"POST /v1/utxos HTTP/1.1\r\nHost: x\r\n")
+            started, closed = time.monotonic(), False
+            while not closed and time.monotonic() - started < 5:
+                time.sleep(0.25)
+                try:
+                    slow.sendall(b"X")                        # a header that never ends, a byte at a time
+                    slow.settimeout(0.05)
+                    try:
+                        closed = slow.recv(100) == b""
+                    except socket.timeout:
+                        pass
+                    slow.settimeout(10)
+                except OSError:
+                    closed = True
+            self.assertTrue(closed, "the request was given more than five seconds")
+            self.assertLess(time.monotonic() - started, 3)
+        # the wait between two requests on one connection is the idle time, not the time a request has to arrive
+        c = http.client.HTTPConnection("127.0.0.1", s.port, timeout=10)
+        try:
+            for _ in range(2):
+                c.request("GET", "/v1/chain/tip")
+                r = c.getresponse()
+                self.assertEqual(r.status, 200)
+                r.read()
+                time.sleep(1.5)
+        finally:
+            c.close()
+
+class RevisionTest(unittest.TestCase):
+    def test_the_revision_starts_at_a_number_drawn_at_random(self):
+        """Human review, L-4: a cursor from before a restart does not meet the same tip and revision by chance."""
+        starts = {walletd.Index(None).revision for _ in range(20)}
+        self.assertGreater(len(starts), 15)
+        self.assertTrue(all(0 <= r < 1 << 48 for r in starts))
 
 
 class ReadinessTest(unittest.TestCase):

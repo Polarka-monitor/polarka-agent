@@ -482,18 +482,31 @@ def serve(wallet, amount, listen, trust_proxy=False, base_bits=BASE_BITS, per_so
     os.umask(0o077)                 # what the faucet writes is its owner's to read
     # the day's purse is not to be had in one burst: at most a twelfth of it in an hour
     per_hour = max(1, int(limits["per_day"] // amount) // 12)
-    faucet = Faucet(wallet, amount, base_bits, per_source_paid=per_source_paid, per_hour=per_hour)
     host, port = listen.rsplit(":", 1)
+    if trust_proxy:
+        # Behind a web server the asker's address is the web server's word (X-Forwarded-For). Reached directly,
+        # anybody could write that word and every limit per place would fall; so with --trust-proxy the faucet
+        # listens on this machine only, as walletd always does (human review of 23 November, L-5).
+        host = host[1:-1] if host.startswith("[") and host.endswith("]") else host
+        try:
+            alone = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            alone = False
+        if not alone:
+            raise Refused("LISTEN", "with --trust-proxy the faucet listens on a loopback address only, such as 127.0.0.1:8660, "
+                          "and a web server on the same machine stands in front of it")
+    faucet = Faucet(wallet, amount, base_bits, per_source_paid=per_source_paid, per_hour=per_hour)
     srv = Server((host, int(port)), make_handler(faucet, trust_proxy))
     _say("faucet on %s, %s NORTH to an address a day, at most %d payments an hour and %d a day to one place, work from %d bits"
          % (listen, north(amount), per_hour, per_source_paid, base_bits))
     srv.serve_forever()
 
 
-def ask(url, address, timeout=30, most_bits=MAX_BITS):
+def ask(url, address, timeout=30, most_bits=ASK_BITS):
     """The asker's side: challenge, work, claim. Returns what the faucet answered, as a dict. No more work
-    is done than most_bits, no redirect is followed (the address asked is the one that answers), and an answer
-    that trickles in is not waited for without end."""
+    is done than most_bits (ASK_BITS unless the caller asks for more, as the command line may), no redirect is
+    followed (the address asked is the one that answers), an answer that trickles in is not waited for without
+    end, and the work lasts no longer than a challenge of faucet.py lives, whatever the faucet says."""
     import http.client
     import urllib.error
     import urllib.request
@@ -559,6 +572,8 @@ def ask(url, address, timeout=30, most_bits=MAX_BITS):
     until = c.get("expires")
     if type(until) is not int or until <= time.time():
         raise Refused("FAUCET", "the faucet gave a challenge that has run out already")
+    # a faucet that says its challenge lives for days does not keep this program at work for days (human review, L-5)
+    until = min(until, int(time.time()) + CHALLENGE_LIFE)
     answer = solve(challenge, bits, 1 << (bits + 4), until)     # sixteen times the work expected or the challenge's time, then no more
     if answer is None:
         raise Refused("FAUCET", "the work was not done")
