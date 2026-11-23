@@ -142,6 +142,32 @@ class FaucetTest(unittest.TestCase):
             srv.server_close()
             asker.server.close()
 
+    def test_an_agent_s_call_works_for_a_while_only_and_claims_nothing_when_the_time_is_over(self):
+        """0.2.7: an agent's call of a tool ends after a minute or so, so one call of north_faucet works WORK_MOST
+        seconds at the most; when the work is not done by then, it says so and nothing is claimed."""
+        from unittest import mock
+        from polarka_agent import mcp
+        asker_folder = os.path.join(os.path.dirname(self.folder), "asker")
+        Wallet.create(asker_folder, "regtest", self.m.fake.url, None)
+        asker = Wallet(asker_folder)
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), faucet.make_handler(self.f, False))
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        url = "http://127.0.0.1:%d" % srv.server_address[1]
+        try:
+            before = len(self.m.handed)
+            got = faucet.ask(url, asker.fresh_address(), within=-1)          # no time at all: the work is not done
+            self.assertEqual((got["done"], got["work_bits"]), (False, 8))
+            self.assertIn("nothing was claimed", got["then"])
+            with mock.patch.object(mcp, "WORK_MOST", -1):
+                self.assertIs(mcp.call(asker, "north_faucet", {"url": url}, allow_local=True)["done"], False)
+            self.assertEqual(len(self.m.handed), before)
+            got = mcp.call(asker, "north_faucet", {"url": url}, allow_local=True)     # 8 bits: done at once
+            self.assertEqual((got["done"], got["transaction_id"]), (True, self.m.handed[-1]))
+        finally:
+            srv.shutdown()
+            srv.server_close()
+            asker.server.close()
+
     def test_with_trust_proxy_it_listens_on_loopback_only(self):
         """Human review of 23 November, L-5: with --trust-proxy the asker's address is the web server's word."""
         for listen in ("0.0.0.0:0", "10.0.0.5:0", "localhost:0", "[::]:0"):

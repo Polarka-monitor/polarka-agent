@@ -502,11 +502,16 @@ def serve(wallet, amount, listen, trust_proxy=False, base_bits=BASE_BITS, per_so
     srv.serve_forever()
 
 
-def ask(url, address, timeout=30, most_bits=ASK_BITS):
+def ask(url, address, timeout=30, most_bits=ASK_BITS, within=None):
     """The asker's side: challenge, work, claim. Returns what the faucet answered, as a dict. No more work
     is done than most_bits (ASK_BITS unless the caller asks for more, as the command line may), no redirect is
     followed (the address asked is the one that answers), an answer that trickles in is not waited for without
-    end, and the work lasts no longer than a challenge of faucet.py lives, whatever the faucet says."""
+    end, and the work lasts no longer than a challenge of faucet.py lives, whatever the faucet says.
+
+    With `within`, the work lasts that many seconds at the most, and when it is not done by then the answer says
+    done false and nothing is claimed: an agent's call of a tool ends after a minute or so (0.2.7). Asking again
+    costs nothing in chance: each hash finds the answer as likely as any other, so a new try is as likely to finish
+    as the work given up."""
     import http.client
     import urllib.error
     import urllib.request
@@ -574,12 +579,18 @@ def ask(url, address, timeout=30, most_bits=ASK_BITS):
         raise Refused("FAUCET", "the faucet gave a challenge that has run out already")
     # a faucet that says its challenge lives for days does not keep this program at work for days (human review, L-5)
     until = min(until, int(time.time()) + CHALLENGE_LIFE)
+    if within is not None:
+        until = min(until, time.time() + within)
     answer = solve(challenge, bits, 1 << (bits + 4), until)     # sixteen times the work expected or the challenge's time, then no more
+    if answer is None and within is not None and time.time() > until:
+        return {"asked": address, "done": False, "work_bits": bits,
+                "then": "the work was not done within %d seconds and nothing was claimed; ask again: a new try is as "
+                        "likely to finish as this one" % within}
     if answer is None:
         raise Refused("FAUCET", "the work was not done")
     got = post("/v1/claim", {"address": address, "challenge": challenge, "answer": answer})
     txid = got.get("transaction_id")
     if not isinstance(txid, str) or not re.fullmatch(r"[0-9a-f]{64}", txid):
         raise Refused("FAUCET", "the faucet did not name a transaction")
-    return {"asked": address, "transaction_id": txid, "work_bits": bits,
+    return {"asked": address, "done": True, "transaction_id": txid, "work_bits": bits,
             "then": "this is the faucet's word; the coin shows in the balance once it is in a block"}
