@@ -216,9 +216,19 @@ these with a second look):
   either case; with `--trust-proxy` the faucet listens on loopback only, and its asker keeps to its own bounds. The
   wallet's own findings are mended in the wallet (its `review/changes-0.7.md`).
 
+- 0.2.7, found in use with an agent on OpenClaw: most agents end a call of a tool after 60 seconds (the default of
+  the MCP SDKs), and some clients have no setting for it (OpenClaw 2026.4.15 among them); north_fetch waited up to
+  100 seconds for a block, so the call ended in an error, though the payment had been made and a later call showed
+  it. Now every tool answers well within a minute (`mcp.py`, SELLER_WAIT and
+  the three after it): north_fetch and north_mail_send wait 25 seconds for a seller and 10 for each of its answers,
+  north_wait 40 seconds at the most (up to 300 is still taken, as before), and north_faucet works 20 seconds at the
+  most and then says done false, having claimed nothing. What is not done by then is said so, and the same call
+  later goes on; nothing is paid twice. No payment, limit or check was changed. Tests: `tests/test_call_time.py`
+  and one more in `tests/test_faucet.py`.
+
 Review 9 read the fixes of review 8 and found them sound; review 10 found most of the fixes of the human review
 correct, and its reviewer read the fixes of its own findings again; review 11c and review 12 read the fixes of the
-looks before them. Nobody but their author has read the fixes of review 12 and of the human review of 23 November. The facilitator for sellers from outside (item 2 above) opened with 0.2.3.
+looks before them. Nobody but their author has read the fixes of review 12, of the human review of 23 November, and the waits of 0.2.7. The facilitator for sellers from outside (item 2 above) opened with 0.2.3.
 
 Their reports can be had on request. Low findings that are still open are listed in them. Earlier parts of the
 project (wallet, pool) went through four further AI reviews. No person outside has read the code since the
