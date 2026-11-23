@@ -48,7 +48,10 @@ block, for example `bip122:000000000019d6689c085ae165831e93` (Bitcoin) or `bip12
   never fewer.
 - `extra.resource`, when the resource server sends it to `/verify` and `/settle`, names what the payment buys. The
   facilitator MUST bind the payment to it; without it, to the `resource` of the payload, which the client writes.
-  A resource server that serves more than one resource for one `payTo` SHOULD send it.
+  A resource server that serves more than one resource for one `payTo` SHOULD send it. A payment keeps the binding
+  it was first seen with: one first seen without `extra.resource` stays bound to the `resource` of its payload.
+  A resource server that sells one thing on many resources (a lot of calls, say) MAY name it the same on each; a
+  client MAY then show a payment that waits for its block on another of them, and pays nothing more.
 
 The `payload` of the `PaymentPayload`:
 

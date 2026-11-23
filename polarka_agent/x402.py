@@ -317,6 +317,19 @@ class Facilitator:
             named = r.get("url") if isinstance(r, dict) else None
         return mark(named) if isinstance(named, str) else None
 
+    def _bound(self, rec, payment, wanted):
+        """What a payment shown again must still buy. When the seller named what it sold as the payment was first seen
+        (extra.resource, such as a gate's lot from 0.2.8), that name, as the seller states it now; else what the
+        payload names, as before 0.2.8. A payment keeps the binding it was made with: one made before its seller began
+        to name the thing passes on its own path only, and a seller that names each resource apart keeps them apart."""
+        return self._resource(payment, wanted) if rec.get("named") is True else self._resource(payment)
+
+    @staticmethod
+    def _named(wanted):
+        """True when the seller names in extra.resource what a payment buys."""
+        extra = (wanted or {}).get("extra")
+        return isinstance(extra, dict) and isinstance(extra.get("resource"), str)
+
     def _owner(self, rec, claim):
         return claim is not None and rec.get("claim") is not None and rec["claim"] == mark(claim)
 
@@ -345,7 +358,7 @@ class Facilitator:
             if rec is not None:
                 if not self._owner(rec, claim) or (rec["state"] == DELIVERED and self.clock() - rec["at"] > self.redeliver):
                     why = "transaction_already_used"
-                elif rec.get("resource") != self._resource(payment, wanted):
+                elif rec.get("resource") != self._bound(rec, payment, wanted):
                     why = "invalid_payment_requirements"
                 else:
                     why = self._matches(payment, decoded, rec["wanted"])[1] or self._covers(rec, wanted)
@@ -401,7 +414,7 @@ class Facilitator:
                     if self._full() or not self._may_add(who, now):
                         return self._fail("settlement_failed", txid)
                     rec = {"txid": txid, "claim": mark(claim) if claim else None, "vout": vout, "need": need,
-                           "resource": self._resource(payment, wanted),
+                           "resource": self._resource(payment, wanted), "named": self._named(wanted),
                            "wanted": {k: wanted[k] for k in KEYS}, "state": WAITING, "at": int(now)}
                     self._keep(rec)                     # kept before the node has it: never sold twice
                     made = True
@@ -416,7 +429,7 @@ class Facilitator:
                 return self._fail("transaction_already_used", txid)
             # shown again: it is held to what was asked when it was made, not to today's price
             if (self._matches(payment, decoded, rec["wanted"])[1] is not None or self._covers(rec, wanted)
-                    or rec.get("resource") != self._resource(payment, wanted)):
+                    or rec.get("resource") != self._bound(rec, payment, wanted)):
                 return self._fail("invalid_payment_requirements", txid)
             if rec["state"] == DELIVERED:
                 if now - rec["at"] <= self.redeliver:
@@ -825,6 +838,7 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
     with BOOK(wallet):
         book = _book(wallet)
     held, lot = book["pending"].get(key), book["lots"].get(origin)
+    shared, borrowed = None, False
     if held is None:
         status, headers, answer = get({"X-Postage": lot["claim"]} if lot else {})
         if lot:
@@ -854,6 +868,17 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
             script_for_address(wallet.chain, offer["payTo"])
         except (KeyError, ValueError, TypeError, BadInput):
             raise Refused("X402", "the resource asks for a payment that cannot be read")
+        extra = offer.get("extra") if isinstance(offer.get("extra"), dict) else {}
+        named = extra.get("resource") if isinstance(extra.get("resource"), str) and len(extra["resource"]) <= 300 else None
+        if named is not None:
+            # The seller names what a payment buys, one thing for many paths, such as a lot of calls at a gate. A payment
+            # for it that still waits for its block is shown on this path too, and nothing more is paid (0.2.8).
+            with BOOK(wallet):
+                for k, h in _book(wallet)["pending"].items():
+                    if h.get("origin") == origin and h.get("named") == named and h.get("payTo") == offer["payTo"]:
+                        shared = k, h
+                        break
+    if held is None and shared is None:
         if not 0 < amount <= most:
             raise Refused("X402_TOO_MUCH", "the resource asks %s NORTH, more than the %s allowed for it" % (north(amount), north(most)))
         made = wallet.pay([(offer["payTo"], amount)], "x402 " + url[:150], hand=False)
@@ -866,11 +891,16 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
         if isinstance(ext, dict) and len(json.dumps(ext)) <= 16384:
             payment["extensions"] = ext                 # echoed, as x402 asks of a buyer (the bazaar catalogs from it)
         held = {"header": b64json(payment), "txid": made["id"], "amount": amount, "claim": claim, "made": int(clock())}
+        if named is not None:
+            held.update(origin=origin, named=named, payTo=offer["payTo"])
         with BOOK(wallet):                          # kept before the seller sees it: one payment for one resource
             book = _book(wallet)
             book["pending"][key] = held
             _keep_book(wallet, book)
         again = False
+    elif held is None:
+        key, held = shared                          # that payment's place in the book is the one settled below
+        again = borrowed = True
     else:
         again = True
     start = clock()
@@ -895,7 +925,14 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
         book = _book(wallet)
         paid = bool(settled and settled.get("success"))
         final = paid or status == 400 or (status == 402 and (settled is None or settled.get("errorReason") not in AGAIN + (AWAITING,)))
-        if final:                                   # settled, or refused for good; anything else is asked again later
+        if final and borrowed and not paid:
+            # the seller did not take here a payment made at another of its urls: it stays for its own url, which may
+            # still take it, and is not shown elsewhere again; this url is paid apart when it is asked for again
+            h = book["pending"].get(key)
+            if h is not None:
+                for k in ("origin", "named", "payTo"):
+                    h.pop(k, None)
+        elif final:                                 # settled, or refused for good; anything else is asked again later
             book["pending"].pop(key, None)
         left = calls_left(headers)
         if paid and left:                           # the lot is paid whatever the service behind the gate answered
@@ -908,7 +945,10 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
                 book["lots"][origin] = new
         _keep_book(wallet, book)
     got = {"status": status, "paid": north(held["amount"]), "txid": held["txid"], "settlement": settled, "body": answer}
-    if again:
+    if final and borrowed and not paid:
+        got["note"] = ("the seller did not take here the payment that waits for another of its urls; it is kept for that "
+                       "url, and this one is paid apart when it is asked for again")
+    elif again:
         got["note"] = "the payment made before was shown again; nothing more was paid"
     if calls_left(headers):
         got["calls_left"] = calls_left(headers)

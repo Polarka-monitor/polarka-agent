@@ -28,7 +28,7 @@ checked against the code in this repository and the deployment notes in `deploy/
 
 ## An agent, from no coin to a paid call
 
-1. Its owner starts the MCP server: `uvx polarka-agent@0.2.7 --dir FOLDER mcp`. With no wallet in FOLDER it makes
+1. Its owner starts the MCP server: `uvx polarka-agent@0.2.8 --dir FOLDER mcp`. With no wallet in FOLDER it makes
    one on the main chain. The recovery words are in `FOLDER/wallet.json`, readable by the owner only. Nothing is
    paid yet.
 2. The owner writes `FOLDER/limits.json` by hand, for example `{"per_payment_north": "0.1", "per_day_north": "1"}`.

@@ -15,7 +15,7 @@ HTTP transport). Four free tools: the network and the pool now (`north_network`)
 proof of a stamp (`north_stamp_verify`). It holds no wallet and asks for no account; `deploy/connector/README.md`
 says what it keeps (no caller's address). For a wallet that pays, install the package (below).
 
-**State: 0.2.7.** Any part of this package and of the services at polarka.org may change, and nothing is
+**State: 0.2.8.** Any part of this package and of the services at polarka.org may change, and nothing is
 promised.
 `docs/how-it-works.md` (also at https://polarka.org/how/) says what each part does, who holds what and who sees
 what. Faults: an issue at github.com/Polarka-monitor/polarka-agent, or @Polarka_monitor on X; if one puts coins
@@ -123,7 +123,7 @@ under `server_said_untrusted`, for the owner.
 
 ## Installing
 
-    pip install polarka-agent==0.2.7
+    pip install polarka-agent==0.2.8
 
 That gives the command `polarka-agent`, which is the same as `python3 -m polarka_agent`. The version is named so
 that a later upload to PyPI changes nothing on your machine until you name it. It needs Python 3.9 or later on Linux
@@ -131,7 +131,7 @@ or macOS and nothing besides; it does not run on Windows. Versions are built fro
 their version and uploaded by hand; 0.1.1 and 0.1.2 were built by a workflow that is no longer used. The same files
 are on the project's own server,
 
-    pip install https://polarka.org/download/polarka-agent-0.2.7/polarka_agent-0.2.7.tar.gz
+    pip install https://polarka.org/download/polarka-agent-0.2.8/polarka_agent-0.2.8.tar.gz
 
 and can be compared with `https://polarka.org/download/SHA256SUMS` first. Versions before 0.1.3 carry a
 faucet with the faults that `docs/faucet-review-0.1.2.md` names.
@@ -163,7 +163,7 @@ the 12 or 24 words once; `--words-file` brings a wallet back.
 A stamp writes `POLARKA\x01` and a SHA-256 into an output that carries data. The chain is young and its hash
 rate is small: a stamp shows an order of events, it is not proof for a court.
 
-For an agent: start `python3 -m polarka_agent --dir FOLDER mcp` (or `uvx polarka-agent@0.2.7 mcp`) as an MCP
+For an agent: start `python3 -m polarka_agent --dir FOLDER mcp` (or `uvx polarka-agent@0.2.8 mcp`) as an MCP
 server over standard input and output. Without a wallet in the folder it makes one on main, which pays
 nothing until its owner writes `limits.json`; the recovery words are in `wallet.json` there. Its tools are
 `north_balance`, `north_address`, `north_received`, `north_wait`, `north_pay`, `north_stamp`, `north_payments`,
@@ -253,7 +253,8 @@ The seller gives the payment to the network itself and takes it as paid when it 
 (`--confirmations`, one by default): a payment that only waits in the mempool can still be replaced, and
 TrueNorth has full replace-by-fee. While the block is not there the seller answers `202` with
 `awaiting_confirmation`, and the buyer shows the same payment again. One payment buys one thing once, a copy
-of a payment seen in the mempool buys nothing, and a payment counts only for the resource it was made for.
+of a payment seen in the mempool buys nothing, and a payment counts only for what it was made for (at a gate of
+postage, one lot of calls, on any path of the gate).
 
     python3 -m polarka_agent x402-facilitator --chain main --rpc-url http://127.0.0.1:9554 \
         --rpc-cookie /path/to/.cookie --listen 127.0.0.1:9570

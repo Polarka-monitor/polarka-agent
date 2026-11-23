@@ -226,6 +226,19 @@ these with a second look):
   later goes on; nothing is paid twice. No payment, limit or check was changed. Tests: `tests/test_call_time.py`
   and one more in `tests/test_faucet.py`.
 
+- 0.2.8, found in use with an agent on OpenClaw, and a second case by reading the code: while the payment for a lot
+  of postage waited for its block, a call to another path of the same gate paid for a second lot (two stamps of two
+  files, 66 seconds apart, bought two lots), and a letter to a second inbox showed there the payment that waited for
+  the first; the facilitator refused it, as it bound a payment to the path it was first shown on, and the wallet
+  dropped that payment from its book, claim and all. Now a gate names in its offer what a payment buys there
+  (`extra.resource`, the gate's lot, the same on every path; `postage.py`, `x402_wanted`); the facilitator binds a
+  payment to that name when the seller named one as the payment was first seen, and a payment keeps the binding it
+  was made with (`x402.py`, `_bound`: one made before keeps to its own path, and a seller that names each resource
+  apart keeps them apart); and north_fetch shows a payment that waits for its block on any url of the same origin
+  that names the same thing for the same payee, and pays nothing more. Where the seller does not take it, the
+  payment stays for its own url and the other url is paid apart. No price or limit was changed, and of the checks
+  only the binding above. Tests: five in `tests/test_x402.py`.
+
 Review 9 read the fixes of review 8 and found them sound; review 10 found most of the fixes of the human review
 correct, and its reviewer read the fixes of its own findings again; review 11c and review 12 read the fixes of the
 looks before them. Nobody but their author has read the fixes of review 12, of the human review of 23 November, and the waits of 0.2.7. The facilitator for sellers from outside (item 2 above) opened with 0.2.3.

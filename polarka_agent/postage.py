@@ -313,7 +313,13 @@ class Gate:
                 asked = None
             if asked in self.offered:
                 price = asked
-        return requirements(self.x402.network, price, self.state["x402_address"], confirmations=self.x402.needed(price))
+        wanted = requirements(self.x402.network, price, self.state["x402_address"], confirmations=self.x402.needed(price))
+        # What a payment buys here is a lot of calls of this gate, whatever path it comes on. Named so, the facilitator
+        # binds the payment to the lot and not to a path, and a buyer may show it on another path of the gate while it
+        # waits for its block (0.2.8: two stamps of two files bought two lots, and a letter to a second inbox was
+        # refused and its writer's claim to the lot let go).
+        wanted.setdefault("extra", {})["resource"] = "lot of postage at " + self.state["x402_address"]
+        return wanted
 
     def _offer(self, path):
         for o in self.offers:

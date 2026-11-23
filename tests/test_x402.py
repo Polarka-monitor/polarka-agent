@@ -334,6 +334,148 @@ class X402Deep(X402OnRegtest):
         me = mail.my_inbox(self.buyer)["inbox"]
         self.assertEqual([(x["from"], x["text"]) for x in got["letters"]], [(me, "first letter"), (me, "second")])
 
+    def test_two_paths_of_one_gate_while_its_lot_waits_for_a_block(self):
+        """0.2.8: a call to another path of the same gate, while the payment for a lot there waits for its block,
+        pays nothing more and loses nothing. On 23 November an agent stamped two files 66 seconds apart and bought
+        two lots, the first one's claim waiting under the first url only."""
+        class Up(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                said = self.path.encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(said)))
+                self.end_headers()
+                self.wfile.write(said)
+        up = self.start(ThreadingHTTPServer(("127.0.0.1", 0), Up))
+        gate = postage.Gate(self.make("gate-two-paths"), PRICE, 3, x402=self.patient)
+        base = self.start(ThreadingHTTPServer(("127.0.0.1", 0), postage.make_handler(gate, up.split("//")[1], False)))
+        a, b = base + "/v1/unit/a", base + "/v1/unit/b"
+        made = len(self.buyer.payments())
+        self.assertEqual(x402.fetch(a, self.buyer, units("1"), network=self.network, wait=0)["status"], 202)
+        waiting = x402.fetch(b, self.buyer, units("1"), network=self.network, wait=0)
+        self.assertEqual((waiting["status"], waiting.get("pending")), (202, True))
+        self.assertEqual(len(self.buyer.payments()), made + 1)                  # nothing more paid
+        self.node.mine(1, SINK)
+        got = x402.fetch(b, self.buyer, units("1"), network=self.network, wait=0)
+        self.assertEqual((got["status"], got["body"]), (200, b"/v1/unit/b"))
+        got = x402.fetch(a, self.buyer, units("1"), network=self.network, wait=0)
+        self.assertEqual((got["status"], got["body"]), (200, b"/v1/unit/a"))
+        self.assertEqual(len(self.buyer.payments()), made + 1)
+        self.assertEqual([k for k in self.book()["pending"] if k.startswith(base)], [])     # nothing left waiting at this gate
+
+    def test_a_payment_keeps_the_binding_it_was_made_with(self):
+        """0.2.8: the facilitator binds a payment to what the seller named it for (extra.resource) when the seller
+        named something, else, as before, to the resource of the payload. A seller that names each resource apart
+        keeps them apart; a payment made before its seller began to name the thing still passes on its own path."""
+        import copy
+        pay_to = self.seller.account.address(0, 9)
+
+        def wanted(name=None):
+            w = x402.requirements(self.network, PRICE, pay_to, confirmations=1)
+            if name is not None:
+                w["extra"]["resource"] = name
+            return w
+
+        def payment(w, path):
+            made = self.buyer.pay([(pay_to, PRICE)], "x402 test of binding", hand=False)
+            return {"x402Version": 2, "resource": {"url": path}, "accepted": copy.deepcopy(w),
+                    "payload": {"transaction": made["raw"], "claim": os.urandom(16).hex()}}
+
+        # named apart: a payment for "article 1" does not buy "article 2"
+        p = payment(wanted("article 1"), "/a1")
+        self.assertEqual(self.patient.settle(p, wanted("article 1"))["errorReason"], x402.AWAITING)
+        self.assertEqual(self.patient.settle(p, wanted("article 2"))["errorReason"], "invalid_payment_requirements")
+        self.assertEqual(self.patient.settle(p, wanted("article 1"))["errorReason"], x402.AWAITING)
+        # made before the seller named it: on its own path it still passes, and nowhere else
+        q = payment(wanted(), "/own")
+        self.assertEqual(self.patient.settle(q, wanted())["errorReason"], x402.AWAITING)
+        self.assertEqual(self.patient.settle(q, wanted("lot"))["errorReason"], x402.AWAITING)
+        moved = dict(q, resource={"url": "/elsewhere"})
+        self.assertEqual(self.patient.settle(moved, wanted("lot"))["errorReason"], "invalid_payment_requirements")
+        self.node.mine(1, SINK)
+        self.assertTrue(self.patient.settle(p, wanted("article 1"))["success"])
+        self.assertTrue(self.patient.settle(q, wanted("lot"))["success"])
+
+    def test_a_payment_refused_on_another_path_stays_for_its_own(self):
+        """0.2.8: a seller names one thing on two paths, but its facilitator binds a payment to its path, as one from
+        before 0.2.8 does. Shown on the second path the payment is refused there and stays for the first, which takes
+        it once it is in a block; the second path is then paid apart."""
+        class PerPath(x402.Facilitator):
+            @staticmethod
+            def _resource(payment, wanted=None):
+                return x402.Facilitator._resource(payment)
+        class Up(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"up")
+        up = self.start(ThreadingHTTPServer(("127.0.0.1", 0), Up))
+        old = PerPath(self.rpc, "regtest", os.path.join(self.tmp, "used-per-path.jsonl"), confirmations=1)
+        gate = postage.Gate(self.make("gate-per-path"), PRICE, 3, x402=old)
+        base = self.start(ThreadingHTTPServer(("127.0.0.1", 0), postage.make_handler(gate, up.split("//")[1], False)))
+        a, b = base + "/v1/unit/a", base + "/v1/unit/b"
+        made = len(self.buyer.payments())
+        first = x402.fetch(a, self.buyer, units("1"), network=self.network, wait=0)
+        self.assertEqual(first["status"], 202)
+        refused = x402.fetch(b, self.buyer, units("1"), network=self.network, wait=0)
+        self.assertEqual((refused["status"], refused["settlement"]["errorReason"]), (402, "invalid_payment_requirements"))
+        self.assertIn("paid apart", refused["note"])
+        self.assertEqual(len(self.buyer.payments()), made + 1)                  # the one at a, nothing more
+        kept = self.book()["pending"][a]
+        self.assertEqual((kept["txid"], "named" in kept), (first["txid"], False))   # kept for its own url, not shared
+        apart = x402.fetch(b, self.buyer, units("1"), network=self.network, wait=0)  # asked again: b is paid apart
+        self.assertEqual((apart["status"], len(self.buyer.payments())), (202, made + 2))
+        self.node.mine(1, SINK)
+        got = x402.fetch(a, self.buyer, units("1"), network=self.network, wait=0)
+        self.assertEqual((got["settlement"]["success"], got["txid"]), (True, first["txid"]))
+        got = x402.fetch(b, self.buyer, units("1"), network=self.network, wait=0)
+        self.assertEqual((got["settlement"]["success"], got["txid"]), (True, apart["txid"]))
+        self.assertEqual([k for k in self.book()["pending"] if k.startswith(base)], [])
+        self.assertEqual(len(self.buyer.payments()), made + 2)
+
+    def test_a_gate_names_its_lot_the_same_on_every_path(self):
+        gate = postage.Gate(self.make("gate-named"), PRICE, 3, x402=self.patient)
+        base = self.start(ThreadingHTTPServer(("127.0.0.1", 0), postage.make_handler(gate, "127.0.0.1:1", False)))
+        names = {self.offer(base + p)[1]["extra"]["resource"] for p in ("/v1/unit/a", "/v1/stamp/b", "/v1/mail/c")}
+        self.assertEqual(names, {"lot of postage at " + gate.state["x402_address"]})
+
+    def test_letters_to_two_inboxes_while_the_lot_waits_for_a_block(self):
+        """0.2.8: the second letter, to another inbox, while the lot's payment waits for its block, pays nothing
+        more; both letters arrive once the payment is in a block."""
+        from polarka_agent import mail
+        office = mail.PostOffice(os.path.join(self.tmp, "office-two"))
+        paid, free = mail.servers(office, "127.0.0.1:0", "127.0.0.1:0", per_minute=600)
+        free_url = self.start(free)
+        office.origin = mail.origin_of(free_url)
+        self.start(paid)
+        gate = postage.Gate(self.make("gate-mail-two"), PRICE, 3, x402=self.patient)
+        front = self.start(ThreadingHTTPServer(("127.0.0.1", 0), postage.make_handler(
+            gate, "127.0.0.1:1", False, [("/v1/mail", "127.0.0.1:%d" % paid.server_address[1])])))
+        one, two = self.make("reader-one"), self.make("reader-two")
+        to_one, to_two = mail.my_inbox(one)["inbox"], mail.my_inbox(two)["inbox"]
+        made = len(self.buyer.payments())
+        first = mail.send(self.buyer, to_one, "to the first", units("1"), front, wait=0, network=self.network)
+        self.assertEqual((first["sent"], first["pending"]), (False, True))
+        second = mail.send(self.buyer, to_two, "to the second", units("1"), front, wait=0, network=self.network)
+        self.assertEqual((second["sent"], second.get("pending")), (False, True))
+        self.assertEqual(len(self.buyer.payments()), made + 1)
+        self.node.mine(1, SINK)
+        self.assertTrue(mail.send(self.buyer, to_two, "to the second", units("1"), front, wait=0, network=self.network)["sent"])
+        self.assertTrue(mail.send(self.buyer, to_one, "to the first", units("1"), front, wait=0, network=self.network)["sent"])
+        self.assertEqual(len(self.buyer.payments()), made + 1)
+        self.assertEqual([x["text"] for x in mail.fetch_letters(one, free_url)["letters"]], ["to the first"])
+        self.assertEqual([x["text"] for x in mail.fetch_letters(two, free_url)["letters"]], ["to the second"])
+
     def test_what_is_paid_for_through_the_gate_can_be_found(self):
         from polarka_agent import bazaar
 
