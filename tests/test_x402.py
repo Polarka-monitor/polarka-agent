@@ -445,6 +445,9 @@ class X402Deep(X402OnRegtest):
                          [x402.AWAITING, "invalid_payment_requirements"])
         self.node.mine(1, SINK)
         self.assertTrue(fac.settle(r, wanted())["success"])
+        # delivered without a name: the first name it is shown with binds it, then it is given again (R-M1)
+        self.assertTrue(fac.settle(r, wanted("lot")).get("redelivered"))
+        self.assertEqual(why(r, wanted("lot 2")), "invalid_payment_requirements")
         # the binding outlives a restart, and verify wrote nothing
         again = x402.Facilitator(self.rpc, "regtest", os.path.join(self.tmp, "used-bound.jsonl"), confirmations=1)
         self.assertEqual(again.settle(q, wanted("r2"))["errorReason"], "invalid_payment_requirements")
@@ -583,6 +586,17 @@ class X402Deep(X402OnRegtest):
         kept = x402.from_b64json(self.book()["pending"][base + "/one"]["header"])
         self.assertEqual(kept["resource"]["url"], "http://seller.example/one")
 
+    def test_a_payment_kept_aside_comes_back_when_its_url_is_free(self):
+        """0.2.8 (second reading of the review, R-L5): a payment kept aside because its own url held another one takes
+        that place when it is free again, the oldest first; one whose url is not known stays aside."""
+        book = {"pending": {}, "lots": {}, "kept": [{"txid": "a", "url": "u1"}, {"txid": "b"}, {"txid": "c", "url": "u1"}]}
+        x402._unpark(book, "u2")
+        self.assertEqual(book["pending"], {})
+        x402._unpark(book, "u1")
+        self.assertEqual((book["pending"]["u1"]["txid"], [e["txid"] for e in book["kept"]]), ("a", ["b", "c"]))
+        x402._unpark(book, "u1")                                                # the place is taken again: nothing moves
+        self.assertEqual([e["txid"] for e in book["kept"]], ["b", "c"])
+
     def test_a_gate_names_its_lot_the_same_on_every_path(self):
         gate = postage.Gate(self.make("gate-named"), PRICE, 3, x402=self.patient)
         base = self.start(ThreadingHTTPServer(("127.0.0.1", 0), postage.make_handler(gate, "127.0.0.1:1", False)))
@@ -619,7 +633,8 @@ class X402Deep(X402OnRegtest):
     def test_a_letter_refused_at_a_second_inbox_keeps_the_first_ones_payment(self):
         """0.2.8 (review M3): letters to two inboxes share one payment while it waits. Where the seller's facilitator
         binds it to the path of the first inbox, the second letter is refused, and the payment stays for the first
-        letter, which it brings once it is in a block; the lot it bought then carries the second letter too."""
+        letter, which it brings once it is in a block. Sent again at once, the second letter is paid apart, and the first
+        still goes on its own payment (R-L4)."""
         self.addCleanup(self.node.mine, 1, SINK)
         from polarka_agent import mail
         office = mail.PostOffice(os.path.join(self.tmp, "office-path"))
@@ -642,10 +657,16 @@ class X402Deep(X402OnRegtest):
             mail.send(self.buyer, to_two, "to the second", units("1"), front, wait=0, network=self.network)
         self.assertEqual([h["txid"] for k, h in self.book()["pending"].items() if k.startswith(front)], waiting)
         self.assertEqual(len(self.buyer.payments()), made + 1)
+        # sent again at once, the second letter is paid apart under the shared key; the first letter, sent again,
+        # still finds its own payment first (R-L4)
+        again = mail.send(self.buyer, to_two, "to the second", units("1"), front, wait=0, network=self.network)
+        self.assertEqual((again["sent"], again["pending"], len(self.buyer.payments())), (False, True, made + 2))
+        still = mail.send(self.buyer, to_one, "to the first", units("1"), front, wait=0, network=self.network)
+        self.assertEqual((still["sent"], still["pending"], len(self.buyer.payments())), (False, True, made + 2))
         self.node.mine(1, SINK)
         self.assertTrue(mail.send(self.buyer, to_one, "to the first", units("1"), front, wait=0, network=self.network)["sent"])
         self.assertTrue(mail.send(self.buyer, to_two, "to the second", units("1"), front, wait=0, network=self.network)["sent"])
-        self.assertEqual(len(self.buyer.payments()), made + 1)                  # both on the first payment
+        self.assertEqual(len(self.buyer.payments()), made + 2)
         self.assertEqual([x["text"] for x in mail.fetch_letters(one, free_url)["letters"]], ["to the first"])
         self.assertEqual([x["text"] for x in mail.fetch_letters(two, free_url)["letters"]], ["to the second"])
 

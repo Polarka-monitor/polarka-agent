@@ -444,10 +444,10 @@ class Facilitator:
             if (self._matches(payment, decoded, rec["wanted"])[1] is not None or self._covers(rec, wanted)
                     or why is not None):
                 return self._fail("invalid_payment_requirements", txid)
-            if rec["state"] == DELIVERED:
-                if now - rec["at"] <= self.redeliver:
-                    return dict(self._ok(txid), redelivered=True)       # the same answer again, not a new sale
+            if rec["state"] == DELIVERED and now - rec["at"] > self.redeliver:
                 return self._fail("transaction_already_used", txid)
+            # bound to a name before it is given again: a record delivered without a name is bound by the first name
+            # it is shown with, like one that waits (second reading of the review of 0.2.8, R-M1)
             if bound is not None:
                 with self.lock:                     # bound to a name once: whoever comes second finds it bound
                     cur = self.known.get(txid) or rec
@@ -459,6 +459,8 @@ class Facilitator:
                     elif cur.get("resource") != bound["resource"]:
                         return self._fail("invalid_payment_requirements", txid)     # bound to another name meanwhile
                     rec = cur
+            if rec["state"] == DELIVERED:
+                return dict(self._ok(txid), redelivered=True)       # the same answer again, not a new sale
         need = max(rec.get("need", 0), self._need(wanted))
         if need:
             depth = self._depth(txid, rec["vout"], since=rec.get("at"))
@@ -776,6 +778,18 @@ def _next_lot(book, origin):
         book["lots"].pop(origin, None)
 
 
+def _unpark(book, slot):
+    """Called under BOOK when the place `slot` of the book is free: the oldest payment kept aside for that url (its own
+    url held another payment when another url refused it) takes the place (review of 0.2.8, R-L5)."""
+    kept = book.get("kept")
+    if not isinstance(kept, list) or slot in book["pending"]:
+        return
+    for i, e in enumerate(kept):
+        if isinstance(e, dict) and e.get("url") == slot:
+            book["pending"][slot] = kept.pop(i)
+            return
+
+
 def _lot_used(book, origin, claim, status, left):
     """Called under BOOK, after a call made with the lot `claim`: what the gate said of it goes to that lot, wherever
     it is now (the current one, or a spare), and to no other; another process of the same wallet may have moved on
@@ -862,12 +876,12 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
 
     with BOOK(wallet):
         book = _book(wallet)
-    held, lot = book["pending"].get(key), book["lots"].get(origin)
-    if not isinstance(held, dict):
-        held = None
-        if key != url and isinstance(book["pending"].get(url), dict):
-            # a payment kept for this url after another url refused it, while it waited under a shared key (0.2.8, M3)
-            key, held = url, book["pending"][url]
+    lot = book["lots"].get(origin)
+    if key != url and isinstance(book["pending"].get(url), dict):
+        # a payment kept for this url after another url refused it while it waited under a shared key comes before
+        # what the key holds now (review of 0.2.8, M3, R-L4)
+        key = url
+    held = book["pending"][key] if isinstance(book["pending"].get(key), dict) else None
     shared, borrowed = None, False
     if held is None:
         status, headers, answer = get({"X-Postage": lot["claim"]} if lot else {})
@@ -977,17 +991,24 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
         # meanwhile (review of 0.2.8, M4).
         cur = book["pending"].get(key)
         mine = isinstance(cur, dict) and cur.get("txid") == held["txid"]
-        away = final and not paid and (borrowed or held.get("url", url) != url)
+        own = held.get("url")
+        away = final and not paid and (borrowed or (own is not None and own != url) or (own is None and key != url))
         if final and mine:                          # settled, or refused for good; anything else is asked again later
             entry = book["pending"].pop(key)
             if away:
                 # refused for good at a url other than its own (another url of the seller, or a key shared by letters
                 # to several inboxes): kept for its own url, which may still take it, and shown nowhere else; this url
-                # is paid apart when it is asked for again (review of 0.2.8, M3)
+                # is paid apart when it is asked for again (review of 0.2.8, M3). Where its own url holds another
+                # payment, or is not known (written before 0.2.8 under a shared key), it is kept aside in the book and
+                # comes back when that url is free (R-L1, R-L5).
                 for k in ("origin", "named", "payTo"):
                     entry.pop(k, None)
-                own = entry.get("url", key)
-                book["pending"][own if own not in book["pending"] else "%s#%s" % (own, entry["txid"][:16])] = entry
+                if own is not None and own not in book["pending"]:
+                    book["pending"][own] = entry
+                else:
+                    book.setdefault("kept", []).append(entry)
+            else:
+                _unpark(book, key)
         left = calls_left(headers)
         if paid and left:                           # the lot is paid whatever the service behind the gate answered
             new, had = {"claim": held["claim"], "left": left}, book["lots"].get(origin)
@@ -1000,6 +1021,7 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
         _keep_book(wallet, book)
     got = {"status": status, "paid": north(held["amount"]), "txid": held["txid"], "settlement": settled, "body": answer}
     if away and mine:
+        got["kept"] = True
         got["note"] = ("the seller did not take here the payment that waits for another of its urls; it is kept for that "
                        "url, and this one is paid apart when it is asked for again")
     elif again:
