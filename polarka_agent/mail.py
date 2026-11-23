@@ -666,9 +666,13 @@ def send(wallet, to, text, most, office=None, timeout=30, wait=600, network=None
                 "then": "the postage is paid and waits for a block; send the letter again in a few minutes, nothing is paid twice"}
     if bought.get("status") == 402 and bought.get("kept"):
         # (second reading of the review of 0.2.8, N-e)
-        raise MailError("POSTAGE", "the postage that waits was bought for a letter to another inbox, and the gate did not "
-                                   "take it for this one; it is kept for that letter, which goes with it once its payment "
-                                   "is in a block; send this one again and its postage is paid apart")
+        raise MailError("POSTAGE", "the postage that waits was bought on another path of the gate (another letter, or a "
+                                   "stamp), and the gate did not take it for this letter; it is kept for what it was bought "
+                                   "for, which goes with it once its payment is in a block; send this letter again and its "
+                                   "postage is paid apart")
+    if bought.get("status") == 402 and bought.get("put_aside"):
+        raise MailError("POSTAGE", "the postage that waited, paid before 0.2.8, was not taken for this letter and is put "
+                                   "aside in the wallet's book; send this letter again and its postage is paid apart")
     if bought.get("status") == 402:
         raise MailError("POSTAGE", "the gate sold no postage for this letter")
     return _posted(bought.get("status"), _json(bought.get("body")), bought.get("calls_left"), to, secret)

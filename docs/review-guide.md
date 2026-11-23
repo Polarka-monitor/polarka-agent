@@ -242,19 +242,21 @@ these with a second look):
   medium ones (records from before 0.2.8 refused, a buyer's own first showing without a name, letters still losing
   a payment where a seller binds to the path, a late answer taking a newer payment from the book, the order of the
   deploy) and three of the low ones (`most`, the resource of the url, the tests) are mended. The same reviewer read
-  the fixes again: of what it found then, a delivered record that was never named (R-M1), a venv the deploy kept
-  from an earlier build (R-M2), a payment that cannot go back under its own url (R-L1, R-L5), the order of the url
-  and a shared key (R-L4) and two checks of the deploy are mended too. Still so: two calls at the same moment buy two
+  the fixes again, twice: of what it found then, a delivered record that was never named (R-M1), a venv the deploy
+  kept from an earlier build (R-M2), a payment that cannot go back under its own url (R-L1, R-L5, R3-L1, R3-L2: one
+  written before 0.2.8 goes back under the url its seller named in the offer, when that is of the same origin, and is
+  put aside, its claim kept, when it is not), the order of the url and a shared key (R-L4) and the checks of the
+  deploy are mended too; the third reading found nothing above low. Still so: two calls at the same moment buy two
   lots, as before; under one key (one url, or letters to one post office) the later payment then takes the place of
   the earlier in the book, whose claim is lost, as since 0.2.4 (L3, R-L2); a letter shown with the postage of another
   letter carries that letter's resource, so a seller that checks the payload's resource refuses it and it is paid
   apart (R-L3; our gate puts the resource right itself); where a facilitator ignores `extra.resource` and a payment
   is first seen at another url, its own url may refuse it (L4). A gate of 0.2.8 needs its facilitator at 0.2.8
-  first, and taking the gate back refuses what waits under it. Tests: eleven in `tests/test_x402.py`.
+  first, and taking the gate back refuses what waits under it. Tests: thirteen in `tests/test_x402.py`.
 
 Review 9 read the fixes of review 8 and found them sound; review 10 found most of the fixes of the human review
 correct, and its reviewer read the fixes of its own findings again; review 11c and review 12 read the fixes of the
-looks before them. Nobody but their author has read the fixes of review 12, of the human review of 23 November, the waits of 0.2.7 and the fixes of the second reading of the review of 0.2.8. The facilitator for sellers from outside (item 2 above) opened with 0.2.3.
+looks before them. Nobody but their author has read the fixes of review 12, of the human review of 23 November, the waits of 0.2.7 and the fixes of the third reading of the review of 0.2.8. The facilitator for sellers from outside (item 2 above) opened with 0.2.3.
 
 Their reports can be had on request. Low findings that are still open are listed in them. Earlier parts of the
 project (wallet, pool) went through four further AI reviews. No person outside has read the code since the

@@ -586,6 +586,63 @@ class X402Deep(X402OnRegtest):
         kept = x402.from_b64json(self.book()["pending"][base + "/one"]["header"])
         self.assertEqual(kept["resource"]["url"], "http://seller.example/one")
 
+    def old_entries(self, prefix, keep_marks=False):
+        """Makes the buyer's waiting payments under `prefix` look as a client before 0.2.8 wrote them."""
+        with x402.BOOK(self.buyer):
+            book = x402._book(self.buyer)
+            for k, h in book["pending"].items():
+                if k.startswith(prefix):
+                    for f in ("url",) if keep_marks else ("url", "origin", "named", "payTo"):
+                        h.pop(f, None)
+            x402._keep_book(self.buyer, book)
+
+    def test_a_letters_payment_from_before_0_2_8_goes_back_to_its_inbox(self):
+        """0.2.8 (third reading of the review, R3-L1): a letter's payment written by an older client (no url in the
+        book), refused for good at a second inbox, goes back under the url its seller named in the offer, and the
+        first letter goes on it once it is in a block."""
+        self.addCleanup(self.node.mine, 1, SINK)
+        from polarka_agent import mail
+        office = mail.PostOffice(os.path.join(self.tmp, "office-old"))
+        paid, free = mail.servers(office, "127.0.0.1:0", "127.0.0.1:0", per_minute=600)
+        free_url = self.start(free)
+        office.origin = mail.origin_of(free_url)
+        self.start(paid)
+        old = PathOnly(self.rpc, "regtest", os.path.join(self.tmp, "used-path-old.jsonl"), confirmations=1)
+        gate = postage.Gate(self.make("gate-mail-old"), PRICE, 3, x402=old)
+        front = self.start(ThreadingHTTPServer(("127.0.0.1", 0), postage.make_handler(
+            gate, "127.0.0.1:1", False, [("/v1/mail", "127.0.0.1:%d" % paid.server_address[1])])))
+        one, two = self.make("reader-old-one"), self.make("reader-old-two")
+        to_one, to_two = mail.my_inbox(one)["inbox"], mail.my_inbox(two)["inbox"]
+        made = len(self.buyer.payments())
+        first = mail.send(self.buyer, to_one, "to the first", units("1"), front, wait=0, network=self.network)
+        self.assertEqual((first["sent"], first["pending"]), (False, True))
+        self.old_entries(front)
+        with self.assertRaises(mail.MailError) as caught:
+            mail.send(self.buyer, to_two, "to the second", units("1"), front, wait=0, network=self.network)
+        self.assertIn("kept for what it was bought for", str(caught.exception))
+        self.assertEqual([e for e in self.book().get("kept", []) if e.get("url", "").startswith(front)], [])
+        self.node.mine(1, SINK)
+        self.assertTrue(mail.send(self.buyer, to_one, "to the first", units("1"), front, wait=0, network=self.network)["sent"])
+        self.assertEqual(len(self.buyer.payments()), made + 1)
+        self.assertEqual([x["text"] for x in mail.fetch_letters(one, free_url)["letters"]], ["to the first"])
+
+    def test_a_lender_without_a_url_goes_back_under_its_own_key(self):
+        """0.2.8 (third reading of the review, R3-L2): a waiting payment with its marks but no url, refused where it was
+        borrowed, goes back under its own key, and its own url goes on it once it is in a block."""
+        self.addCleanup(self.node.mine, 1, SINK)
+        old = PathOnly(self.rpc, "regtest", os.path.join(self.tmp, "used-per-path-old.jsonl"), confirmations=1)
+        gate, base = self.gate_at("gate-lender-old", facilitator=old)
+        a, b = base + "/v1/unit/a", base + "/v1/unit/b"
+        made = len(self.buyer.payments())
+        first = x402.fetch(a, self.buyer, units("1"), network=self.network, wait=0)
+        self.old_entries(base, keep_marks=True)
+        refused = x402.fetch(b, self.buyer, units("1"), network=self.network, wait=0)
+        self.assertEqual((refused["status"], refused.get("kept")), (402, True))
+        self.assertEqual(self.book()["pending"][a]["txid"], first["txid"])
+        self.node.mine(1, SINK)
+        got = x402.fetch(a, self.buyer, units("1"), network=self.network, wait=0)
+        self.assertEqual((got["settlement"]["success"], got["txid"], len(self.buyer.payments())), (True, first["txid"], made + 1))
+
     def test_a_payment_kept_aside_comes_back_when_its_url_is_free(self):
         """0.2.8 (second reading of the review, R-L5): a payment kept aside because its own url held another one takes
         that place when it is free again, the oldest first; one whose url is not known stays aside."""

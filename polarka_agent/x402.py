@@ -778,6 +778,20 @@ def _next_lot(book, origin):
         book["lots"].pop(origin, None)
 
 
+def _own_url(held, url, origin):
+    """The url a payment written before 0.2.8 (no "url" in the book) was made for: the resource its seller named in the
+    offer, as the payment carries it, when it is of this origin (third reading of the review of 0.2.8, R3-L1)."""
+    try:
+        r = from_b64json(held["header"]).get("resource")
+        u = urllib.parse.urljoin(url, r["url"]) if isinstance(r, dict) and isinstance(r.get("url"), str) else None
+    except Exception:
+        return None
+    if not u:
+        return None
+    p = urllib.parse.urlsplit(u)
+    return u if "%s://%s" % (p.scheme, p.netloc) == origin else None
+
+
 def _unpark(book, slot):
     """Called under BOOK when the place `slot` of the book is free: the oldest payment kept aside for that url (its own
     url held another payment when another url refused it) takes the place (review of 0.2.8, R-L5)."""
@@ -992,6 +1006,10 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
         cur = book["pending"].get(key)
         mine = isinstance(cur, dict) and cur.get("txid") == held["txid"]
         own = held.get("url")
+        if own is None and borrowed:
+            own = key                               # a lender's key is its own place (R3-L2)
+        elif own is None and key != url:
+            own = _own_url(held, url, origin)       # written before 0.2.8 under a shared key (R3-L1)
         away = final and not paid and (borrowed or (own is not None and own != url) or (own is None and key != url))
         if final and mine:                          # settled, or refused for good; anything else is asked again later
             entry = book["pending"].pop(key)
@@ -1003,6 +1021,8 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
                 # comes back when that url is free (R-L1, R-L5).
                 for k in ("origin", "named", "payTo"):
                     entry.pop(k, None)
+                if own is not None:
+                    entry["url"] = own
                 if own is not None and own not in book["pending"]:
                     book["pending"][own] = entry
                 else:
@@ -1020,10 +1040,15 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
                 book["lots"][origin] = new
         _keep_book(wallet, book)
     got = {"status": status, "paid": north(held["amount"]), "txid": held["txid"], "settlement": settled, "body": answer}
-    if away and mine:
+    if away and mine and own is not None:
         got["kept"] = True
         got["note"] = ("the seller did not take here the payment that waits for another of its urls; it is kept for that "
                        "url, and this one is paid apart when it is asked for again")
+    elif away and mine:
+        got["put_aside"] = True
+        got["note"] = ("the seller did not take here a payment written before 0.2.8 that waits under a key shared with "
+                       "other urls; it is put aside in the wallet's book, with its claim, and is not shown again by itself; "
+                       "this url is paid apart when it is asked for again")
     elif again:
         got["note"] = "the payment made before was shown again; nothing more was paid"
     if calls_left(headers):
