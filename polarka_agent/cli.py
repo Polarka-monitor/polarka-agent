@@ -243,6 +243,17 @@ def run(argv=None, out=sys.stdout):
     c.add_argument("file")
     c.add_argument("--rpc-url")
     c.add_argument("--rpc-cookie")
+    c = sub.add_parser("connector-serve", help="be a remote MCP server (Streamable HTTP) with free tools about NORTH, for "
+                                               "agents in chat applications; --dir keeps its counts; no wallet")
+    c.add_argument("--listen", default="127.0.0.1:8696", help="a loopback address with a port, behind a web server")
+    c.add_argument("--stamps", default="http://127.0.0.1:8681", help="this machine's stamp service (stamps-serve)")
+    c.add_argument("--pool", default="http://127.0.0.1:8690", help="this machine's pool (pool-serve), for north_network")
+    c.add_argument("--rpc-url", help="the node asked by north_stamp_verify (getrawtransaction and getblockheader only)")
+    c.add_argument("--rpc-cookie", help="the file with the node user's name and password")
+    c.add_argument("--free-per-day", type=int, default=500, help="new SHA-256s stamped free in a day, for all callers together")
+    c.add_argument("--free-per-place", type=int, default=100, help="of them for one place (an IPv4 address or an IPv6 /48)")
+    c.add_argument("--per-minute", type=int, default=300, help="requests a minute from one place (1 to 600)")
+    c.add_argument("--trust-proxy", action="store_true", help="take the caller's address from X-Forwarded-For")
     c = sub.add_parser("faucet-serve", help="be a faucet: hand out a little from this wallet, within its limits.json")
     c.add_argument("--amount", required=True, help="NORTH given to one address")
     c.add_argument("--listen", default="127.0.0.1:8660")
@@ -396,6 +407,23 @@ def run(argv=None, out=sys.stdout):
                 return show(dict(done, valid=True, digest=proof.get("digest"), block_height=proof.get("block_height")))
             except ValueError as e:
                 return show({"valid": False, "error": str(e)}, 2)
+        if a.cmd == "connector-serve":
+            from .connector import Connector, serve as connector_serve
+            from .walletd import Node as RpcNode, loopback
+            try:
+                loopback(a.listen)
+            except ValueError:
+                raise Refused("INPUT", "--listen is a loopback address with a port, for example 127.0.0.1:8696")
+            if not 1 <= a.per_minute <= 600 or not 0 <= a.free_per_place <= a.free_per_day <= 100000:
+                raise Refused("INPUT", "--per-minute is 1 to 600; 0 <= --free-per-place <= --free-per-day <= 100000")
+            if bool(a.rpc_url) != bool(a.rpc_cookie):
+                raise Refused("INPUT", "--rpc-url and --rpc-cookie go together")
+            for url in (a.stamps, a.pool):
+                if not url.startswith("http://127.0.0.1:") and not url.startswith("http://[::1]:"):
+                    raise Refused("INPUT", "--stamps and --pool are services of this machine: http://127.0.0.1:PORT")
+            node = RpcNode(a.rpc_url, os.path.expanduser(a.rpc_cookie)) if a.rpc_url else None
+            app = Connector(folder, a.stamps, a.pool, node, a.free_per_day, a.free_per_place)
+            return connector_serve(app, a.listen, a.trust_proxy, a.per_minute)
         if a.cmd == "x402-facilitator":
             from .walletd import Node as RpcNode, loopback
             from .x402 import NETWORKS, Facilitator, facilitator_server

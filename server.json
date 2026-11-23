@@ -2,7 +2,7 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "org.polarka/polarka-agent",
   "title": "Polarka Agent: a NORTH wallet for agents",
-  "description": "Pays x402 in NORTH. Owner limits bind agents with shell access only through a signing service.",
+  "description": "Pays x402 in NORTH. Free remote tools: network, guide, stamps. Keys can sit apart from the agent.",
   "websiteUrl": "https://polarka.org",
   "repository": {
     "url": "https://github.com/Polarka-monitor/polarka-agent",
@@ -38,6 +38,12 @@
           "isRequired": false
         }
       ]
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://polarka.org/mcp"
     }
   ]
 }

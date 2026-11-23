@@ -73,6 +73,7 @@ MOST_WORKERS = 4            # names authorized on one connection
 QUIET = 10                  # seconds a connection has to subscribe and authorize
 IDLE = 3600                 # seconds an authorized connection may go without a share the pool takes
 STALE_SLOT = 300            # when all are taken, one that went this long without a share makes room for a newcomer
+WAIT_FIRST = 2.0            # seconds a connection may take to authorize before a newcomer can push it out (review 11c, T3)
 CONNECTS_PER_MINUTE = 20    # new connections a minute from one place
 RETUNE_SHARES = 12          # shares the difficulty is decided on (or half as many over RETUNE_SECONDS)
 RETUNE_SECONDS = 300
@@ -230,7 +231,7 @@ class Stratum:
         self.span = span                            # (hardest k, easiest k) in place of bounds(): only for trying a miner on regtest
         self.target_seconds, self.refresh_every, self.most, self.per_place = target_seconds, refresh, most, per_place
         self.most_waiting, self.waiting_per_place = MOST_WAITING, WAITING_PER_PLACE
-        self.quiet, self.idle, self.stale_slot = quiet, idle, STALE_SLOT
+        self.quiet, self.idle, self.stale_slot, self.wait_first = quiet, idle, STALE_SLOT, WAIT_FIRST
         self.arrivals = Limiter(CONNECTS_PER_MINUTE, clock=pool.ticks, everyone=0)     # new connections of a place
         self.welcome = welcome                      # said to a miner once it is authorized; {address} is its address
         self.lock = threading.Lock()                # the newest job and the headers taken, also from the worker threads
@@ -397,8 +398,13 @@ class Stratum:
             if self.places[place] >= self.per_place or self.waiting[place] >= self.waiting_per_place:
                 return False
         if sum(self.waiting.values()) >= self.most_waiting:
+            # the one that came first goes only when it has waited longer than an honest authorization takes; else the
+            # newcomer waits its turn, so that miners coming back together after a restart do not push each other
+            # out (review 11c, T3)
             first = min((m for m in self.miners if m.waiting and not m.closed), key=lambda m: m.came, default=None)
             if first is not None:
+                if self.ticks() - first.came < self.wait_first:
+                    return False
                 self._let_go(first, "the pool is busy: a connection that did not authorize in time makes room")
         if len(self.miners) >= self.most and not self._make_room(place):
             return False
@@ -474,9 +480,17 @@ class Stratum:
             return self._answer(miner, rid, True)
         if len(miner.workers) >= MOST_WORKERS or len(name) > 200:
             return self._error(miner, rid, 24, "too many names, or too long a one, on one connection")
+        base = name.split(".", 1)[0].strip()
+
+        def may_mine():
+            if miner.closed:            # let go while it waited for a worker thread: nothing to ask (review 11c, T3)
+                raise PoolError("GONE", "the connection was let go")
+            return self._may_mine(miner.source, base)
         try:
-            address = await self._call(self._may_mine, miner.source, name.split(".", 1)[0].strip())
+            address = await self._call(may_mine)
         except PoolError as e:
+            if miner.closed:
+                return
             self._message(miner, str(e))
             return self._error(miner, rid, 24, str(e))
         if miner.closed:

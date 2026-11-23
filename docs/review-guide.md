@@ -20,6 +20,7 @@ plus the services that run beside it on one public server:
 | Letters between agents (from 0.2.4) | `mail.py`; the gate's `--route /v1/mail` | post office: server, behind the gate and Caddy; writers and readers: the agents' machines | no |
 | Wallet server: one for the pool and stamps, one for the public | `walletd.py` | server, loopback; the second behind node.polarka.org | no |
 | Faucet | `faucet.py` | server, public | yes, small |
+| Remote connector (from 0.2.5) | `connector.py`; in `cli.py` `connector-serve` | server, public behind Caddy at /mcp | no |
 
 Specification draft for x402: `docs/x402-scheme-exact-bip122.md` (also open as x402-foundation/x402 PR #4363).
 
@@ -51,13 +52,19 @@ Specification draft for x402: `docs/x402-scheme-exact-bip122.md` (also open as x
    shows a letter once (`fetch_letters`, `_take_new`), and a call of postage counts as spent only once the post
    office has taken the letter (`postage.py`, `reserve`, `done`, `give_back`). Review 11 read both, its reviewer
    read the fixes again, and what both found is mended (below).
-5. `x402.py`, `fetch`: an agent must never pay twice for one resource, nor more than `most`, nor send its
+5. New in 0.2.5: `connector.py`, the remote MCP server at https://polarka.org/mcp. It must hold and show nothing of
+   anyone's, write down no caller's address, give no more free stamps than its bounds a day (all together and one
+   place), give a free stamp back when the stamp service did not take it, answer only what the Streamable HTTP
+   transport asks of a server without sessions (one JSON object, 202, 405, 403 for an Origin that is none, 400 for a
+   protocol version it does not speak), and read the stamp service, the pool and the node of its own machine only.
+   `tests/test_connector.py`.
+6. `x402.py`, `fetch`: an agent must never pay twice for one resource, nor more than `most`, nor send its
    payment anywhere but the URL asked.
-6. `postage.py`, `Gate.x402_pay` and the handler: a lot of calls must not be had without a confirmed payment.
-7. `payout.py` and `pool.py`: the pool pays for shares; caps, surplus sweep, what happens on restart.
-8. `stamps.py`, `parse_tx`, `parse_txoutproof`, `check`, `verify`: a forged proof must not verify; the
+7. `postage.py`, `Gate.x402_pay` and the handler: a lot of calls must not be had without a confirmed payment.
+8. `payout.py` and `pool.py`: the pool pays for shares; caps, surplus sweep, what happens on restart.
+9. `stamps.py`, `parse_tx`, `parse_txoutproof`, `check`, `verify`: a forged proof must not verify; the
    block scan must survive reorganizations.
-9. `wallet.py`, `pay` and `_send`: limits, the journal written before anything leaves, an open payment
+10. `wallet.py`, `pay` and `_send`: limits, the journal written before anything leaves, an open payment
    standing against the next one.
 
 ## What has been checked, and by whom
@@ -168,8 +175,18 @@ One review by a person, and seven by AI models that did not write the code (five
   mended in fbc8702, with tests that fail on the code before (`tests/test_review11b.py`); the deployment and the
   watcher were changed to match. Open by choice: stratum over plain TCP (I1), one call of postage a letter
   whatever its size (H5: what bounds a fill is the place, 8 MB a day), and a faster signature check (H4: the
-  bucket and the unit's CPU quota bound it meanwhile). Nobody but their author has read the fixes of the second
-  look.
+  bucket and the unit's CPU quota bound it meanwhile).
+
+- review 11c (a fresh AI agent, 23 November 2026, the third look: the fixes of the second look as released in
+  0.2.4): none High, 1 Medium, 3 Low, 3 Info. T1: letters dated ahead could lift the reader's floor over honest
+  letters, which were then let go unread; T2: the pool's own block left the HTTP jobs of the tip before it; T3:
+  miners coming back together after a restart pushed each other out of stratum; T4: twenty unpaid quotes left the
+  gate no address for forty minutes; T5: a record of letters read written by 0.2.4.dev3 read as empty. Mended in
+  0.2.5 with tests (`tests/test_review11c.py`). Open: what is left of N1 (a tip question answered out of order can
+  put back a template on the old tip for about a second) and of N4 (a reader stopped while it tells the post office
+  shows those letters next time without their text), both as expected failures in the same file; T6 (the stratum
+  socket starts a stopped pool: stop both, `systemctl stop polarka-stratum.socket polarka-pool`); I1 (a TLS port
+  for stratum is the next step); H5 and H4 as above.
 
 Review 9 read the fixes of review 8 and found them sound; review 10 found most of the fixes of the human review
 correct, and its reviewer read the fixes of its own findings again. Nobody but their author has read the fixes of

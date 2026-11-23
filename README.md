@@ -6,6 +6,13 @@ A wallet for TrueNorth (NORTH) that a program can use: a command line, a Python 
 agents that speak the Model Context Protocol (MCP). The keys stay on the machine it runs on. What its
 addresses hold it asks a wallet server with the Northbound API (github.com/nova9/northbound).
 
+**Nothing to install (from 0.2.5):** an assistant in a chat application can use the remote connector at
+`https://polarka.org/mcp` (in Claude: Settings > Connectors > Add custom connector; any client of the Streamable
+HTTP transport). Four free tools: the network and the pool now (`north_network`), how to get and use NORTH
+(`north_guide`), a stamp of a SHA-256 into the chain, free within a bound a day (`north_stamp`), and the check of a
+proof of a stamp (`north_stamp_verify`). It holds no wallet and asks for no account; `deploy/connector/README.md`
+says what it keeps (no caller's address). For a wallet that pays, install the package (below).
+
 **State: 0.2.4.** Any part of this package and of the services at polarka.org may change, and nothing is
 promised.
 `docs/how-it-works.md` (also at https://polarka.org/how/) says what each part does, who holds what and who sees
@@ -213,8 +220,10 @@ machines mine, the same work is fewer NORTH, so the price in NORTH moves and the
 needs a wallet server with the mining routes of Northbound. What a NORTH takes to make is a cost, not a
 market price; NORTH has none.
 
-Postage is counted in calls. It is not a balance, it is not given back, and the gate never pays from its
-wallet, so the gate holds nobody's coins. Whoever runs a service for payment has the duties of one who does
+Postage is counted in calls. It is not a balance and it is not paid back; a call comes back only when the
+service behind the gate answers 429, 503 or 507 (it did not serve). The gate never pays from its wallet, so it
+holds nobody's coins. A place asks for three quotes a minute and holds two unpaid at a time, and the last five
+addresses of the gate's wallet are kept for places that hold none (review 11c, T4). Whoever runs a service for payment has the duties of one who does
 (saying who they are, among others); the gate is a tool and takes none of them away. Independent AI reviewers
 have read it (`docs/review-guide.md`), no person yet. Ours runs at gate.polarka.org since 20 November 2026.
 
@@ -312,9 +321,13 @@ wallet behind a signing service has one too. A letter is sealed to that key befo
 secp256k1, keys from SHA-256, HMAC-SHA256 as keystream and as tag, encrypt then MAC: the standard library
 only), names the writer's inbox and the inbox it is for, and is signed by the writer. The reader is told who
 wrote only when the signature holds, keeps a record of the letters it has read (`mail-seen.json`) and does not
-show one again, nor one written more than a week ago or dated more than a day ahead; two readers of one wallet
-at once never both show a letter as new, and letters read are shown even when telling the post office fails
-(the next read lets them go). The post office keeps sealed letters it cannot read,
+show one again, nor one written more than a week ago or dated more than an hour ahead. A letter is written down at
+its own time or the reader's clock, whichever is earlier, and the record forgets for room only letters more than a
+day old; one of those that comes again is shown with `maybe_repeat` and a warning, never dropped unseen (review 11c,
+T1). Two readers of one wallet at once never both show a letter as new, unless one reads with `--keep`, which
+writes nothing down: the next read shows the same letters as new again. Letters read are shown even when telling
+the post office fails with an error (the next read lets them go); a reader stopped in the middle of telling it
+shows them next time without their text (review 11c, N4: open). The post office keeps sealed letters it cannot read,
 until their inbox says it has them, at most seven days, and two days for an inbox that has not asked for its
 letters in that week; an inbox holds at most 500 letters and 4 MB, one place posts at most 8 MB a day, and a
 letter refused for such a limit costs no postage (the gate gives the call back: a call counts as spent only once

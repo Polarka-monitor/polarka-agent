@@ -269,7 +269,8 @@ class N4N5N6Reader(unittest.TestCase):
         saved = mail._keep_seen.__defaults__
         mail._keep_seen.__defaults__ = (3,)                 # 100 000 in the package; three here
         try:
-            real = mail.seal(self.b, mail.letter(self.alice, self.b, "pay the bearer 5 NORTH", now=time.time() - 60))
+            # since 0.2.5 the floor stays FLOOR_LAG behind the clock (review 11c, T1): a letter older than that is let go
+            real = mail.seal(self.b, mail.letter(self.alice, self.b, "pay the bearer 5 NORTH", now=time.time() - 2 * mail.FLOOR_LAG))
             self.office.post(self.b, real)
             self.assertEqual(self.read()["letters"][0]["text"], "pay the bearer 5 NORTH")
             for i in range(3):                              # three newer letters push Alice's record out ...
@@ -279,7 +280,8 @@ class N4N5N6Reader(unittest.TestCase):
             again = self.read()["letters"]
         finally:
             mail._keep_seen.__defaults__ = saved
-        self.assertEqual((again[0].get("text"), again[0].get("repeat")), (None, True))
+        # shown, with its text and a warning, since 0.2.5: a letter is never let go without a word (review 11c, T1)
+        self.assertEqual((again[0].get("text"), again[0].get("maybe_repeat")), ("pay the bearer 5 NORTH", True))
         with open(os.path.join(self.bob.folder, mail.SEEN_FILE)) as f:
             held = json.load(f)
         self.assertEqual(len(held["seen"]), 3)
@@ -315,6 +317,7 @@ class N7RoomInStratum(unittest.TestCase):
     def test_silent_connections_of_many_places_make_room_for_newcomers(self):
         held = [come(self.s, self.now, "198.18.%d.%d" % (i // 200, i % 200 + 1)) for i in range(stratum.MOST_WAITING)]
         self.assertTrue(all(held))
+        self.now[0] += stratum.WAIT_FIRST          # since review 11c (T3), only one that waited this long is pushed out
         newcomers = [come(self.s, self.now, a) for a in ("203.0.113.9", "192.0.2.1", "2001:db8:1::1")]
         self.assertTrue(all(newcomers))
         self.assertEqual([m.closed for m in held[:4]], [True, True, True, False])    # those that came first went

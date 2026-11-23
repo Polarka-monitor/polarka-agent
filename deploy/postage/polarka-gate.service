@@ -10,7 +10,7 @@ Wants=network-online.target
 [Service]
 User=gate
 Group=gate
-ExecStart=/opt/polarka-x402/venv/bin/polarka-agent --dir /var/lib/polarka-gate/wallet postage-serve --upstream 127.0.0.1:8680 --price-hashes 600 --calls 100 --free 20 --listen 127.0.0.1:8670 --trust-proxy --x402-facilitator http://127.0.0.1:9570 --route /v1/stamp=127.0.0.1:8681 --route /v1/mail=127.0.0.1:8682 --public-url https://gate.polarka.org --offers /etc/polarka-gate/offers.json
+ExecStart=/opt/polarka-gate/venv/bin/polarka-agent --dir /var/lib/polarka-gate/wallet postage-serve --upstream 127.0.0.1:8680 --price-hashes 600 --calls 100 --free 20 --listen 127.0.0.1:8670 --trust-proxy --x402-facilitator http://127.0.0.1:9570 --route /v1/stamp=127.0.0.1:8681 --route /v1/mail=127.0.0.1:8682 --public-url https://gate.polarka.org --offers /etc/polarka-gate/offers.json
 Restart=on-failure
 RestartSec=10
 # exit 2 is a refusal to start (limits, journal): starting again changes nothing, a person has to look

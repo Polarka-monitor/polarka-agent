@@ -1,0 +1,42 @@
+[Unit]
+Description=Polarka connector: a remote MCP server with free tools about NORTH (127.0.0.1:8696, behind Caddy at https://polarka.org/mcp)
+After=network-online.target polarka-stamps.service polarka-pool.service
+Wants=network-online.target
+
+[Service]
+User=connector
+Group=connector
+WorkingDirectory=/var/lib/polarka-connector
+ExecStart=/opt/polarka-connector/venv/bin/polarka-agent --dir /var/lib/polarka-connector connector-serve --trust-proxy --rpc-url http://127.0.0.1:9554 --rpc-cookie /etc/polarka-rpc/connector
+Restart=on-failure
+RestartSec=10
+# it reads two services of this machine and asks the node two calls; the pool and the node get the processor first
+CPUQuota=50%
+Nice=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+IPAddressDeny=any
+IPAddressAllow=localhost
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ReadWritePaths=/var/lib/polarka-connector
+MemoryMax=200M
+TasksMax=100
+CapabilityBoundingSet=
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -7,7 +7,8 @@ their own that the node allows only those calls, and none of them is in the grou
 (`x402/polarka-x402-public.service`, from 0.2.3) makes the same calls as the gate's own, under a Unix user and an
 RPC user of its own, `x402pub` (review 10, I3). From 0.2.3 the facilitators also read blocks (getblock,
 getblockcount): a payment whose coin the seller spent before the buyer came back is found in its block (human
-review, 22 November); each block is read once, as it comes (review 10, H2). Without them it is called lost, as before.
+review, 22 November); each block is read once, as it comes (review 10, H2). Without them it is called lost, as before. The
+connector (`deploy/connector`, from 0.2.5) checks proofs of stamps with two calls under a user of its own.
 
 In the node's `truenorth.conf` (make the six `rpcauth` lines with `share/rpcauth/rpcauth.py` from the
 TrueNorth sources, or with the same HMAC-SHA256 in a few lines of Python):
@@ -18,12 +19,14 @@ TrueNorth sources, or with the same HMAC-SHA256 in a few lines of Python):
     rpcauth=walletpub:<salt>$<hmac>
     rpcauth=pool:<salt>$<hmac>
     rpcauth=walletd:<salt>$<hmac>
+    rpcauth=connector:<salt>$<hmac>
     rpcwhitelist=x402:decoderawtransaction,getblock,getblockcount,getblockhash,getmempoolentry,gettxout,sendrawtransaction,testmempoolaccept
     rpcwhitelist=x402pub:decoderawtransaction,getblock,getblockcount,getblockhash,getmempoolentry,gettxout,sendrawtransaction,testmempoolaccept
     rpcwhitelist=stamps:getblock,getblockcount,getblockhash,getblockheader,getmempoolentry,getrawtransaction,gettxoutproof
     rpcwhitelist=walletpub:estimatesmartfee,getblock,getblockchaininfo,getblockheader,getconnectioncount,getmempoolinfo,getnetworkinfo,getrawmempool,getrawtransaction,sendrawtransaction,testmempoolaccept,validateaddress
     rpcwhitelist=pool:getbestblockhash,getblock,getblockcount,getblockhash,getblocktemplate,gettxout,submitblock
     rpcwhitelist=walletd:estimatesmartfee,getblock,getblockchaininfo,getblockheader,getconnectioncount,getmempoolinfo,getnetworkinfo,getrawmempool,getrawtransaction,sendrawtransaction,testmempoolaccept,validateaddress
+    rpcwhitelist=connector:getblockheader,getrawtransaction
     rpcwhitelistdefault=0
 
 `rpcwhitelistdefault=0` keeps the cookie as it was; without it the cookie would be allowed nothing. Each

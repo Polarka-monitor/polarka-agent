@@ -27,3 +27,8 @@ it checks are its cost, and the pool and the node come first. Checking from outs
     polarka-agent --dir WALLET mail-read --office https://gate.example.org
 
 Stopping it loses nothing: the letters stay in `/var/lib/polarka-mail` until their time is over.
+
+Both doors are on the loopback, and both believe the X-Forwarded-For that Caddy writes. Any process on this
+machine can reach them directly: the paid door then takes a letter without postage, and either door takes the
+place a local process names. Keep other users' programs off this machine, as for every service here (review 9,
+I5; review 11c, T7).

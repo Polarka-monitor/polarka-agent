@@ -46,7 +46,7 @@ from .httpguard import Bounded, Limiter, OneRequestWithBody, forwarded, one_leng
 
 from .keys import UNIT
 from .server import ServerError, reachable
-from .wallet import Refused, north, units as units_of
+from .wallet import GAP, Refused, north, units as units_of
 from .x402 import AGAIN as X402_AGAIN, AWAITING, CLAIM, VERSION as X402_VERSION, b64json, from_b64json, requirements
 
 QUOTE_LIFE = 1800               # seconds an address waits for its payment
@@ -56,6 +56,9 @@ MAX_BODY = 1 << 20              # the largest request passed on
 MAX_ANSWER = 8 << 20            # the largest answer of the service behind that is passed back
 GIVE_BACK = (429, 503, 507)     # answers of the service behind for which the call of a lot is given back: it could not take it
 X402_PER_MINUTE = 30            # x402 payments that reach the facilitator, a minute from one place (ten times that from all)
+QUOTES_PER_MINUTE = 3          # quotes a minute from one place (review 11c, T4)
+UNPAID_PER_PLACE = 2           # quotes of one place that wait for their payment at one time
+KEEP_FOR_NEWCOMERS = 5         # of the wallet's GAP addresses nobody paid, those kept for places that hold no quote
 KEEP_SPENT = 30 * 86400         # a lot whose calls are used up is forgotten this long after its quote ran out
 SAVE_EVERY = 5                  # seconds: a call taken from a lot is written down with the next save, at most this late
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade",
@@ -85,6 +88,8 @@ class Gate:
         self.free_used = {}         # salted hash of a place -> its calls today; emptied when the day changes
         self.free_day = None
         self.x402_limiter = Limiter(X402_PER_MINUTE) if x402 is not None else None
+        self.quote_limiter = Limiter(QUOTES_PER_MINUTE, everyone=60)
+        self.quoted = {}            # mark of an unpaid token -> salted hash of the place that asked (memory only)
         self.saved, self.dirty = 0, False
         self.reserved = {}          # mark of a token -> calls taken by requests not yet answered
         self.looked = {}            # address -> when the wallet was last asked about it
@@ -156,12 +161,26 @@ class Gate:
                     raise
         return self.priced[1]
 
-    def quote(self):
+    def quote(self, source=None):
+        """A quote: an address to pay and a token. Each holds one of the wallet's addresses for QUOTE_LIFE and ten minutes
+        more, and the wallet hands out GAP of them in a row that nobody paid; so a place asks QUOTES_PER_MINUTE a minute,
+        holds UNPAID_PER_PLACE unpaid at a time, and the last KEEP_FOR_NEWCOMERS are for places that hold none
+        (review 11c, T4). `source`: the asker's address, None for the gate's own uses."""
+        who = None if source is None else hashlib.sha256(self.salt + place(source).encode()).hexdigest()
+        if who is not None and not self.quote_limiter.take(who):
+            raise Refused("SLOW", "too many quotes from this place in a minute; ask again in a minute, or pay over x402")
         with self.lock:
             now = self.clock()
             price = self._price()
             # an address stays with its token until the time for a late payment is over too
-            waiting = {t["address"] for t in self.state["tokens"].values() if not t["paid"] and now < t["expires"] + 600}
+            open_marks = {k for k, t in self.state["tokens"].items() if not t["paid"] and now < t["expires"] + 600}
+            self.quoted = {k: w for k, w in self.quoted.items() if k in open_marks}
+            waiting = {self.state["tokens"][k]["address"] for k in open_marks}
+            if who is not None:
+                mine = sum(1 for w in self.quoted.values() if w == who)
+                if mine >= UNPAID_PER_PLACE or (mine and len(waiting) >= GAP - KEEP_FOR_NEWCOMERS):
+                    raise Refused("BUSY", "quotes of this place wait for their payment: pay one of them, or ask again when "
+                                          "they run out (%d minutes), or pay over x402" % ((QUOTE_LIFE + 600) // 60))
             idle = [a for a in self.state["addresses"] if a not in waiting]
             if idle:
                 address = idle[0]
@@ -175,6 +194,8 @@ class Gate:
                 self.state["addresses"][address] = 0
             token = os.urandom(24).hex()
             self.state["tokens"][mark(token)] = {"address": address, "expires": int(now) + QUOTE_LIFE, "paid": False, "calls": 0, "price": price}
+            if who is not None:
+                self.quoted[mark(token)] = who
             self._prune(now)
             self._save()
             return {"token": token, "pay_to": address, "price": north(price), "calls": self.calls, "expires": int(now) + QUOTE_LIFE,
@@ -433,7 +454,7 @@ def make_handler(gate, upstream, trust_proxy, routes=()):
                 body = self.rfile.read(n) if n else b""
                 if self.path == "/_postage/quote" and self.command == "POST":
                     what, outcome = "quote", "ok"
-                    return self.send(200, gate.quote())
+                    return self.send(200, gate.quote(self.source()))
                 if self.path == "/_postage/status":
                     what, outcome = "status", "ok"
                     return self.send(200, gate.status(self.headers.get("X-Postage")))
@@ -508,7 +529,7 @@ def make_handler(gate, upstream, trust_proxy, routes=()):
                     c.close()
             except Refused as e:
                 outcome = e.kind
-                self.send(503 if e.kind == "BUSY" else 400, {"error": e.kind, "message": str(e)})
+                self.send({"BUSY": 503, "SLOW": 429}.get(e.kind, 400), {"error": e.kind, "message": str(e)})
             except ServerError:
                 outcome = "SERVER"
                 self.send(503, {"error": "NOT_NOW", "message": "the gate cannot look at its wallet just now"})

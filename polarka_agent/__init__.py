@@ -1,2 +1,2 @@
 """Polarka Agent: a TrueNorth (NORTH) wallet that a program can use."""
-__version__ = "0.2.4"
+__version__ = "0.2.5.dev1"

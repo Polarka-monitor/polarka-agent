@@ -514,8 +514,10 @@ class Pool:
 
     def _found(self, block):
         """Called with the lock held, when the node took a block of the pool's: that block is the tip from now on, and
-        the next look asks the node at once (review 11b, N1)."""
+        the next look asks the node at once (review 11b, N1). What was handed out over HTTP on the tip before it is
+        stale at once, also when the node then gives no template (review 11c, T2)."""
         self.best, self.tip_seen, self.tip_tried, self.template_at = block, self.ticks(), None, 0
+        self.jobs, self.job_of, self.seen = {}, {}, set()
 
     def look(self, template=True):
         """For stratum: asks the node outside the lock and puts the answers in under it, so that a slow node holds up
