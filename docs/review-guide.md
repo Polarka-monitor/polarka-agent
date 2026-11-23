@@ -231,17 +231,24 @@ these with a second look):
   files, 66 seconds apart, bought two lots), and a letter to a second inbox showed there the payment that waited for
   the first; the facilitator refused it, as it bound a payment to the path it was first shown on, and the wallet
   dropped that payment from its book, claim and all. Now a gate names in its offer what a payment buys there
-  (`extra.resource`, the gate's lot, the same on every path; `postage.py`, `x402_wanted`); the facilitator binds a
-  payment to that name when the seller named one as the payment was first seen, and a payment keeps the binding it
-  was made with (`x402.py`, `_bound`: one made before keeps to its own path, and a seller that names each resource
-  apart keeps them apart); and north_fetch shows a payment that waits for its block on any url of the same origin
-  that names the same thing for the same payee, and pays nothing more. Where the seller does not take it, the
-  payment stays for its own url and the other url is paid apart. No price or limit was changed, and of the checks
-  only the binding above. Tests: five in `tests/test_x402.py`.
+  (`extra.resource`, the gate's lot, the same on every path; `postage.py`, `x402_wanted`), and north_fetch shows a
+  payment that waits for its block on any url of the same origin that names the same thing for the same payee, with
+  that url's resource in its payload and within that call's `most`, and pays nothing more. The facilitator binds a
+  payment when it is first seen, to the seller's name or else to the payload's resource; one bound to its payload is
+  bound to a name once, where a seller first names the thing while that binding holds, and from then on to that name
+  only (`x402.py`, `_binding`); a record from before 0.2.8 passes as it did. The book keeps a payment refused for
+  good at a url other than its own, for its own url, and takes from its place only the payment that was shown.
+  An independent AI reviewer read the change before its release: no high finding, five medium and five low. The
+  medium ones (records from before 0.2.8 refused, a buyer's own first showing without a name, letters still losing
+  a payment where a seller binds to the path, a late answer taking a newer payment from the book, the order of the
+  deploy) and three of the low ones (`most`, the resource of the url, the tests) are mended. Still so: two calls at
+  the same moment buy two lots, as before (nothing is lost); where a facilitator ignores `extra.resource` and a
+  payment is first seen at another url, its own url may refuse it. A gate of 0.2.8 needs its facilitator at 0.2.8
+  first, and taking the gate back refuses what waits under it. Tests: ten in `tests/test_x402.py`.
 
 Review 9 read the fixes of review 8 and found them sound; review 10 found most of the fixes of the human review
 correct, and its reviewer read the fixes of its own findings again; review 11c and review 12 read the fixes of the
-looks before them. Nobody but their author has read the fixes of review 12, of the human review of 23 November, and the waits of 0.2.7. The facilitator for sellers from outside (item 2 above) opened with 0.2.3.
+looks before them. Nobody but their author has read the fixes of review 12, of the human review of 23 November, the waits of 0.2.7 and the fixes of the review of 0.2.8. The facilitator for sellers from outside (item 2 above) opened with 0.2.3.
 
 Their reports can be had on request. Low findings that are still open are listed in them. Earlier parts of the
 project (wallet, pool) went through four further AI reviews. No person outside has read the code since the

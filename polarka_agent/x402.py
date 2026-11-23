@@ -317,12 +317,24 @@ class Facilitator:
             named = r.get("url") if isinstance(r, dict) else None
         return mark(named) if isinstance(named, str) else None
 
-    def _bound(self, rec, payment, wanted):
-        """What a payment shown again must still buy. When the seller named what it sold as the payment was first seen
-        (extra.resource, such as a gate's lot from 0.2.8), that name, as the seller states it now; else what the
-        payload names, as before 0.2.8. A payment keeps the binding it was made with: one made before its seller began
-        to name the thing passes on its own path only, and a seller that names each resource apart keeps them apart."""
-        return self._resource(payment, wanted) if rec.get("named") is True else self._resource(payment)
+    def _binding(self, rec, payment, wanted):
+        """(None or why a payment shown again is refused, the record to keep when the payment is bound to a name now).
+
+        A payment is bound to what it buys when it is first seen: the name the seller gives in extra.resource, or,
+        when the seller gives none, the resource of the payload, which the buyer writes. A payment bound to its
+        payload is bound to a name once, the first time a seller names the thing while that binding still holds (a
+        gate of 0.2.8 names its lot, and its payments from before were bound to a path); from then on it is held to
+        that name only. A record from before 0.2.8, which does not say whether it was named, passes as it did with
+        the name it was bound to (review of 0.2.8, M1, M2, N1)."""
+        held = rec.get("resource")
+        by_name = self._resource(payment, wanted) if self._named(wanted) else None
+        if rec.get("named") is True:
+            return (None, None) if by_name is not None and by_name == held else ("invalid_payment_requirements", None)
+        if "named" not in rec and by_name is not None and by_name == held:
+            return None, None
+        if held != self._resource(payment):
+            return "invalid_payment_requirements", None
+        return None, (dict(rec, resource=by_name, named=True) if by_name is not None else None)
 
     @staticmethod
     def _named(wanted):
@@ -358,7 +370,7 @@ class Facilitator:
             if rec is not None:
                 if not self._owner(rec, claim) or (rec["state"] == DELIVERED and self.clock() - rec["at"] > self.redeliver):
                     why = "transaction_already_used"
-                elif rec.get("resource") != self._bound(rec, payment, wanted):
+                elif self._binding(rec, payment, wanted)[0] is not None:     # read only: verify writes nothing
                     why = "invalid_payment_requirements"
                 else:
                     why = self._matches(payment, decoded, rec["wanted"])[1] or self._covers(rec, wanted)
@@ -428,13 +440,25 @@ class Facilitator:
             if not self._owner(rec, claim):
                 return self._fail("transaction_already_used", txid)
             # shown again: it is held to what was asked when it was made, not to today's price
+            why, bound = self._binding(rec, payment, wanted)
             if (self._matches(payment, decoded, rec["wanted"])[1] is not None or self._covers(rec, wanted)
-                    or rec.get("resource") != self._bound(rec, payment, wanted)):
+                    or why is not None):
                 return self._fail("invalid_payment_requirements", txid)
             if rec["state"] == DELIVERED:
                 if now - rec["at"] <= self.redeliver:
                     return dict(self._ok(txid), redelivered=True)       # the same answer again, not a new sale
                 return self._fail("transaction_already_used", txid)
+            if bound is not None:
+                with self.lock:                     # bound to a name once: whoever comes second finds it bound
+                    cur = self.known.get(txid) or rec
+                    if cur.get("named") is not True:
+                        if cur.get("resource") != rec.get("resource"):
+                            return self._fail("invalid_payment_requirements", txid)
+                        cur = dict(cur, resource=bound["resource"], named=True)
+                        self._keep(cur)
+                    elif cur.get("resource") != bound["resource"]:
+                        return self._fail("invalid_payment_requirements", txid)     # bound to another name meanwhile
+                    rec = cur
         need = max(rec.get("need", 0), self._need(wanted))
         if need:
             depth = self._depth(txid, rec["vout"], since=rec.get("at"))
@@ -452,7 +476,8 @@ class Facilitator:
             last = self.known.get(txid)
             if last is not None and last["state"] == DELIVERED:
                 return dict(self._ok(txid), redelivered=True)       # another request with the same claim was first
-            self._keep(dict(rec, state=DELIVERED, at=int(now)))
+            # from the record as it is now: a binding written meanwhile stays (review of 0.2.8, M2)
+            self._keep(dict(last if last is not None else rec, state=DELIVERED, at=int(now)))
         return self._ok(txid)
 
 
@@ -838,6 +863,11 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
     with BOOK(wallet):
         book = _book(wallet)
     held, lot = book["pending"].get(key), book["lots"].get(origin)
+    if not isinstance(held, dict):
+        held = None
+        if key != url and isinstance(book["pending"].get(url), dict):
+            # a payment kept for this url after another url refused it, while it waited under a shared key (0.2.8, M3)
+            key, held = url, book["pending"][url]
     shared, borrowed = None, False
     if held is None:
         status, headers, answer = get({"X-Postage": lot["claim"]} if lot else {})
@@ -873,9 +903,12 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
         if named is not None:
             # The seller names what a payment buys, one thing for many paths, such as a lot of calls at a gate. A payment
             # for it that still waits for its block is shown on this path too, and nothing more is paid (0.2.8).
+            # Only a payment within this call's `most` (review of 0.2.8, L1).
             with BOOK(wallet):
                 for k, h in _book(wallet)["pending"].items():
-                    if h.get("origin") == origin and h.get("named") == named and h.get("payTo") == offer["payTo"]:
+                    if (isinstance(h, dict) and h.get("origin") == origin and h.get("named") == named
+                            and h.get("payTo") == offer["payTo"] and isinstance(h.get("amount"), int)
+                            and 0 < h["amount"] <= most):
                         shared = k, h
                         break
     if held is None and shared is None:
@@ -890,7 +923,8 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
         ext = needed.get("extensions")
         if isinstance(ext, dict) and len(json.dumps(ext)) <= 16384:
             payment["extensions"] = ext                 # echoed, as x402 asks of a buyer (the bazaar catalogs from it)
-        held = {"header": b64json(payment), "txid": made["id"], "amount": amount, "claim": claim, "made": int(clock())}
+        held = {"header": b64json(payment), "txid": made["id"], "amount": amount, "claim": claim, "made": int(clock()),
+                "url": url}
         if named is not None:
             held.update(origin=origin, named=named, payTo=offer["payTo"])
         with BOOK(wallet):                          # kept before the seller sees it: one payment for one resource
@@ -903,9 +937,23 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
         again = borrowed = True
     else:
         again = True
+    header = held["header"]
+    if borrowed:
+        # shown with the resource of this url, as a seller that checks the payload's resource asks; the transaction,
+        # the claim and what was accepted stay as they were made (review of 0.2.8, L2)
+        try:
+            shown = from_b64json(header)
+            shown["resource"] = needed.get("resource")
+            shown.pop("extensions", None)
+            ext = needed.get("extensions")
+            if isinstance(ext, dict) and len(json.dumps(ext)) <= 16384:
+                shown["extensions"] = ext
+            header = b64json(shown)
+        except Exception:
+            header = held["header"]
     start = clock()
     while True:
-        status, headers, answer = get({"PAYMENT-SIGNATURE": held["header"]})
+        status, headers, answer = get({"PAYMENT-SIGNATURE": header})
         settled = told(headers)
         # 202: the seller waits for a block; 503: the seller's facilitator could not settle just now. Both are asked
         # again, with the same payment, within `wait` (human review, 22 November)
@@ -925,15 +973,21 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
         book = _book(wallet)
         paid = bool(settled and settled.get("success"))
         final = paid or status == 400 or (status == 402 and (settled is None or settled.get("errorReason") not in AGAIN + (AWAITING,)))
-        if final and borrowed and not paid:
-            # the seller did not take here a payment made at another of its urls: it stays for its own url, which may
-            # still take it, and is not shown elsewhere again; this url is paid apart when it is asked for again
-            h = book["pending"].get(key)
-            if h is not None:
+        # Only the payment that was shown leaves its place: another call of this wallet may have put a newer one there
+        # meanwhile (review of 0.2.8, M4).
+        cur = book["pending"].get(key)
+        mine = isinstance(cur, dict) and cur.get("txid") == held["txid"]
+        away = final and not paid and (borrowed or held.get("url", url) != url)
+        if final and mine:                          # settled, or refused for good; anything else is asked again later
+            entry = book["pending"].pop(key)
+            if away:
+                # refused for good at a url other than its own (another url of the seller, or a key shared by letters
+                # to several inboxes): kept for its own url, which may still take it, and shown nowhere else; this url
+                # is paid apart when it is asked for again (review of 0.2.8, M3)
                 for k in ("origin", "named", "payTo"):
-                    h.pop(k, None)
-        elif final:                                 # settled, or refused for good; anything else is asked again later
-            book["pending"].pop(key, None)
+                    entry.pop(k, None)
+                own = entry.get("url", key)
+                book["pending"][own if own not in book["pending"] else "%s#%s" % (own, entry["txid"][:16])] = entry
         left = calls_left(headers)
         if paid and left:                           # the lot is paid whatever the service behind the gate answered
             new, had = {"claim": held["claim"], "left": left}, book["lots"].get(origin)
@@ -945,7 +999,7 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
                 book["lots"][origin] = new
         _keep_book(wallet, book)
     got = {"status": status, "paid": north(held["amount"]), "txid": held["txid"], "settlement": settled, "body": answer}
-    if final and borrowed and not paid:
+    if away and mine:
         got["note"] = ("the seller did not take here the payment that waits for another of its urls; it is kept for that "
                        "url, and this one is paid apart when it is asked for again")
     elif again:

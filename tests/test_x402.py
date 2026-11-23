@@ -3,6 +3,7 @@ seller's node that takes the payment, and what must not go through: the same pay
 another chain, requirements changed on the way. And a seller that waits for a block: a payment copied from the
 network takes nothing, the buyer asks again and pays once, a facilitator as a service, and a gate of postage that
 sells its lot over x402."""
+import copy
 import json
 import os
 import shutil
@@ -22,6 +23,34 @@ from . import bench
 
 SINK = "rnorth1zfgvaxg6parqfv2drvsk9zadefh40zg97ese44hjkjzkjamkftpzsnpx4h6"       # key 0/0 of the public test phrase
 PRICE = units("0.5")
+
+
+class Echo(BaseHTTPRequestHandler):
+    """A service behind a gate: answers 200 with the path it was asked for."""
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        said = self.path.encode()
+        self.send_response(200)
+        self.send_header("Content-Length", str(len(said)))
+        self.end_headers()
+        self.wfile.write(said)
+
+
+class PathOnly(x402.Facilitator):
+    """A facilitator that knows no extra.resource: it binds a payment to the resource of its payload only, as one
+    written to x402 without the naming of this package would."""
+
+    @staticmethod
+    def _named(wanted):
+        return False
+
+    @staticmethod
+    def _resource(payment, wanted=None):
+        return x402.Facilitator._resource(payment)
 
 
 @unittest.skipUnless(bench.find_bin(), "truenorthd and truenorth-cli are needed (TN_BIN names their folder)")
@@ -172,10 +201,6 @@ class X402OnRegtest(unittest.TestCase):
             x402.fetch("http://example.com/x", self.buyer, units("1"), network=self.network)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class X402Deep(X402OnRegtest):
     """The same chain, a seller that waits for a block."""
 
@@ -184,6 +209,28 @@ class X402Deep(X402OnRegtest):
 
     def book(self, wallet=None):
         return x402._book(wallet or self.buyer)
+
+    def gate_at(self, name, calls=3, facilitator=None):
+        """A gate of postage in front of Echo; (the gate, its url)."""
+        up = self.start(ThreadingHTTPServer(("127.0.0.1", 0), Echo))
+        gate = postage.Gate(self.make(name), PRICE, calls, x402=facilitator or self.patient)
+        return gate, self.start(ThreadingHTTPServer(("127.0.0.1", 0), postage.make_handler(gate, up.split("//")[1], False)))
+
+    def binding_kit(self, n):
+        """(wanted(name), payment(wanted, path)) for a seller at key 0/n that waits for one block."""
+        pay_to = self.seller.account.address(0, n)
+
+        def wanted(name=None):
+            w = x402.requirements(self.network, PRICE, pay_to, confirmations=1)
+            if name is not None:
+                w["extra"]["resource"] = name
+            return w
+
+        def payment(w, path):
+            made = self.buyer.pay([(pay_to, PRICE)], "x402 test of binding", hand=False)
+            return {"x402Version": 2, "resource": {"url": path}, "accepted": copy.deepcopy(w),
+                    "payload": {"transaction": made["raw"], "claim": os.urandom(16).hex()}}
+        return wanted, payment
 
     def test_unpaid_is_told_the_price(self):
         _, offer = self.offer(self.deep_url)
@@ -367,62 +414,83 @@ class X402Deep(X402OnRegtest):
         self.assertEqual(len(self.buyer.payments()), made + 1)
         self.assertEqual([k for k in self.book()["pending"] if k.startswith(base)], [])     # nothing left waiting at this gate
 
-    def test_a_payment_keeps_the_binding_it_was_made_with(self):
-        """0.2.8: the facilitator binds a payment to what the seller named it for (extra.resource) when the seller
-        named something, else, as before, to the resource of the payload. A seller that names each resource apart
-        keeps them apart; a payment made before its seller began to name the thing still passes on its own path."""
-        import copy
-        pay_to = self.seller.account.address(0, 9)
+    def test_a_payment_is_bound_to_the_first_name_its_seller_gives(self):
+        """0.2.8 (review M2): a payment is bound to the name its seller gives (extra.resource). One first seen without
+        a name is bound to its payload's resource until a seller names the thing there, and from then on to that name
+        only: a buyer who shows its payment first without a name buys no more than one thing with it."""
+        self.addCleanup(self.node.mine, 1, SINK)
+        fac = x402.Facilitator(self.rpc, "regtest", os.path.join(self.tmp, "used-bound.jsonl"), confirmations=1)
+        wanted, payment = self.binding_kit(9)
 
-        def wanted(name=None):
-            w = x402.requirements(self.network, PRICE, pay_to, confirmations=1)
-            if name is not None:
-                w["extra"]["resource"] = name
-            return w
-
-        def payment(w, path):
-            made = self.buyer.pay([(pay_to, PRICE)], "x402 test of binding", hand=False)
-            return {"x402Version": 2, "resource": {"url": path}, "accepted": copy.deepcopy(w),
-                    "payload": {"transaction": made["raw"], "claim": os.urandom(16).hex()}}
-
+        def why(p, w):
+            return fac.settle(p, w).get("errorReason")
         # named apart: a payment for "article 1" does not buy "article 2"
         p = payment(wanted("article 1"), "/a1")
-        self.assertEqual(self.patient.settle(p, wanted("article 1"))["errorReason"], x402.AWAITING)
-        self.assertEqual(self.patient.settle(p, wanted("article 2"))["errorReason"], "invalid_payment_requirements")
-        self.assertEqual(self.patient.settle(p, wanted("article 1"))["errorReason"], x402.AWAITING)
-        # made before the seller named it: on its own path it still passes, and nowhere else
-        q = payment(wanted(), "/own")
-        self.assertEqual(self.patient.settle(q, wanted())["errorReason"], x402.AWAITING)
-        self.assertEqual(self.patient.settle(q, wanted("lot"))["errorReason"], x402.AWAITING)
-        moved = dict(q, resource={"url": "/elsewhere"})
-        self.assertEqual(self.patient.settle(moved, wanted("lot"))["errorReason"], "invalid_payment_requirements")
+        self.assertEqual([why(p, wanted("article 1")), why(p, wanted("article 2")), why(p, wanted("article 1"))],
+                         [x402.AWAITING, "invalid_payment_requirements", x402.AWAITING])
         self.node.mine(1, SINK)
-        self.assertTrue(self.patient.settle(p, wanted("article 1"))["success"])
-        self.assertTrue(self.patient.settle(q, wanted("lot"))["success"])
+        self.assertTrue(fac.settle(p, wanted("article 1"))["success"])
+        # first seen without a name, then named where its payload points: bound to that name from then on
+        q = payment(wanted(), "/own")
+        self.assertEqual([why(q, wanted()), why(q, wanted("r1")), why(q, wanted("r2"))],
+                         [x402.AWAITING, x402.AWAITING, "invalid_payment_requirements"])
+        self.assertFalse(fac.verify(q, wanted("r2"))["isValid"])
+        self.assertTrue(fac.verify(dict(q, resource={"url": "/elsewhere"}), wanted("r1"))["isValid"])
+        self.assertEqual(why(dict(q, resource={"url": "/elsewhere"}), wanted()), "invalid_payment_requirements")
+        self.node.mine(1, SINK)
+        self.assertTrue(fac.settle(q, wanted("r1"))["success"])
+        # bound to a path: on another path it is refused, whatever name the seller gives there
+        r = payment(wanted(), "/x")
+        self.assertEqual([why(r, wanted()), why(dict(r, resource={"url": "/y"}), wanted("lot"))],
+                         [x402.AWAITING, "invalid_payment_requirements"])
+        self.node.mine(1, SINK)
+        self.assertTrue(fac.settle(r, wanted())["success"])
+        # the binding outlives a restart, and verify wrote nothing
+        again = x402.Facilitator(self.rpc, "regtest", os.path.join(self.tmp, "used-bound.jsonl"), confirmations=1)
+        self.assertEqual(again.settle(q, wanted("r2"))["errorReason"], "invalid_payment_requirements")
+        self.assertTrue(again.settle(q, wanted("r1")).get("redelivered"))
+
+    def test_a_record_from_before_0_2_8_passes_as_it_did(self):
+        """0.2.8 (review M1): a record written before 0.2.8 does not say whether its seller named the thing. One bound
+        to the seller's name passes with that name, as it did; one bound to its payload's path passes there, and a
+        seller that names the thing from now on (a gate of 0.2.8) binds it to that name on that path."""
+        self.addCleanup(self.node.mine, 1, SINK)
+        path = os.path.join(self.tmp, "used-old.jsonl")
+        fac = x402.Facilitator(self.rpc, "regtest", path, confirmations=1)
+        wanted, payment = self.binding_kit(10)
+
+        def as_before(txid):
+            rec = dict(fac.known[txid])
+            rec.pop("named")
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(rec) + "\n")
+            old = x402.Facilitator(self.rpc, "regtest", path, confirmations=1)
+            self.assertNotIn("named", old.known[txid])
+            return old
+        # bound to the seller's name, the payload pointing elsewhere
+        p = payment(wanted("article-1"), "https://seller.example/articles/1")
+        old = as_before(fac.settle(p, wanted("article-1"))["transaction"])
+        self.assertEqual([old.settle(p, wanted("article-1")).get("errorReason"), old.settle(p, wanted("article-2")).get("errorReason")],
+                         [x402.AWAITING, "invalid_payment_requirements"])
+        self.node.mine(1, SINK)
+        self.assertTrue(old.settle(p, wanted("article-1"))["success"])
+        # bound to a path by a gate that did not name its lot; the gate names it now
+        q = payment(wanted(), "/v1/stamp/a")
+        old = as_before(fac.settle(q, wanted())["transaction"])
+        b = dict(q, resource={"url": "/v1/stamp/b"})
+        self.assertEqual([old.settle(b, wanted("lot")).get("errorReason"), old.settle(q, wanted("lot")).get("errorReason"),
+                          old.settle(b, wanted("lot")).get("errorReason")],
+                         ["invalid_payment_requirements", x402.AWAITING, x402.AWAITING])
+        self.node.mine(1, SINK)
+        self.assertTrue(old.settle(b, wanted("lot"))["success"])
 
     def test_a_payment_refused_on_another_path_stays_for_its_own(self):
-        """0.2.8: a seller names one thing on two paths, but its facilitator binds a payment to its path, as one from
-        before 0.2.8 does. Shown on the second path the payment is refused there and stays for the first, which takes
-        it once it is in a block; the second path is then paid apart."""
-        class PerPath(x402.Facilitator):
-            @staticmethod
-            def _resource(payment, wanted=None):
-                return x402.Facilitator._resource(payment)
-        class Up(BaseHTTPRequestHandler):
-            protocol_version = "HTTP/1.1"
-
-            def log_message(self, *a):
-                pass
-
-            def do_GET(self):
-                self.send_response(200)
-                self.send_header("Content-Length", "2")
-                self.end_headers()
-                self.wfile.write(b"up")
-        up = self.start(ThreadingHTTPServer(("127.0.0.1", 0), Up))
-        old = PerPath(self.rpc, "regtest", os.path.join(self.tmp, "used-per-path.jsonl"), confirmations=1)
-        gate = postage.Gate(self.make("gate-per-path"), PRICE, 3, x402=old)
-        base = self.start(ThreadingHTTPServer(("127.0.0.1", 0), postage.make_handler(gate, up.split("//")[1], False)))
+        """0.2.8: a seller names one thing on two paths, but its facilitator knows no extra.resource and binds a
+        payment to its payload's path. Shown on the second path the payment is refused there and stays for the first,
+        which takes it once it is in a block; asked again, the second path is paid apart."""
+        self.addCleanup(self.node.mine, 1, SINK)
+        old = PathOnly(self.rpc, "regtest", os.path.join(self.tmp, "used-per-path.jsonl"), confirmations=1)
+        gate, base = self.gate_at("gate-per-path", facilitator=old)
         a, b = base + "/v1/unit/a", base + "/v1/unit/b"
         made = len(self.buyer.payments())
         first = x402.fetch(a, self.buyer, units("1"), network=self.network, wait=0)
@@ -442,6 +510,78 @@ class X402Deep(X402OnRegtest):
         self.assertEqual((got["settlement"]["success"], got["txid"]), (True, apart["txid"]))
         self.assertEqual([k for k in self.book()["pending"] if k.startswith(base)], [])
         self.assertEqual(len(self.buyer.payments()), made + 2)
+
+    def test_a_late_answer_takes_no_newer_payment_from_the_book(self):
+        """0.2.8 (review M4): a call that shows a waiting payment and is answered late takes from the book only that
+        payment, not a newer one that another call of the same wallet put in its place meanwhile."""
+        self.addCleanup(self.node.mine, 1, SINK)
+        gate, base = self.gate_at("gate-late", calls=1)
+        a, b, c = base + "/v1/unit/a", base + "/v1/unit/b", base + "/v1/unit/c"
+        first = x402.fetch(a, self.buyer, units("1"), network=self.network, wait=0)
+        self.assertEqual(first["status"], 202)
+        newer = []
+
+        def meanwhile(seconds):
+            if not newer:
+                self.node.mine(1, SINK)
+                self.assertEqual(x402.fetch(b, self.buyer, units("1"), network=self.network, wait=0)["status"], 200)
+                newer.append(x402.fetch(a, self.buyer, units("1"), network=self.network, wait=0))
+        late = x402.fetch(c, self.buyer, units("1"), network=self.network, wait=60, sleep=meanwhile)
+        self.assertEqual(late["txid"], first["txid"])
+        self.assertEqual(newer[0]["status"], 202)
+        self.assertNotEqual(newer[0]["txid"], first["txid"])
+        self.assertEqual(self.book()["pending"][a]["txid"], newer[0]["txid"])      # the newer payment is still there
+
+    def test_a_waiting_payment_is_shared_only_within_the_calls_most(self):
+        """0.2.8 (review L1): a call that may pay less than the waiting payment does not use it."""
+        self.addCleanup(self.node.mine, 1, SINK)
+        gate, base = self.gate_at("gate-most")
+        a, b = base + "/v1/unit/a", base + "/v1/unit/b"
+        self.assertEqual(x402.fetch(a, self.buyer, units("1"), network=self.network, wait=0)["status"], 202)
+        made = len(self.buyer.payments())
+        with self.assertRaises(Refused) as caught:
+            x402.fetch(b, self.buyer, PRICE - 1, network=self.network, wait=0)
+        self.assertEqual(caught.exception.kind, "X402_TOO_MUCH")
+        self.assertEqual(len(self.buyer.payments()), made)
+        self.assertIn(a, self.book()["pending"])
+
+    def test_a_borrowed_payment_is_shown_with_the_resource_of_its_url(self):
+        """0.2.8 (review L2): a waiting payment shown on another url of its seller carries that url's resource, as a
+        seller that checks the payload's resource asks; the transaction and the claim are the same, and the book keeps
+        the payment as it was made."""
+        seen, network, pay_to = [], self.network, self.seller.account.address(0, 11)
+
+        class Seller(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *a):
+                pass
+
+            def answer(self, code, headers):
+                self.send_response(code)
+                for k, v in headers.items():
+                    self.send_header(k, v)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def do_GET(self):
+                signed = self.headers.get("PAYMENT-SIGNATURE")
+                if signed:
+                    seen.append(x402.from_b64json(signed))
+                    return self.answer(202, {"PAYMENT-RESPONSE": x402.b64json({"success": False, "errorReason": x402.AWAITING})})
+                offer = x402.requirements(network, PRICE, pay_to, confirmations=1)
+                offer["extra"]["resource"] = "one thing"
+                needed = {"x402Version": 2, "resource": {"url": "http://seller.example" + self.path}, "accepts": [offer]}
+                return self.answer(402, {"PAYMENT-REQUIRED": x402.b64json(needed)})
+        base = self.start(ThreadingHTTPServer(("127.0.0.1", 0), Seller))
+        x402.fetch(base + "/one", self.buyer, units("1"), network=self.network, wait=0)
+        x402.fetch(base + "/two", self.buyer, units("1"), network=self.network, wait=0)
+        self.rpc.call("sendrawtransaction", seen[0]["payload"]["transaction"])     # so that the buyer's coin comes back
+        self.addCleanup(self.node.mine, 1, SINK)
+        self.assertEqual([s["resource"]["url"] for s in seen], ["http://seller.example/one", "http://seller.example/two"])
+        self.assertEqual(len({(s["payload"]["transaction"], s["payload"]["claim"]) for s in seen}), 1)
+        kept = x402.from_b64json(self.book()["pending"][base + "/one"]["header"])
+        self.assertEqual(kept["resource"]["url"], "http://seller.example/one")
 
     def test_a_gate_names_its_lot_the_same_on_every_path(self):
         gate = postage.Gate(self.make("gate-named"), PRICE, 3, x402=self.patient)
@@ -473,6 +613,39 @@ class X402Deep(X402OnRegtest):
         self.assertTrue(mail.send(self.buyer, to_two, "to the second", units("1"), front, wait=0, network=self.network)["sent"])
         self.assertTrue(mail.send(self.buyer, to_one, "to the first", units("1"), front, wait=0, network=self.network)["sent"])
         self.assertEqual(len(self.buyer.payments()), made + 1)
+        self.assertEqual([x["text"] for x in mail.fetch_letters(one, free_url)["letters"]], ["to the first"])
+        self.assertEqual([x["text"] for x in mail.fetch_letters(two, free_url)["letters"]], ["to the second"])
+
+    def test_a_letter_refused_at_a_second_inbox_keeps_the_first_ones_payment(self):
+        """0.2.8 (review M3): letters to two inboxes share one payment while it waits. Where the seller's facilitator
+        binds it to the path of the first inbox, the second letter is refused, and the payment stays for the first
+        letter, which it brings once it is in a block; the lot it bought then carries the second letter too."""
+        self.addCleanup(self.node.mine, 1, SINK)
+        from polarka_agent import mail
+        office = mail.PostOffice(os.path.join(self.tmp, "office-path"))
+        paid, free = mail.servers(office, "127.0.0.1:0", "127.0.0.1:0", per_minute=600)
+        free_url = self.start(free)
+        office.origin = mail.origin_of(free_url)
+        self.start(paid)
+        old = PathOnly(self.rpc, "regtest", os.path.join(self.tmp, "used-path-mail.jsonl"), confirmations=1)
+        gate = postage.Gate(self.make("gate-mail-path"), PRICE, 3, x402=old)
+        front = self.start(ThreadingHTTPServer(("127.0.0.1", 0), postage.make_handler(
+            gate, "127.0.0.1:1", False, [("/v1/mail", "127.0.0.1:%d" % paid.server_address[1])])))
+        one, two = self.make("reader-path-one"), self.make("reader-path-two")
+        to_one, to_two = mail.my_inbox(one)["inbox"], mail.my_inbox(two)["inbox"]
+        made = len(self.buyer.payments())
+        first = mail.send(self.buyer, to_one, "to the first", units("1"), front, wait=0, network=self.network)
+        self.assertEqual((first["sent"], first["pending"]), (False, True))
+        waiting = [h["txid"] for k, h in self.book()["pending"].items() if k.startswith(front)]
+        self.assertEqual(len(waiting), 1)
+        with self.assertRaises(mail.MailError):
+            mail.send(self.buyer, to_two, "to the second", units("1"), front, wait=0, network=self.network)
+        self.assertEqual([h["txid"] for k, h in self.book()["pending"].items() if k.startswith(front)], waiting)
+        self.assertEqual(len(self.buyer.payments()), made + 1)
+        self.node.mine(1, SINK)
+        self.assertTrue(mail.send(self.buyer, to_one, "to the first", units("1"), front, wait=0, network=self.network)["sent"])
+        self.assertTrue(mail.send(self.buyer, to_two, "to the second", units("1"), front, wait=0, network=self.network)["sent"])
+        self.assertEqual(len(self.buyer.payments()), made + 1)                  # both on the first payment
         self.assertEqual([x["text"] for x in mail.fetch_letters(one, free_url)["letters"]], ["to the first"])
         self.assertEqual([x["text"] for x in mail.fetch_letters(two, free_url)["letters"]], ["to the second"])
 
@@ -595,3 +768,7 @@ class X402Deep(X402OnRegtest):
     # the tests of the seller that takes a payment at once are not repeated here
     test_paid_once_and_only_once = test_too_little_and_requirements_changed_on_the_way = None
     test_from_the_command_line_and_as_a_tool = test_what_the_buyer_does_not_pay = None
+
+
+if __name__ == "__main__":
+    unittest.main()

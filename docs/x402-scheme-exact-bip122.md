@@ -48,10 +48,12 @@ block, for example `bip122:000000000019d6689c085ae165831e93` (Bitcoin) or `bip12
   never fewer.
 - `extra.resource`, when the resource server sends it to `/verify` and `/settle`, names what the payment buys. The
   facilitator MUST bind the payment to it; without it, to the `resource` of the payload, which the client writes.
-  A resource server that serves more than one resource for one `payTo` SHOULD send it. A payment keeps the binding
-  it was first seen with: one first seen without `extra.resource` stays bound to the `resource` of its payload.
-  A resource server that sells one thing on many resources (a lot of calls, say) MAY name it the same on each; a
-  client MAY then show a payment that waits for its block on another of them, and pays nothing more.
+  A resource server that serves more than one resource for one `payTo` SHOULD send it. A payment is bound when it is
+  first seen: to `extra.resource` when the resource server sends it, else to the `resource` of its payload. One bound
+  to its payload is bound to a name once, the first time a resource server names the thing while that binding holds,
+  and from then on to that name only. A resource server that sells one thing on many resources (a lot of calls, say)
+  MAY name it the same on each; a client MAY then show a payment that waits for its block on another of them, with
+  the `resource` of that one in its payload, and pays nothing more.
 
 The `payload` of the `PaymentPayload`:
 
@@ -89,8 +91,9 @@ The facilitator MUST reject the payload, with the reason given, when:
 6. its node would not accept the transaction into its mempool, also when the node has it already, waiting or in a
    block: whoever presents a transaction that is already out need not be who paid (`transaction_refused_by_node`);
 7. the transaction was settled or is being settled, and the payload's `claim` is not the one it was first shown
-   with (`transaction_already_used`), or the `resource` of the `PaymentPayload` is not the one it was first shown
-   for (`invalid_payment_requirements`): one payment buys one resource.
+   with (`transaction_already_used`), or it is shown for another thing than it is bound to (`extra.resource`, else
+   the `resource` of the `PaymentPayload`; see `extra.resource` above) (`invalid_payment_requirements`): one payment
+   buys one thing.
 
 Example of `/verify` for a payment copied from the mempool by someone else:
 
@@ -101,8 +104,9 @@ Example of `/verify` for a payment copied from the mempool by someone else:
 ## Settlement
 
 1. The first time a transaction passes verification, the facilitator MUST durably record its id, a hash of its
-   `claim`, the output that pays, the requirements and the `resource` of the payload, and only then hand the
-   transaction to its node. The resource server MUST check that the payload's `resource` is the one requested.
+   `claim`, the output that pays, the requirements and what the payment is bound to, and only then hand the
+   transaction to its node. The resource server MUST check that the payload's `resource` is the one requested, or,
+   when it names one thing on several resources, one of those.
 2. While the paying output is in fewer blocks than `extra.confirmations`, `/settle` answers:
 
    ```json
