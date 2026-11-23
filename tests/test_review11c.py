@@ -173,7 +173,7 @@ class T1FloorRaisedAhead(Reader):
         self.post(self.alice, "from the future", now=time.time() + mail.FUTURE + 120)
         got = self.read()["letters"]
         self.assertNotIn("text", got[0])
-        self.assertIn("minutes after this machine's clock", got[0]["error"])
+        self.assertIn("after this machine's clock", got[0]["error"])       # hours, since FUTURE is a day (review 12, I4)
 
 
 class T5RecordOfAnEarlierVersion(Reader):
@@ -257,13 +257,17 @@ class T4Quotes(unittest.TestCase):
         self.assertIn("pay_to", self.g.quote("203.0.113.5"))              # an honest buyer gets a quote
 
     def test_so_many_quotes_a_minute_from_one_place(self):
-        with self.assertRaises(Refused) as e:
-            for _ in range(postage.QUOTES_PER_MINUTE + 1):
-                try:
-                    self.g.quote("2001:db8:5::1")
-                except Refused as busy:
-                    if busy.kind != "BUSY":
-                        raise
+        # Since review 12 (L5) a quote refused as BUSY takes no token, so the bound a minute is shown with a gate that
+        # lets a place hold more unpaid quotes than it may ask for in a minute.
+        saved = postage.UNPAID_PER_PLACE
+        postage.UNPAID_PER_PLACE = postage.QUOTES_PER_MINUTE + 5
+        try:
+            for _ in range(postage.QUOTES_PER_MINUTE):
+                self.assertIn("pay_to", self.g.quote("2001:db8:5::1"))
+            with self.assertRaises(Refused) as e:
+                self.g.quote("2001:db8:5::1")
+        finally:
+            postage.UNPAID_PER_PLACE = saved
         self.assertEqual(e.exception.kind, "SLOW")
 
     def test_the_last_addresses_are_for_places_that_hold_none(self):

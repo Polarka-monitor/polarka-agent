@@ -29,8 +29,12 @@ A node user of its own (`deploy/rpc-users.md`), allowed the two calls that `nort
     rpcauth=connector:<salt>$<hmac>
     rpcwhitelist=connector:getblockheader,getrawtransaction
 
-    printf 'connector:%s' "$PASSWORD" > /etc/polarka-rpc/connector
-    chown connector:connector /etc/polarka-rpc/connector && chmod 0400 /etc/polarka-rpc/connector
+    install -m 0400 -o connector -g connector /dev/null /etc/polarka-rpc/connector
+    (umask 077; printf 'connector:%s' "$PASSWORD" > /etc/polarka-rpc/connector)
+
+The file exists with its mode before the password goes into it, so it is never readable by others for a moment
+(review 12, I7). Better than a variable of the shell, which can end up in its history: write the password from a
+program that makes it, as `deploy-connector.sh` does.
 
 The node reads its configuration only when it starts: restart it, then the services that use it come back by
 themselves (the pool pauses while the node is away). Then the unit:
@@ -58,6 +62,12 @@ log, or one whose address fields are deleted.
     curl -s https://polarka.org/mcp -H 'Content-Type: application/json' \
          -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | head -c 300
     curl -s -o /dev/null -w '%{http_code}\n' https://polarka.org/mcp          # 405: no stream, as it should be
+    # a body sent in chunks, as some clients send it; Caddy passes it on chunked (review 12, L6)
+    printf '{"jsonrpc":"2.0","id":2,"method":"ping"}' | curl -s --http1.1 -H 'Transfer-Encoding: chunked' \
+         -H 'Content-Type: application/json' --data-binary @- https://polarka.org/mcp          # {"jsonrpc":"2.0","id":2,"result":{}}
+    # no authorization is asked for here: these must not answer 200 with a page
+    curl -s -o /dev/null -w '%{http_code}\n' https://polarka.org/.well-known/oauth-protected-resource      # 404
+    curl -s -o /dev/null -w '%{http_code}\n' https://polarka.org/.well-known/oauth-authorization-server   # 404
 
 The bounds can be changed with `--free-per-day`, `--free-per-place` and `--per-minute` (requests a minute from one
 place). A chat application reaches it from its own machines: many of its users share one place, so its bound is

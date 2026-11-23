@@ -5,8 +5,8 @@ the coinbase that nobody else gets), checks the proof of work of what comes back
 for it and hands a share that is also a block to the node. What it owes is paid out in rounds (payout.py).
 Cap keeps the pool under a part of the network, Guard bounds what one place may ask and send.
 
-It runs on main since 20 November 2026, open to everybody since 21 November; a programmer read it on 22 November 2026,
-a security expert has not yet. The speed it shows (`speed`, GET /v1/stats) is estimated from the shares it took. Miners
+It runs on main since 20 November 2026, open to everybody since 21 November; a security expert read it as a private
+person on 22 November 2026 (docs/review-guide.md); nobody has audited it professionally. The speed it shows (`speed`, GET /v1/stats) is estimated from the shares it took. Miners
 that speak stratum (IronMiner) come in through stratum.py, into the same ledger; there the share target follows the
 miner's speed. Not here: anything against a miner who keeps back the blocks he finds, and taking back what was
 credited for a block that later left the chain.

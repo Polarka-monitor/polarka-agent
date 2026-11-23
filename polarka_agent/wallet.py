@@ -47,7 +47,7 @@ def units(text):
     if not isinstance(text, str):
         raise Refused("AMOUNT", "an amount is written as text, a decimal number of NORTH, for example \"1.5\"")
     text = text.strip()
-    if not re.match(r"^[0-9]{1,12}(\.[0-9]{1,8})?$", text):
+    if not re.match(r"\A[0-9]{1,12}(\.[0-9]{1,8})?\Z", text):
         raise Refused("AMOUNT", "an amount is a number of NORTH with at most 8 decimals, for example 1.5")
     try:
         value = int(Decimal(text) * UNITS)

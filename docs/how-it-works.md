@@ -4,7 +4,7 @@ What Polarka runs, who holds what and who sees what. The code is public, the pro
 counters show what was used, so all of it can be checked.
 
 The code was written with AI models under its author's direction. Independent AI reviewers that had not seen it
-being written read every part; what they found and what was done about it is in `REVIEW.md` and
+being written read it many times; what they found and what was done about it is in `REVIEW.md` and
 `docs/review-guide.md`. On 22 November 2026 a security expert read the code and the server as a private person;
 what he found is mended in 0.2.3, apart from what `docs/review-guide.md` names as open.
 
@@ -28,7 +28,7 @@ checked against the code in this repository and the deployment notes in `deploy/
 
 ## An agent, from no coin to a paid call
 
-1. Its owner starts the MCP server: `uvx polarka-agent@0.2.4 --dir FOLDER mcp`. With no wallet in FOLDER it makes
+1. Its owner starts the MCP server: `uvx polarka-agent@0.2.5 --dir FOLDER mcp`. With no wallet in FOLDER it makes
    one on the main chain. The recovery words are in `FOLDER/wallet.json`, readable by the owner only. Nothing is
    paid yet.
 2. The owner writes `FOLDER/limits.json` by hand, for example `{"per_payment_north": "0.1", "per_day_north": "1"}`.

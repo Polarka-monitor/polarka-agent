@@ -22,8 +22,8 @@ MOST_ITEMS = 1000           # resources kept
 MOST_BYTES = 8192           # one extension, as JSON
 METHODS_QUERY = ("GET", "HEAD", "DELETE")
 METHODS_BODY = ("POST", "PUT", "PATCH")
-PRINTABLE = re.compile(r"^[\x20-\x7e]+$")
-TEMPLATE = re.compile(r"^/[a-zA-Z0-9_/:.\-~%]+$")
+PRINTABLE = re.compile(r"\A[\x20-\x7e]+\Z")
+TEMPLATE = re.compile(r"\A/[a-zA-Z0-9_/:.\-~%]+\Z")
 LOOPBACK = {"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"}
 SCHEMAS = {"https://json-schema.org/draft/2020-12/schema", "http://json-schema.org/draft-07/schema#", "https://json-schema.org/draft-07/schema#"}
 
@@ -55,7 +55,7 @@ def icon_url(value):
         return None
     if u.scheme not in ("http", "https") or not host or "@" in u.netloc or host in LOOPBACK:
         return None
-    if host.isdigit() or re.match(r"^0x[0-9a-f]+$", host) or host.endswith(".") or host.endswith(".localhost"):
+    if host.isdigit() or re.match(r"\A0x[0-9a-f]+\Z", host) or host.endswith(".") or host.endswith(".localhost"):
         return None
     try:
         socket.inet_aton(host)          # 127.1, 0177.0.0.1, 0x7f.0.0.1: what a browser reads as an address

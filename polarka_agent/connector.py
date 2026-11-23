@@ -39,17 +39,29 @@ from http.server import BaseHTTPRequestHandler
 from . import __version__
 from .httpguard import Bounded, Limiter, OneRequestWithBody, forwarded, one_length, place
 
-VERSIONS = ("2025-11-25", "2025-06-18", "2025-03-26")
+# 2025-03-26 is not spoken: its servers take batches, and this one does not (review 12, I1). A client that asks for it is
+# answered with the newest version, and decides.
+VERSIONS = ("2025-11-25", "2025-06-18")
 PATHS = ("/mcp", "/mcp/")
 MOST_BODY = 64 * 1024           # a request; a proof of a stamp is a few kilobytes
 MOST_ANSWER = 1 << 20           # what is read from a service of this machine, at most
-DIGEST = re.compile(r"^[0-9a-fA-F]{64}$")
+# \A and \Z: "$" also matches before a newline at the end, which urllib then strips from the address it asks
+# (review 12, H1)
+DIGEST = re.compile(r"\A[0-9a-fA-F]{64}\Z")
 KEEP_DAYS = 7                   # a SHA-256 taken is known again, free of charge, for this many days
 MOST_KNOWN = 20000
 MOST_CLIENTS = 50               # names of client programs counted a day; the rest count as "other"
 NETWORK_KEEP = 30               # seconds an answer of the pool is kept
 HALVING, FIRST_REWARD, TAIL = 1_051_200, 512, 8
 LISTED_AS_OF = "23 November 2026"
+# Client programs are counted under a name of this list, by a word of the name they give; any other is "other". What a
+# caller writes there is kept nowhere (review 12, I8).
+CLIENTS = {"claude": "claude", "anthropic": "claude", "chatgpt": "openai", "openai": "openai", "cursor": "cursor",
+           "windsurf": "windsurf", "codeium": "windsurf", "cline": "cline", "roo": "roo-code", "continue": "continue",
+           "zed": "zed", "goose": "goose", "inspector": "mcp-inspector", "vscode": "vscode", "copilot": "copilot",
+           "gemini": "gemini", "librechat": "librechat", "n8n": "n8n", "langchain": "langchain", "smithery": "smithery",
+           "glama": "glama", "pulsemcp": "pulsemcp", "lobehub": "lobehub", "mcphub": "mcphub", "fastmcp": "fastmcp",
+           "mcp-remote": "mcp-remote"}
 
 INSTRUCTIONS = (
     "Free tools about TrueNorth (NORTH), a young cryptocurrency mined with ordinary CPUs, run by Polarka (polarka.org), "
@@ -82,20 +94,24 @@ TOOLS = [
     {"name": "north_stamp", "title": "Stamp a SHA-256 into the TrueNorth chain (free)",
      "description": "Records that some data existed by a block: give the SHA-256 of a file or text (64 hexadecimal "
      "characters; compute it yourself and never send the data itself). Free of charge, within a daily bound for all "
-     "callers together. Stamps are written in batches about every ten minutes: the first answer says \"waiting\" and "
-     "when the next batch is; call again with the same sha256 after it and one block (about 15 minutes in all) and the "
-     "answer is the proof (state \"stamped\"). Asking again for a hash already taken costs nothing. Keep the proof: "
-     "anyone can check it with north_stamp_verify or polarka-agent stamp-verify, without trusting Polarka. The hash of a "
-     "short or guessable text can be guessed back: add a random secret and keep it. TrueNorth is young and small: a "
-     "stamp is evidence of order in time, not proof for a court.",
+     "callers together and a smaller one for the internet address a request comes from, which many users of one "
+     "application may share. Stamps are written in batches about every ten minutes: the first answer says \"waiting\" "
+     "and when the next batch is; call again with the same sha256 after it and one block (about 15 minutes in all) and "
+     "the answer is the proof (state \"stamped\"). Asking again within seven days for a hash taken through this "
+     "connector costs nothing. Keep the proof. Anyone can check it without trusting Polarka: polarka-agent "
+     "stamp-verify with their own TrueNorth node, or the transaction and its block in an explorer of the chain. "
+     "north_stamp_verify checks it here, with Polarka's node. The hash of a short or guessable text can be "
+     "guessed back: add a random secret and keep it. TrueNorth is young and small: a stamp is evidence of order in "
+     "time, not proof for a court.",
      "inputSchema": _schema({"sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$",
                                         "description": "the SHA-256 of the data, 64 hexadecimal characters"}}, ["sha256"]),
      "annotations": {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": True}},
     {"name": "north_stamp_verify", "title": "Check a proof of a stamp",
      "description": "Checks a proof of a stamp (the JSON that north_stamp returns in state \"stamped\", or a proof file of "
      "polarka-agent): that the path leads from the SHA-256 to the root, that the transaction carries the root, that the "
-     "block holds the transaction, and with the node at polarka.org that this block is in the TrueNorth chain. Answers "
-     "valid true with the block, its time and depth, or valid false with the reason.",
+     "block holds the transaction, and with Polarka's node that this block is in the TrueNorth chain. Answers valid true "
+     "with the block, its time and depth, or valid false with the reason. It is Polarka's server asking Polarka's node: "
+     "to check without trusting Polarka, use polarka-agent stamp-verify with a node of your own.",
      "inputSchema": _schema({"proof": {"type": "object", "description": "the proof, as north_stamp returned it"}}, ["proof"]),
      "annotations": {"readOnlyHint": True, "openWorldHint": False}},
 ]
@@ -113,9 +129,10 @@ GUIDE = {
             "a block; free here through north_stamp), letters between agents paid with postage, and an x402 facilitator "
             "for sellers.",
             "Honest limits: as far as Polarka knows (%s), NORTH trades on no exchange and has no market price. The chain "
-            "is young and small. Polarka's software is beta: independent AI reviewers read every part, and a security "
-            "expert read the agent and the server as a private person; there has been no professional audit. Polarka "
-            "mines and holds NORTH." % LISTED_AS_OF,
+            "is young and small. Polarka's software is beta. AI models that did not write it reviewed polarka-agent and its "
+            "services many times (docs/review-guide.md in its repository); a security expert read polarka-agent and the "
+            "server's set-up as a private person on 22 November 2026; the Android apps have had AI reviews only; nobody "
+            "has audited any of it professionally. Polarka mines and holds NORTH." % LISTED_AS_OF,
         ],
         "links": ["https://polarka.org", "https://polarka.org/how/", "https://truenorth-project.github.io"],
     },
@@ -140,9 +157,9 @@ GUIDE = {
             "than 32 % of a day's blocks of the network.",
             "Over HTTP: polarka-agent mine https://pool.polarka.org --address YOUR_ADDRESS. Over stratum, for IronMiner "
             "1.0.8 or later: stratum+tcp://pool.polarka.org:3333, user = your address, password anything.",
-            "A fair comparison: for mining around the clock, a pool with a lower fee such as IronPool (2 %, PPLNS) or solo "
-            "mining with an own TrueNorth Core node pays more on average. PPS suits short sessions, weak machines and agents "
-            "that need a first coin quickly. Live numbers: north_network.",
+            "A fair comparison: for mining around the clock, a pool with a lower fee, or solo mining with an own TrueNorth "
+            "Core node, pays more on average; compare the pools on their own pages. PPS suits short sessions, weak machines "
+            "and agents that need a first coin quickly. Live numbers: north_network.",
         ],
         "links": ["https://pool.polarka.org", "https://polarka.org/how/"],
     },
@@ -162,9 +179,10 @@ GUIDE = {
             "A stamp shows that data existed by a given block. Compute the SHA-256 of a file yourself and give only the hash "
             "to north_stamp. The stamp service puts the hashes that came in into a tree about every ten minutes and writes "
             "its root into the chain with one transaction; the answer to a later call with the same hash is the proof.",
-            "Anyone can check a proof without trusting Polarka: north_stamp_verify here, or polarka-agent stamp-verify "
-            "proof.json with an own node. The rules: leaf = SHA-256(00 || digest), node = SHA-256(01 || left || right), and "
-            "the transaction carries OP_RETURN 'POLARKA' 01 root.",
+            "Anyone can check a proof without trusting Polarka: polarka-agent stamp-verify proof.json with a TrueNorth node "
+            "of their own, or by hand with the rules below and an explorer of the chain. The tool north_stamp_verify checks "
+            "it here, with Polarka's node. The rules: leaf = SHA-256(00 || digest), node = SHA-256(01 || left || right), and the "
+            "transaction carries OP_RETURN 'POLARKA' 01 root.",
             "The hash of a short or guessable text can be guessed back: add a random secret and keep it. TrueNorth is young "
             "and small: a stamp is good evidence of order in time, not proof for a court.",
         ],
@@ -197,6 +215,17 @@ def issued(height):
     return total
 
 
+def client_label(name):
+    """The name under which a client program is counted: one of CLIENTS by a word of its name, else "other"."""
+    words = re.split(r"[^a-z0-9]+", name.lower()[:200])
+    for word in words:
+        if word in CLIENTS:
+            return CLIENTS[word]
+    if "mcp-remote" in name.lower():
+        return CLIENTS["mcp-remote"]
+    return "other" if name.strip() else "unnamed"
+
+
 def iso(t):
     return datetime.datetime.fromtimestamp(int(t), datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -212,6 +241,18 @@ def origin_ok(value):
     except ValueError:
         return False
     return parts.scheme in ("http", "https") and bool(parts.hostname) and parts.path in ("", "/") and not parts.query
+
+
+def local_service(url):
+    """True for the address of a service of this machine as the connector asks it: http, 127.0.0.1 or ::1 with a port,
+    nothing else. Read whole, not by its beginning: http://127.0.0.1:8681@elsewhere/ is not here (review 12, I7)."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+        return (parts.scheme == "http" and parts.hostname in ("127.0.0.1", "::1") and parts.port is not None
+                and parts.username is None and parts.password is None and parts.path in ("", "/")
+                and not parts.query and not parts.fragment)
+    except ValueError:
+        return False
 
 
 def rpc_error(ident, code, message):
@@ -248,10 +289,12 @@ class Connector:
             from .stamps import verify
         self._verify = verify
         self.lock = threading.Lock()
+        self.saving = threading.Lock()              # one save at a time: two would share a temp file (review 12, M2)
         self.salt = secrets.token_bytes(16)         # places are counted under a hash that lives as long as the process
         self.places = {}                            # hash of a place -> new stamps today (kept in memory only)
         self.network = (0, None)                    # (when, answer) of north_network
-        self.verifying = Limiter(30, clock=time.monotonic, everyone=300)
+        # Checks ask the node twice each. Forty places at their bound fill the bucket of all, not ten (review 12, M1).
+        self.verifying = Limiter(30, clock=time.monotonic, everyone=1200)
         os.makedirs(folder, mode=0o700, exist_ok=True)
         self.state = self._load("state.json", {"v": 1, "day": None, "free": 0, "known": {}})
         self.usage = self._load("usage.json", {"v": 1, "days": {}})
@@ -282,13 +325,20 @@ class Connector:
         os.replace(tmp, path)
 
     def save(self):
-        """Writes what changed; called after each new free stamp and, for the counts of use, now and then."""
-        with self.lock:
-            if not self.dirty:
-                return
-            state, usage, self.dirty = json.loads(json.dumps(self.state)), json.loads(json.dumps(self.usage)), False
-        self._write("state.json", state)
-        self._write("usage.json", usage)
+        """Writes what changed; called after each new free stamp and, for the counts of use, now and then. One save at a
+        time, the newest copy last (review 12, M2). A save that fails leaves the state to be written by the next one."""
+        with self.saving:
+            with self.lock:
+                if not self.dirty:
+                    return
+                state, usage, self.dirty = json.loads(json.dumps(self.state)), json.loads(json.dumps(self.usage)), False
+            try:
+                self._write("state.json", state)
+                self._write("usage.json", usage)
+            except OSError:
+                with self.lock:
+                    self.dirty = True
+                raise
 
     def _today(self):
         return datetime.datetime.fromtimestamp(self.clock(), datetime.timezone.utc).strftime("%Y-%m-%d")
@@ -339,7 +389,9 @@ class Connector:
             with self.lock:
                 self.network = (now, kept)
         chain, pool = kept.get("chain") or {}, kept.get("pool") or {}
-        height = chain.get("height") if type(chain.get("height")) is int else None
+        # the pool names the height of the block it mines, one above the chain's tip (review 12, L2)
+        mining = chain.get("height") if type(chain.get("height")) is int else None
+        height = mining - 1 if mining is not None and mining > 0 else None
         rate = chain.get("hashrate") if type(chain.get("hashrate")) in (int, float) else None
         out = {"chain": {"name": "TrueNorth", "ticker": "NORTH", "network": kept.get("network"), "height": height,
                          "blocks_last_24h": chain.get("blocks_24h"), "block_target_seconds": 120,
@@ -350,7 +402,6 @@ class Connector:
                         "min_payout_north": pool.get("min_payout"), "blocks_found": pool.get("blocks_found"),
                         "miners_last_hour": pool.get("miners"),
                         "hashrate_last_hour": None if type(pool.get("hashrate")) not in (int, float) else "%.1f kH/s" % (pool["hashrate"] / 1000)},
-               "market": "as far as Polarka knows (%s), NORTH trades on no exchange and has no price" % LISTED_AS_OF,
                "as_of": iso(kept["t"]) if type(kept.get("t")) is int else iso(now),
                "source": "the node and the pool at polarka.org; hashrates are estimates"}
         if height is not None:
@@ -360,15 +411,16 @@ class Connector:
 
     def tool_guide(self, args):
         topic = args.get("topic", "start")
-        if topic not in GUIDE:
+        if type(topic) is not str or topic not in GUIDE:
             raise ToolError("INPUT", "topic is one of: %s" % ", ".join(GUIDE))
         return dict(GUIDE[topic], topic=topic, topics=list(GUIDE))
 
     def tool_stamp(self, args, where):
         digest = args.get("sha256")
-        if type(digest) is not str or not DIGEST.match(digest):
+        if type(digest) is not str or not DIGEST.fullmatch(digest):
             raise ToolError("INPUT", "sha256 is the SHA-256 of the data: 64 hexadecimal characters")
-        digest = digest.lower()
+        # what is counted and what is asked for are made from the same 32 bytes, and cannot differ (review 12, H1)
+        digest = bytes.fromhex(digest).hex()
         key = hashlib.sha256(self.salt + str(where).encode()).hexdigest()[:32]
         with self.lock:
             today = self._today()
@@ -376,28 +428,39 @@ class Connector:
             new = digest not in self.state["known"]
             if new:
                 if len(self.state["known"]) >= MOST_KNOWN or self.state["free"] >= self.free_per_day:
-                    raise ToolError("ENOUGH_TODAY", "the free stamps of today are used up; ask again tomorrow (UTC), or "
-                                    "stamp with an own wallet: north_guide, topic \"agent\"")
+                    raise ToolError("ENOUGH_TODAY", "the free stamps of today are used up, for all callers together; ask "
+                                    "again tomorrow (UTC), or stamp with a wallet of your own: north_guide, topic \"agent\"")
                 if self.places.get(key, 0) >= self.free_per_place:
-                    raise ToolError("ENOUGH_TODAY", "this place has used its free stamps of today; ask again tomorrow (UTC)")
-                self.state["free"] += 1                 # reserved now, given back if the service says no
+                    raise ToolError("ENOUGH_TODAY", "the free stamps of today for the internet address this request came "
+                                    "from are used up; many users of one application can share that address. Ask again "
+                                    "tomorrow (UTC), or stamp with a wallet of your own: north_guide, topic \"agent\"")
+                self.state["free"] += 1                 # reserved now, given back unless the stamp is recorded
                 self.places[key] = self.places.get(key, 0) + 1
+        said, status, recorded = None, None, False
         try:
-            status, said = local_json("%s/v1/stamp/%s" % (self.stamps_url, digest), method="POST")
-        except OSError:
-            said, status = None, None
-        ok = status == 200 and type(said) is dict and said.get("digest") == digest and said.get("state") in ("waiting", "written", "stamped")
-        with self.lock:
+            try:
+                status, said = local_json("%s/v1/stamp/%s" % (self.stamps_url, digest), method="POST")
+            except OSError:
+                pass
+            ok = status == 200 and type(said) is dict and said.get("digest") == digest and said.get("state") in ("waiting", "written", "stamped")
             if new and ok:
-                self.state["known"][digest] = today
-                self.dirty = True
-            elif new:
-                self.state["free"] = max(self.state["free"] - 1, 0)
-                self.places[key] = max(self.places.get(key, 1) - 1, 0)
+                with self.lock:
+                    self.state["known"][digest] = today
+                    self.dirty = True
+                recorded = True
+        finally:
+            if new and not recorded:                    # whatever went wrong, the reservation goes back (review 12, I2)
+                with self.lock:
+                    self.state["free"] = max(self.state["free"] - 1, 0)
+                    self.places[key] = max(self.places.get(key, 1) - 1, 0)
+        with self.lock:
             left = max(self.free_per_day - self.state["free"], 0)
-        if new and ok:
+        if recorded:
             self._count("stamps_new")
-            self.save()
+            try:
+                self.save()
+            except OSError as e:                        # the stamp is taken; the next save writes it (review 12, M2)
+                sys.stderr.write("could not save: %s\n" % type(e).__name__)
         if not ok:
             if type(said) is dict and type(said.get("error")) is str:
                 raise ToolError(said["error"][:40], str(said.get("message", ""))[:300] or "the stamp service said no")
@@ -408,8 +471,9 @@ class Connector:
         if said["state"] == "stamped":
             answer = {"digest": digest, "state": "stamped", "block_height": said.get("block_height"),
                       "confirmations": said.get("confirmations"), "proof": said,
-                      "then": "keep the proof; anyone can check it with north_stamp_verify or polarka-agent stamp-verify"}
-        answer["free_stamps_left_today"] = left
+                      "then": "keep the proof. Anyone can check it without trusting Polarka: polarka-agent stamp-verify "
+                              "with their own TrueNorth node. north_stamp_verify checks it here, with Polarka's node"}
+        answer["free_stamps_left_today_for_all_callers"] = left
         return answer
 
     def tool_verify(self, args, where):
@@ -420,11 +484,11 @@ class Connector:
             raise ToolError("SLOW", "too many checks from this place in a minute; try again shortly")
         try:
             done = self._verify(proof, self.node)
-        except ValueError as e:
+        except ValueError as e:                      # the proof, or the node's word about this block and transaction
             self._count("verified")
             return {"valid": False, "reason": str(e)[:300]}
-        except Exception as e:                       # the node: down, slow, or a refusal that is not about the proof
-            raise ToolError("UNAVAILABLE", "the node at polarka.org cannot be asked now (%s); try again later" % type(e).__name__)
+        except Exception as e:                       # the node: down, slow, starting, or an error not about the proof (review 12, L1)
+            raise ToolError("UNAVAILABLE", "the node at polarka.org cannot judge the proof now (%s); try again later" % type(e).__name__)
         self._count("verified")
         out = {"valid": True if self.node is not None else None, "digest": proof.get("digest"), "txid": proof.get("txid"),
                "block_hash": proof.get("block_hash"), "block_height": proof.get("block_height"),
@@ -457,11 +521,12 @@ class Connector:
         if "method" not in message:
             return None                                 # a response: this server asks the client nothing, so it is let go
         method, ident = message["method"], message.get("id")
+        readable = ident if type(ident) in (str, int) and type(ident) is not bool else None
         if type(method) is not str:
-            return rpc_error(None, -32600, "the method is a string")
+            return rpc_error(readable, -32600, "the method is a string")
         if "id" not in message:
             return None                                 # a notification (initialized, cancelled): nothing to answer
-        if type(ident) not in (str, int) or type(ident) is bool:
+        if readable is None:
             return rpc_error(None, -32600, "the id of a request is a string or a number")
         params = message.get("params") if message.get("params") is not None else {}
         if type(params) is not dict:
@@ -474,7 +539,7 @@ class Connector:
             wanted = params.get("protocolVersion")
             client = params.get("clientInfo") if type(params.get("clientInfo")) is dict else {}
             name = client.get("name") if type(client.get("name")) is str else ""
-            self._count("initialize", re.sub(r"[^A-Za-z0-9 ._-]", "", name)[:40] or "unnamed")
+            self._count("initialize", client_label(name))
             return result({"protocolVersion": wanted if wanted in VERSIONS else VERSIONS[0],
                            "capabilities": {"tools": {"listChanged": False}},
                            "serverInfo": {"name": "polarka-connector", "title": "Polarka: TrueNorth (NORTH) tools",
@@ -521,7 +586,6 @@ def make_handler(app, trust_proxy, limiter):
             body = b"" if obj is None else json.dumps(obj).encode()
             self.send_response(code)
             self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Expose-Headers", "MCP-Protocol-Version")
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             for k, v in headers:
@@ -566,31 +630,70 @@ def make_handler(app, trust_proxy, limiter):
             if self.admit():
                 self.reply(405, {"error": "NO_SESSIONS", "message": "this server keeps no sessions"}, [("Allow", "POST, OPTIONS")])
 
+        def read_chunked(self, most):
+            """A body sent in chunks, at most `most` bytes: None when it is longer. Raises ValueError when it is not
+            chunked as HTTP/1.1 says. Caddy passes on a chunked body as it came (review 12, L6)."""
+            out = bytearray()
+            while True:
+                line = self.rfile.readline(1026)
+                if not line.endswith(b"\n"):
+                    raise ValueError("a chunk's size line")
+                size = line.split(b";", 1)[0].strip()
+                if not 1 <= len(size) <= 8 or any(c not in b"0123456789abcdefABCDEF" for c in size):
+                    raise ValueError("a chunk's size")
+                size = int(size, 16)
+                if size == 0:
+                    for _ in range(32):                 # trailers, which nothing here reads
+                        if self.rfile.readline(1026) in (b"\r\n", b"\n"):
+                            return bytes(out)
+                    raise ValueError("the end of the chunks")
+                if len(out) + size > most:
+                    return None
+                chunk = self.rfile.read(size)
+                if len(chunk) != size or self.rfile.readline(3) not in (b"\r\n", b"\n"):
+                    raise ValueError("a chunk")
+                out += chunk
+
         def do_POST(self):
             if not self.admit():
                 return
-            version = self.headers.get("MCP-Protocol-Version")
-            if version is not None and version.strip() not in VERSIONS:
-                return self.reply(400, rpc_error(None, -32600, "MCP-Protocol-Version %s is not one of %s" % (version.strip()[:40], ", ".join(VERSIONS))))
             kind = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
             if kind != "application/json":
                 return self.reply(415, rpc_error(None, -32600, "the body is application/json"))
-            length = one_length(self.headers)
-            if length is None or self.headers.get("Transfer-Encoding") is not None:
-                return self.reply(411, rpc_error(None, -32600, "a body with one Content-Length, please"))
-            if length > MOST_BODY:
-                return self.reply(413, rpc_error(None, -32600, "a message is at most %d bytes here" % MOST_BODY))
-            raw = self.rfile.read(length)
+            chunked = self.headers.get_all("Transfer-Encoding") or []
+            if chunked:
+                # one way of sending a body, and that one chunked; never both a length and chunks
+                if len(chunked) != 1 or chunked[0].strip().lower() != "chunked" or self.headers.get("Content-Length") is not None:
+                    return self.reply(400, rpc_error(None, -32600, "a body with one Content-Length, or chunked"))
+                try:
+                    raw = self.read_chunked(MOST_BODY)
+                except (ValueError, OSError):
+                    return self.reply(400, rpc_error(None, -32600, "the chunks of the body could not be read"))
+                if raw is None:
+                    return self.reply(413, rpc_error(None, -32600, "a message is at most %d bytes here" % MOST_BODY))
+            else:
+                length = one_length(self.headers)
+                if length is None:
+                    return self.reply(411, rpc_error(None, -32600, "a body with one Content-Length, or chunked"))
+                if length > MOST_BODY:
+                    return self.reply(413, rpc_error(None, -32600, "a message is at most %d bytes here" % MOST_BODY))
+                raw = self.rfile.read(length)
             try:
                 message = json.loads(raw.decode("utf-8"))
             except (UnicodeDecodeError, ValueError, RecursionError):
                 return self.reply(400, rpc_error(None, -32700, "not JSON"))
             if type(message) is list:
                 return self.reply(400, rpc_error(None, -32600, "one JSON-RPC message a request; batches are not taken"))
+            # the version is the one agreed at initialize, which itself comes before any is agreed (review 12, I1)
+            version = self.headers.get("MCP-Protocol-Version")
+            starting = type(message) is dict and message.get("method") == "initialize"
+            if version is not None and version.strip() not in VERSIONS and not starting:
+                return self.reply(400, rpc_error(None, -32600, "MCP-Protocol-Version %s is not one of %s" % (version.strip()[:40], ", ".join(VERSIONS))))
             answer = app.answer(message, self.where())
             if answer is None:
                 return self.reply(202)
-            self.reply(200, answer)
+            # what is no JSON-RPC message at all is refused with an HTTP status too (review 12, I1)
+            self.reply(400 if (answer.get("error") or {}).get("code") == -32600 else 200, answer)
 
     return H
 
@@ -598,7 +701,9 @@ def make_handler(app, trust_proxy, limiter):
 def serve(app, listen, trust_proxy=False, per_minute=300, most=64):
     from .walletd import loopback
     host, port = loopback(listen)
-    limiter = Limiter(per_minute)
+    # A place has its share of requests; all of them together are bounded by what the machine does at once (Bounded),
+    # not by a bucket that ten places could empty for everybody (review 12, M1).
+    limiter = Limiter(per_minute, everyone=0)
     server = Bounded((host, port), make_handler(app, trust_proxy, limiter), most=most)
 
     def saver():

@@ -99,7 +99,8 @@ class Protocol(unittest.TestCase):
         shutil.rmtree(self.folder)
 
     def test_initialize_names_a_version_it_speaks(self):
-        for wanted, got in (("2025-11-25", "2025-11-25"), ("2025-06-18", "2025-06-18"), ("2025-03-26", "2025-03-26"),
+        # 2025-03-26 is not spoken since review 12 (I1): its servers take batches; the client is offered the newest
+        for wanted, got in (("2025-11-25", "2025-11-25"), ("2025-06-18", "2025-06-18"), ("2025-03-26", "2025-11-25"),
                             ("1999-01-01", "2025-11-25"), (None, "2025-11-25")):
             r = self.app.answer({"jsonrpc": "2.0", "id": 1, "method": "initialize",
                                  "params": {"protocolVersion": wanted, "clientInfo": {"name": "claude-ai<script>"}}}, "x")["result"]
@@ -111,7 +112,8 @@ class Protocol(unittest.TestCase):
         with open(os.path.join(self.folder, "usage.json")) as f:
             day = json.load(f)["days"]["2026-11-23"]
         self.assertEqual(day["initialize"], 5)
-        self.assertEqual(day["clients"], {"claude-aiscript": 5})
+        # counted under a name of the list, never the caller's own text (review 12, I8)
+        self.assertEqual(day["clients"], {"claude": 5})
 
     def test_the_tools_say_what_they_do_and_change(self):
         tools = self.app.answer({"jsonrpc": "2.0", "id": "a", "method": "tools/list"}, "x")["result"]["tools"]
@@ -163,10 +165,12 @@ class Protocol(unittest.TestCase):
     def test_the_network(self):
         shown, failed, _ = call(self.app, "north_network")
         self.assertFalse(failed, shown)
-        self.assertEqual(shown["chain"]["height"], 30570)
+        # the pool names the block it mines, 30570: the chain's tip is one below it (review 12, L2)
+        self.assertEqual(shown["chain"]["height"], 30569)
         self.assertEqual(shown["chain"]["hashrate_estimate"], "342.6 kH/s")
         self.assertEqual(shown["chain"]["block_reward_north"], 512)
-        self.assertEqual(shown["chain"]["issued_north"], 512 * 30570)
+        self.assertEqual(shown["chain"]["issued_north"], 512 * 30569)
+        self.assertNotIn("market", shown)
         self.assertEqual(shown["chain"]["next_halving_height"], 1051200)
         self.assertEqual(shown["pool"]["fee_percent"], 5)
         self.assertEqual(shown["as_of"], "2026-11-23T00:58:20Z")
@@ -207,11 +211,11 @@ class FreeStamps(unittest.TestCase):
     def test_a_stamp_waits_then_comes_with_its_proof(self):
         shown, failed, _ = call(self.app, "north_stamp", {"sha256": digest(1).upper()})
         self.assertFalse(failed, shown)
-        self.assertEqual((shown["state"], shown["digest"], shown["free_stamps_left_today"]), ("waiting", digest(1), 4))
+        self.assertEqual((shown["state"], shown["digest"], shown["free_stamps_left_today_for_all_callers"]), ("waiting", digest(1), 4))
         self.assertEqual(shown["next_batch_utc"], "2026-11-23T01:10:00Z")
         self.services.stamped.add(digest(1))
         shown, failed, _ = call(self.app, "north_stamp", {"sha256": digest(1)})
-        self.assertEqual((shown["state"], shown["block_height"], shown["free_stamps_left_today"]), ("stamped", 30580, 4))
+        self.assertEqual((shown["state"], shown["block_height"], shown["free_stamps_left_today_for_all_callers"]), ("stamped", 30580, 4))
         self.assertEqual(shown["proof"]["txid"], "cd" * 32)
 
     def test_bad_input_costs_nothing(self):
@@ -245,25 +249,25 @@ class FreeStamps(unittest.TestCase):
         self.assertEqual((failed, shown["error"]), (True, "UNAVAILABLE"))
         self.services.stamp_error = None
         shown, failed, _ = call(self.app, "north_stamp", {"sha256": digest(1)})
-        self.assertEqual(shown["free_stamps_left_today"], 4)
+        self.assertEqual(shown["free_stamps_left_today_for_all_callers"], 4)
         self.services.stamp_error = (200, {"digest": digest(9), "state": "waiting"})       # an answer about another hash
         shown, failed, _ = call(self.app, "north_stamp", {"sha256": digest(3)})
         self.assertTrue(failed)
         self.services.stamp_error = None
-        self.assertEqual(call(self.app, "north_stamp", {"sha256": digest(4)})[0]["free_stamps_left_today"], 3)
+        self.assertEqual(call(self.app, "north_stamp", {"sha256": digest(4)})[0]["free_stamps_left_today_for_all_callers"], 3)
 
     def test_what_is_kept_over_a_restart_and_a_new_day(self):
         for n in range(3):
             call(self.app, "north_stamp", {"sha256": digest(n)}, where="a")
         app = connector.Connector(self.folder, self.services.url, self.services.url, None, 5, 3, self.clock)
-        self.assertEqual(call(app, "north_stamp", {"sha256": digest(0)}, where="a")[0]["free_stamps_left_today"], 2)
-        self.assertEqual(call(app, "north_stamp", {"sha256": digest(7)}, where="a")[0]["free_stamps_left_today"], 1)
+        self.assertEqual(call(app, "north_stamp", {"sha256": digest(0)}, where="a")[0]["free_stamps_left_today_for_all_callers"], 2)
+        self.assertEqual(call(app, "north_stamp", {"sha256": digest(7)}, where="a")[0]["free_stamps_left_today_for_all_callers"], 1)
         self.clock.t += DAY
         shown = call(app, "north_stamp", {"sha256": digest(8)}, where="a")[0]
-        self.assertEqual(shown["free_stamps_left_today"], 4)
-        self.assertEqual(call(app, "north_stamp", {"sha256": digest(0)}, where="a")[0]["free_stamps_left_today"], 4)
+        self.assertEqual(shown["free_stamps_left_today_for_all_callers"], 4)
+        self.assertEqual(call(app, "north_stamp", {"sha256": digest(0)}, where="a")[0]["free_stamps_left_today_for_all_callers"], 4)
         self.clock.t += 8 * DAY
-        self.assertEqual(call(app, "north_stamp", {"sha256": digest(0)}, where="a")[0]["free_stamps_left_today"], 4)
+        self.assertEqual(call(app, "north_stamp", {"sha256": digest(0)}, where="a")[0]["free_stamps_left_today_for_all_callers"], 4)
         with open(os.path.join(self.folder, "state.json")) as f:
             kept = json.load(f)
         self.assertEqual(set(kept["known"]), {digest(0)})          # older than a week: forgotten
@@ -378,7 +382,9 @@ class Endpoint(unittest.TestCase):
         status, _, got = self.ask("POST", body=b"[" * 100000 + b"]" * 100000)
         self.assertEqual(status, 413)
         status, _, got = self.ask("POST", body=b"[" * 30000 + b"]" * 30000)
-        self.assertEqual((status, got["error"]["code"]), (400, -32700))
+        # too deep for this Python's reader (-32700), or read and then refused as a batch (-32600): never an answer
+        self.assertEqual(status, 400)
+        self.assertIn(got["error"]["code"], (-32700, -32600))
         status, _, got = self.ask("POST", body=[ping, ping])
         self.assertEqual((status, got["error"]["code"]), (400, -32600))
         self.assertEqual(self.ask("POST", body=ping)[0], 200)

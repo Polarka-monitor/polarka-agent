@@ -38,9 +38,9 @@ MAX_ANSWER_BYTES = 8 * 1024 * 1024
 MAX_WORDS = 300             # of a server's own words, this many characters are kept
 
 LATE, MOVED, UNREACHABLE = "late", "moved", "unreachable"
-_ID = re.compile(r"^[0-9a-f]{64}$")
-_HEX = re.compile(r"^(?:[0-9a-f]{2})+$")
-_ADDRESS = re.compile(r"^[0-9A-Za-z]{8,%d}$" % MAX_ADDRESS)
+_ID = re.compile(r"\A[0-9a-f]{64}\Z")
+_HEX = re.compile(r"\A(?:[0-9a-f]{2})+\Z")
+_ADDRESS = re.compile(r"\A[0-9A-Za-z]{8,%d}\Z" % MAX_ADDRESS)
 
 
 class ServerError(Exception):
@@ -55,7 +55,7 @@ class ServerError(Exception):
 
 
 # what an address can look like at all: one word of small letters and digits. Anything else is not passed on.
-ADDRESS_SHAPE = re.compile(r"^[a-z]{1,10}1[a-z0-9]{6,90}$")
+ADDRESS_SHAPE = re.compile(r"\A[a-z]{1,10}1[a-z0-9]{6,90}\Z")
 
 # Why a node did not take a transaction, as one of a few fixed words. The node's own text is free text from
 # the server's side and is not passed on to a program.
@@ -340,7 +340,7 @@ class Server:
         server without them answers 404."""
         t = self._call("/v1/mining/template")
         bits = _text(t, "bits", 8)
-        if not re.match(r"^[0-9a-f]{8}$", bits):
+        if not re.match(r"\A[0-9a-f]{8}\Z", bits):
             raise _unknown("bits")
         n = int(bits, 16)
         exponent, mantissa = n >> 24, n & 0x7FFFFF

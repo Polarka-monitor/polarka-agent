@@ -58,7 +58,8 @@ GIVE_BACK = (429, 503, 507)     # answers of the service behind for which the ca
 X402_PER_MINUTE = 30            # x402 payments that reach the facilitator, a minute from one place (ten times that from all)
 QUOTES_PER_MINUTE = 3          # quotes a minute from one place (review 11c, T4)
 UNPAID_PER_PLACE = 2           # quotes of one place that wait for their payment at one time
-KEEP_FOR_NEWCOMERS = 5         # of the wallet's GAP addresses nobody paid, those kept for places that hold no quote
+KEEP_FOR_NEWCOMERS = 10        # of the wallet's GAP addresses nobody paid, those kept for places that hold no quote
+                               # (5 in 0.2.4: 13 places then held all of them for forty minutes; review 12, L5)
 KEEP_SPENT = 30 * 86400         # a lot whose calls are used up is forgotten this long after its quote ran out
 SAVE_EVERY = 5                  # seconds: a call taken from a lot is written down with the next save, at most this late
 HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailers", "transfer-encoding", "upgrade",
@@ -167,8 +168,6 @@ class Gate:
         holds UNPAID_PER_PLACE unpaid at a time, and the last KEEP_FOR_NEWCOMERS are for places that hold none
         (review 11c, T4). `source`: the asker's address, None for the gate's own uses."""
         who = None if source is None else hashlib.sha256(self.salt + place(source).encode()).hexdigest()
-        if who is not None and not self.quote_limiter.take(who):
-            raise Refused("SLOW", "too many quotes from this place in a minute; ask again in a minute, or pay over x402")
         with self.lock:
             now = self.clock()
             price = self._price()
@@ -180,7 +179,12 @@ class Gate:
                 mine = sum(1 for w in self.quoted.values() if w == who)
                 if mine >= UNPAID_PER_PLACE or (mine and len(waiting) >= GAP - KEEP_FOR_NEWCOMERS):
                     raise Refused("BUSY", "quotes of this place wait for their payment: pay one of them, or ask again when "
-                                          "they run out (%d minutes), or pay over x402" % ((QUOTE_LIFE + 600) // 60))
+                                          "they run out (%d minutes), or pay over x402, which works meanwhile"
+                                          % ((QUOTE_LIFE + 600) // 60))
+                # a quote refused as BUSY takes nothing from the bucket of all quotes: only one that is given does
+                # (review 12, L5)
+                if not self.quote_limiter.take(who):
+                    raise Refused("SLOW", "too many quotes from this place in a minute; ask again in a minute, or pay over x402")
             idle = [a for a in self.state["addresses"] if a not in waiting]
             if idle:
                 address = idle[0]
@@ -189,7 +193,8 @@ class Gate:
                     address = self.wallet.fresh_address()
                 except Refused as e:
                     if e.kind in ("TOO_MANY_OPEN", "TOO_MANY_ADDRESSES"):
-                        raise Refused("BUSY", "too many are about to pay just now; ask again in a few minutes")
+                        raise Refused("BUSY", "too many are about to pay just now; ask again in a few minutes, or pay over "
+                                              "x402, which works meanwhile")
                     raise
                 self.state["addresses"][address] = 0
             token = os.urandom(24).hex()
@@ -552,7 +557,7 @@ def make_handler(gate, upstream, trust_proxy, routes=()):
     return H
 
 
-TOKEN_SHAPE = re.compile(r"^[0-9a-f]{16,128}$")
+TOKEN_SHAPE = re.compile(r"\A[0-9a-f]{16,128}\Z")
 
 
 def buy(wallet, url, most, timeout=30):

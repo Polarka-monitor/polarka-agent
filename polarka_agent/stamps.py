@@ -30,7 +30,7 @@ from .httpguard import OneRequestWithBody
 
 from .wallet import STAMP, Refused
 
-DIGEST = re.compile(r"^[0-9a-f]{64}$")
+DIGEST = re.compile(r"\A[0-9a-f]{64}\Z")
 VERSION = 1
 DEEP = 30           # blocks after which a batch is no longer looked at for a reorganization (as many as RECENT)
 RECENT = 30         # blocks whose hashes are kept, to find where a reorganization began
@@ -197,9 +197,15 @@ def check(proof):
     return True
 
 
+class CannotAsk(Exception):
+    """The node could not judge a proof now: it does not answer, it is starting, it no longer holds the block. Says
+    nothing about the proof (review 12, L1)."""
+
+
 def verify(proof, node_rpc=None):
     """check(), and with a node (anything with call()): the transaction is the one named, is in the named
-    block, and that block is in the node's chain. Returns what was checked."""
+    block, and that block is in the node's chain. Returns what was checked. Raises ValueError when the proof does not
+    hold, CannotAsk when the node could not say."""
     check(proof)
     done = {"path": True, "root_in_transaction": True, "transaction_in_block": True}
     if node_rpc is None:
@@ -207,7 +213,7 @@ def verify(proof, node_rpc=None):
         done["block"] = ("not checked: give a node, or look up block %s at height %s in an explorer"
                          % (proof.get("block_hash"), proof.get("block_height")))
         return done
-    from .walletd import Refused as NodeRefused
+    from .walletd import NodeDown, Refused as NodeRefused
     try:
         got = node_rpc.call("getrawtransaction", proof["txid"], True, proof["block_hash"])
         if got.get("hex") != proof["transaction"] and got.get("hex", "").lower() != str(proof["transaction"]).lower():
@@ -218,8 +224,13 @@ def verify(proof, node_rpc=None):
         if int(header["height"]) != int(proof["block_height"]):
             raise ValueError("the block is at another height than the proof says")
     except NodeRefused as e:
-        # the node's own no (an unknown block, a transaction not in it) is an answer: the proof does not hold
-        raise ValueError("the node does not know this transaction in this block (%s)" % str(e)[:120])
+        # The node's own no about this block or this transaction (-5: not found; -8: not a hash it can read) is an
+        # answer: the proof does not hold. Any other error (-28 while it starts, -1 for a block it pruned) is not.
+        if e.code in (-5, -8):
+            raise ValueError("the node does not know this transaction in this block (%s)" % str(e)[:120])
+        raise CannotAsk("the node cannot judge the proof now (%s)" % str(e)[:120])
+    except NodeDown as e:
+        raise CannotAsk("the node does not answer (%s)" % str(e)[:120])
     except (KeyError, TypeError) as e:
         raise ValueError("the proof lacks what the node is asked about (%s)" % e)
     done.update(block=True, confirmations=int(header["confirmations"]), time=int(header["time"]))

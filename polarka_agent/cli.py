@@ -400,6 +400,7 @@ def run(argv=None, out=sys.stdout):
             if a.rpc_url:
                 from .walletd import Node as RpcNode
                 rpc = RpcNode(a.rpc_url, os.path.expanduser(a.rpc_cookie or "~/.truenorth/.cookie"))
+            from .stamps import CannotAsk
             try:
                 done = verify(proof, rpc)
                 if rpc is None:      # consistent, but the chain was not asked: not "valid"
@@ -407,6 +408,8 @@ def run(argv=None, out=sys.stdout):
                 return show(dict(done, valid=True, digest=proof.get("digest"), block_height=proof.get("block_height")))
             except ValueError as e:
                 return show({"valid": False, "error": str(e)}, 2)
+            except CannotAsk as e:   # the node could not say: no word on the proof (review 12, L1)
+                return show({"valid": None, "error": str(e)}, 4)
         if a.cmd == "connector-serve":
             from .connector import Connector, serve as connector_serve
             from .walletd import Node as RpcNode, loopback
@@ -418,10 +421,12 @@ def run(argv=None, out=sys.stdout):
                 raise Refused("INPUT", "--per-minute is 1 to 600; 0 <= --free-per-place <= --free-per-day <= 100000")
             if bool(a.rpc_url) != bool(a.rpc_cookie):
                 raise Refused("INPUT", "--rpc-url and --rpc-cookie go together")
+            from .connector import local_service
             for url in (a.stamps, a.pool):
-                if not url.startswith("http://127.0.0.1:") and not url.startswith("http://[::1]:"):
+                if not local_service(url):
                     raise Refused("INPUT", "--stamps and --pool are services of this machine: http://127.0.0.1:PORT")
-            node = RpcNode(a.rpc_url, os.path.expanduser(a.rpc_cookie)) if a.rpc_url else None
+            # two short questions a check: a node that hangs holds a thread for 20 s at most, not four minutes (review 12, I7)
+            node = RpcNode(a.rpc_url, os.path.expanduser(a.rpc_cookie), timeout=10) if a.rpc_url else None
             app = Connector(folder, a.stamps, a.pool, node, a.free_per_day, a.free_per_place)
             return connector_serve(app, a.listen, a.trust_proxy, a.per_minute)
         if a.cmd == "x402-facilitator":

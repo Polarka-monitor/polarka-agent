@@ -69,9 +69,11 @@ Specification draft for x402: `docs/x402-scheme-exact-bip122.md` (also open as x
 
 ## What has been checked, and by whom
 
-One review by a person, and seven by AI models that did not write the code (five before it, two after):
+One review by a person, and nine by AI models that did not write the code (five before it, four after it, one of
+these with a second look):
 
-- the first review by a person (a programmer, 22 November 2026, of the package of that morning: all of
+- the first review by a person (a security expert, reading as a private person and not for an employer or a
+  client, 22 November 2026, of the package of that morning: all of
   polarka-agent, the server's configuration and scripts, the watcher and the logs; not the Android wallet and
   miner, the web site or truenorth-cold-address; by reading, without running the code). In the keys, the
   signing and the wallet it found nothing by which coins could be taken or an output forged. It found: a way to
@@ -188,9 +190,27 @@ One review by a person, and seven by AI models that did not write the code (five
   socket starts a stopped pool: stop both, `systemctl stop polarka-stratum.socket polarka-pool`); I1 (a TLS port
   for stratum is the next step); H5 and H4 as above.
 
+- review 12 (a fresh AI agent, 23 November 2026: the remote connector of 0.2.5 and the mending of review 11c, at
+  6981971, before the connector was reachable from outside): 1 High, 2 Medium, 6 Low, 8 Info. H1: a SHA-256 with a
+  newline after it passed the connector's check (`$` matches before a last newline), urllib stripped the newline,
+  and the stamp service took the hash while the connector counted nothing, so one place could fill every batch and
+  shut the paying users out; M1: the bucket of all requests was ten places' shares, so ten places within their own
+  bounds shut the connector for everybody; M2: two saves at once shared one temporary file, so a stamp that was
+  taken was answered as failed and state.json could be left torn. Low: L1 a node that is starting called a good
+  proof invalid; L2 north_network showed the height of the block being mined and its reward as issued; L3 two
+  claims in the texts (a check here "without trusting Polarka"; who read the code); L4 north_mail_read and the local
+  north_stamp were not marked as destructive; L5 thirteen places could still hold all the gate's quotes; L6 a
+  chunked body was refused. All mended in 0.2.5 with the reviewer's tests (`tests/test_review12.py`), three of them
+  changed where the mending took another of the ways the review offered: 2025-03-26 is no longer spoken (rather than
+  batches taken), a read is warned once the record of letters let go of records younger than a day (rather than
+  each letter flagged), and a letter is shown up to a day ahead with a word that a clock is wrong, its record kept
+  that much longer (I4). Every `^...$` pattern of the package that reads input from outside now ends in `\Z`.
+  Open: T6 and N1, N4 of review 11c as above; L5 in part (twenty places can still hold the gate's twenty addresses
+  for forty minutes; x402 is not touched); walletd's own limits (the wallet's review, N5).
+
 Review 9 read the fixes of review 8 and found them sound; review 10 found most of the fixes of the human review
-correct, and its reviewer read the fixes of its own findings again. Nobody but their author has read the fixes of
-review 9 and of that second look. The facilitator for sellers from outside (item 2 above) opened with 0.2.3.
+correct, and its reviewer read the fixes of its own findings again; review 11c and review 12 read the fixes of the
+looks before them. Nobody but their author has read the fixes of review 12. The facilitator for sellers from outside (item 2 above) opened with 0.2.3.
 
 Their reports can be had on request. Low findings that are still open are listed in them. Earlier parts of the
 project (wallet, pool) went through four further AI reviews. No person outside has read the code since the

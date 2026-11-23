@@ -43,8 +43,8 @@ READ_TIME = 5                       # seconds a caller has to send its request i
 ANSWER_TIME = 330                   # seconds a caller waits: a payment may wait three times for the wallet server
 MOST_AT_ONCE = 8                    # callers served at once; one more is told that the service is busy
 MOST_OF_ONE = 4                     # of them from one user of the system (review 10, L4)
-HEX64 = re.compile(r"^[0-9a-f]{64}$")
-NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
+HEX64 = re.compile(r"\A[0-9a-f]{64}\Z")
+NAME = re.compile(r"\A[A-Za-z_][A-Za-z0-9_.-]{0,63}\Z")
 OPS = ("info", "balance", "address", "first_address", "received", "history", "payments", "limits", "pay", "stamp",
        "hand_again")
 
@@ -488,7 +488,7 @@ MACOS = {"system": "macos", "venv": "/Library/Application Support/PolarkaSigner/
 # groups whose members can make themselves root (with a password, or without one: docker, lxd, disk ...), or read
 # what only root may (shadow); sudo rules of a user's own are asked of sudo (review 10, N5)
 ADMIN_GROUPS = ("root", "wheel", "sudo", "admin", "docker", "lxd", "incus", "incus-admin", "disk", "libvirt", "shadow")
-PACKAGE = re.compile(r"^polarka-agent==[0-9]+(\.[0-9]+){1,3}((\.dev|rc|a|b|\.post)[0-9]+)?$")
+PACKAGE = re.compile(r"\Apolarka-agent==[0-9]+(\.[0-9]+){1,3}((\.dev|rc|a|b|\.post)[0-9]+)?\Z")
 
 
 def places(system=None):

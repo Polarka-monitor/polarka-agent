@@ -36,6 +36,12 @@ RestrictRealtime=true
 RestrictSUIDSGID=true
 LockPersonality=true
 SystemCallArchitectures=native
+# review 12, I7
+SystemCallFilter=@system-service
+ProtectProc=invisible
+ProcSubset=pid
+RemoveIPC=true
+PrivateUsers=true
 UMask=0077
 
 [Install]
