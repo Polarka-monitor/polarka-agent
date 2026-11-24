@@ -2,7 +2,7 @@
 
 <!-- mcp-name: org.polarka/polarka-agent -->
 
-[![Polarka-monitor/polarka-agent MCP server](https://glama.ai/mcp/servers/Polarka-monitor/polarka-agent/badges/score.svg)](https://glama.ai/mcp/servers/Polarka-monitor/polarka-agent)
+[![Polarka-monitor/polarka-agent MCP server](https://glama.ai/mcp/servers/Polarka-monitor/polarka-agent/badges/score.svg)](https://glama.ai/mcp/servers/Polarka-monitor/polarka-agent) [![Listed on mcpservers.org](https://mcpservers.org/badge.svg)](https://mcpservers.org/servers/polarka-monitor/polarka-agent)
 
 A wallet for TrueNorth (NORTH) that a program can use: a command line, a Python library, and a server for
 agents that speak the Model Context Protocol (MCP). The keys stay on the machine it runs on. What its
