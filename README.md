@@ -15,6 +15,11 @@ HTTP transport). Four free tools: the network and the pool now (`north_network`)
 proof of a stamp (`north_stamp_verify`). It holds no wallet and asks for no account; `deploy/connector/README.md`
 says what it keeps (no caller's address). For a wallet that pays, install the package (below).
 
+**Why a stamp in NORTH:** its proof is usually in a block within about twelve minutes (a batch every ten minutes, a
+block every two on average); 100 stamps cost the NORTH that about 600 hashes make, which an agent can mine itself
+(`polarka-agent mine`); and it asks for no account and no key. If Bitcoin's security matters and some hours of
+waiting do not, OpenTimestamps is free and the better choice.
+
 **State: 0.2.8.** Any part of this package and of the services at polarka.org may change, and nothing is
 promised.
 `docs/how-it-works.md` (also at https://polarka.org/how/) says what each part does, who holds what and who sees
