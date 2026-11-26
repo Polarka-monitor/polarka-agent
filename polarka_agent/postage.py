@@ -74,15 +74,18 @@ USDC_KEEP = 86400               # a USDC payment is remembered this long
 USDC_WAIT_KEEP = 3600           # one that failed, this long (shown again, it is told why)
 SETTLING_NOW = "settling_now"   # the same payment is being settled for another request this moment
 USDC_FINAL = ("transaction_failed", "authorization_conflict", "payment_already_used", "authorization_expired",
-              "authorization_canceled")
+              "authorization_canceled", "authorization_used_elsewhere")
 USDC_ASK_EVERY = 15             # seconds: a payment whose outcome is not known yet goes to the facilitator at most this often
 USDC_POLL = (4, 4)              # seconds to wait before asking again within the request, while the chain does not hold it
 USDC_AT_ONCE = 8                # USDC payments asked of the facilitator at once; more wait a few seconds (second reading, F3)
 USDC_OPEN_PER_PLACE = 8         # payments of one place whose outcome is not known, bound at once (F2)
+USDC_OPEN_FOR = 3900            # seconds a payment bound without a transfer counts against its place: no longer than its
+                                # authorization can last at the facilitator (an hour) and a little more (third reading, G3)
 USDC_PATH_MOST = 512            # longer paths are not paid in USDC (F2)
 USDC_RECHECK = 60               # seconds between looks at whether the facilitator settles what the gate asks for (F4)
 USDC_PROTOCOL = "polarka-usdc/2"    # how the facilitator must say it answers (its /health)
-USDC_NOT_NOW = ("facilitator_busy", "usdc_not_available")     # nothing paid, nothing bound: try again later (503)
+USDC_NOT_NOW = ("facilitator_busy", "usdc_not_available", "facilitator_unreachable")  # nothing paid, nothing bound:
+                                # try again later (503)
 EVM_SIGNATURE = re.compile(r"\A0x[0-9a-fA-F]{130}\Z")
 DIGITS30 = re.compile(r"\A[0-9]{1,30}\Z")
 NONCE = re.compile(r"\A0x[0-9a-fA-F]{64}\Z")
@@ -166,6 +169,7 @@ class Usdc:
         try:
             h = self.facilitator.health()
         except Refused:
+            self.ready = False      # not offered while it cannot be reached (third reading, G3)
             return False
         f, why = self.facilitator, None
         said = (h.get("network"), str(h.get("asset", "")).lower(), str(h.get("payTo", "")).lower())
@@ -190,8 +194,8 @@ class Usdc:
 
     def watch(self):
         """Asks the facilitator again every USDC_RECHECK seconds: USDC is taken once it settles what this gate asks
-        for, and no longer if it starts to settle something else. One that cannot be reached for a moment changes
-        nothing (its payments then wait, bound to their calls)."""
+        for, and no longer if it starts to settle something else or cannot be reached (third reading, G3): payments
+        already bound wait, bound to their calls."""
         while not self.stopped.wait(USDC_RECHECK):     # real seconds, whatever clock the gate is given
             was = self.ready
             try:
@@ -200,6 +204,9 @@ class Usdc:
                 self.ready = False
             if self.ready and not was:
                 sys.stderr.write("%s USDC facilitator reached; USDC is taken\n" % time.strftime("%Y-%m-%d %H:%M:%S"))
+            elif was and not self.ready:
+                sys.stderr.write("%s ALARM the USDC facilitator cannot be reached; USDC is not taken until it answers\n"
+                                 % time.strftime("%Y-%m-%d %H:%M:%S"))
 
     def here(self, path):
         return self.prefix_of(path) is not None
@@ -647,7 +654,8 @@ class Gate:
                 return no("usdc_not_available", key)
             if seen is None and by is not None and sum(
                     1 for s in self.state["usdc"].values() if isinstance(s, dict) and s.get("by") == by
-                    and s.get("state") == "settling" and not s.get("tx")) >= USDC_OPEN_PER_PLACE:
+                    and s.get("state") == "settling" and not s.get("tx") and now - s.get("at", 0) < USDC_OPEN_FOR) \
+                    >= USDC_OPEN_PER_PLACE:
                 return no(TOO_MANY, key)
             if source is not None and self.x402_limiter is not None and not self.x402_limiter.take(place(source)):
                 return no(TOO_MANY, key)
@@ -667,8 +675,9 @@ class Gate:
             self.usdc_busy.add(key)
         try:
             done = u.facilitator.settle(payment, u.wanted())
-            for pause in USDC_POLL:     # sent, and the chain does not hold it yet (or the facilitator cannot say so):
-                if done.get("errorReason") != SETTLING or done.get("known") is True:     # asked again a little later
+            for pause in USDC_POLL:     # sent, and the chain does not hold it yet (or the facilitator cannot say so), or
+                # its background look holds it this moment (third reading, N1): asked again a little later
+                if done.get("errorReason") not in (SETTLING, SETTLING_NOW) or done.get("known") is True:
                     break
                 time.sleep(pause)
                 done = u.facilitator.settle(payment, u.wanted())
@@ -695,9 +704,10 @@ class Gate:
                     seen["unconfirmed"] = True
                 self._log_usdc(now, said, u.prefix_of(path), unconfirmed=in_flight)
             elif done.get("sent") is False:
-                if seen.get("tx"):
-                    # a transfer was sent for it, and the facilitator says no money moved nor will: over, not set free
-                    seen.update(state="failed", reason=reason)
+                if seen.get("tx") or said["transaction"]:
+                    # a transfer was sent for it, and the facilitator says no money moved nor will: over, not set free,
+                    # so that it is told why when shown again (an answer that names its transfer: third reading, G0)
+                    seen.update(state="failed", reason=reason, tx=said["transaction"] or seen.get("tx", ""))
                 else:
                     self.state["usdc"].pop(key, None)       # nothing went to the chain: the payment is nobody's yet
             elif reason in USDC_FINAL:

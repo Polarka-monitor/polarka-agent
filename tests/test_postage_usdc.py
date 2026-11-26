@@ -319,6 +319,59 @@ class UsdcGateTest(unittest.TestCase):
         self.assertEqual(self.g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "s")[0]["errorReason"], "authorization_expired")
         self.assertEqual(len(self.evm.calls), 2 + len(postage.USDC_POLL))
 
+    def test_a_use_of_its_nonce_elsewhere_ends_the_payment(self):
+        """Third reading, G0: the facilitator found the payment's nonce used by another authorization of the payer, which
+        paid us nothing; its own transfer failed. Over at once, not set free, and told so when shown again."""
+        self.assertIn("authorization_used_elsewhere", postage.USDC_FINAL)
+        self.evm.answers = [{"success": False, "errorReason": "authorization_used_elsewhere", "transaction": TX, "sent": False}]
+        said, may, key = self.g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "s")
+        self.assertEqual((may, said["errorReason"], self.g.state["usdc"][key]["state"]), (False, "authorization_used_elsewhere", "failed"))
+        self.now[0] += postage.USDC_ASK_EVERY
+        self.assertEqual(self.g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "s")[0]["errorReason"], "authorization_used_elsewhere")
+        self.assertEqual(self.g.usdc_pay(paid(), "GET", "/v1/stamp/bb", "s")[0]["errorReason"], "payment_is_for_another_call")
+        self.assertEqual(len(self.evm.calls), 1)
+
+    def test_its_background_look_holding_the_payment_is_asked_again_within_the_request(self):
+        """Third reading, N1: "settling_now" (the facilitator's own look holds the payment this moment) is asked again
+        after a pause, as a transfer that waits for its block."""
+        self.evm.answers = [{"success": False, "errorReason": postage.SETTLING_NOW, "transaction": TX, "sent": True},
+                            {"success": True, "transaction": TX, "network": "eip155:8453", "payer": PAYER}]
+        said, may, _ = self.g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "s")
+        self.assertEqual((may, said["transaction"], len(self.evm.calls)), (True, TX, 2))
+
+    def test_a_facilitator_lost_after_the_start_is_not_offered_until_it_answers(self):
+        """Third reading, G3: a facilitator that cannot be reached any more is neither offered nor asked; payments of
+        one place bound without a transfer count against it no longer than an authorization can last."""
+        class Away(Evm):
+            up = True
+            timeout = 45
+
+            def health(self):
+                if not self.up:
+                    raise Refused("X402", "the facilitator cannot be reached (URLError)")
+                return {"protocol": postage.USDC_PROTOCOL, "network": "eip155:8453", "asset": Evm.asset, "payTo": TO,
+                        "maxAmount": "1000000", "confirmTimeout": 15, "sendWithin": 20}
+        away = Away()
+        u = postage.Usdc(away, TO, 10000, ["/v1/stamp"])
+        u.stopped.set()
+        g = postage.Gate(self.w, N // 100, 100, clock=lambda: self.now[0], look_every=0, usdc=u)
+        self.assertTrue(u.ready)
+        away.up = False
+        self.assertFalse(u.check(starting=False))
+        self.assertFalse(u.ready)
+        self.assertEqual(g.x402_needed("/v1/stamp/aa")["accepts"], [])
+        self.assertEqual(g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "s")[0]["errorReason"], "usdc_not_available")
+        self.assertIn("usdc_not_available", postage.USDC_NOT_NOW)
+        away.up = True
+        self.assertTrue(u.check(starting=False))
+        # bindings with no transfer (answers lost) shut a place out for at most USDC_OPEN_FOR
+        away.answers = [{"success": False, "errorReason": "unexpected_settle_error"}] * (postage.USDC_OPEN_PER_PLACE + 1)
+        for n in range(postage.USDC_OPEN_PER_PLACE):
+            g.usdc_pay(paid(30 + n), "GET", "/v1/stamp/%02x" % n, "7.7.7.7")
+        self.assertEqual(g.usdc_pay(paid(60), "GET", "/v1/stamp/60", "7.7.7.7")[0]["errorReason"], postage.TOO_MANY)
+        self.now[0] += postage.USDC_OPEN_FOR
+        self.assertEqual(g.usdc_pay(paid(61), "GET", "/v1/stamp/61", "7.7.7.7")[0]["errorReason"], "unexpected_settle_error")
+
     def test_what_the_facilitator_says_goes_out_only_as_a_short_reason(self):
         self.evm.answers = [{"success": False, "errorReason": "invalid_exact_evm_insufficient_balance", "errorMessage": "0x08c3..."},
                             {"success": False, "errorReason": "Some <b>thing</b> odd"}]
@@ -479,6 +532,19 @@ class EvmFacilitatorTest(unittest.TestCase):
         got = f.settle(paid(), f.wanted(10000, TO))
         self.assertEqual((got["success"], got["errorReason"], got["sent"]), (False, "facilitator_refused", False))
 
+
+    def test_a_connection_refused_is_told_as_nothing_sent(self):
+        """Third reading, G3: nothing listens where the facilitator should: it never saw the payment, so the gate binds
+        nothing and the buyer is told to try again (503)."""
+        import socket
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+        sock.close()                    # nothing listens there now
+        f = x402.EvmFacilitator("http://127.0.0.1:%d" % port, "eip155:8453")
+        got = f.settle(paid(), f.wanted(10000, TO))
+        self.assertEqual((got["success"], got["errorReason"], got["sent"]), (False, "facilitator_unreachable", False))
+        self.assertIn("facilitator_unreachable", postage.USDC_NOT_NOW)
 
 if __name__ == "__main__":
     unittest.main()

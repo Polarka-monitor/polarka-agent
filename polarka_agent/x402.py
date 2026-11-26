@@ -558,7 +558,9 @@ class EvmFacilitator(RemoteFacilitator):
 
     def settle(self, payment, wanted):
         """As RemoteFacilitator.settle; a refusal of the HTTP kind (4xx: the request was not taken at all) is told as
-        "sent": false, so that the gate does not keep a binding for a payment that never reached the chain (F2)."""
+        "sent": false, so that the gate does not keep a binding for a payment that never reached the chain (F2), and so
+        is a connection refused, which the facilitator never saw (third reading, G3). A request that may have reached
+        it (a timeout, a connection lost after it was sent) says nothing of "sent"."""
         data = json.dumps({"x402Version": VERSION, "paymentPayload": payment, "paymentRequirements": wanted}).encode()
         req = urllib.request.Request(self.url + "/settle", data, {"Content-Type": "application/json", "User-Agent": "polarka-agent"})
         failed = {"success": False, "errorReason": "unexpected_settle_error", "transaction": "", "network": self.network, "payer": None}
@@ -569,7 +571,13 @@ class EvmFacilitator(RemoteFacilitator):
             if 400 <= e.code < 500:
                 return dict(failed, errorReason="facilitator_refused", sent=False)
             return failed
-        except (urllib.error.URLError, OSError, ValueError):
+        except urllib.error.URLError as e:
+            if isinstance(e.reason, ConnectionRefusedError):
+                return dict(failed, errorReason="facilitator_unreachable", sent=False)
+            return failed
+        except ConnectionRefusedError:
+            return dict(failed, errorReason="facilitator_unreachable", sent=False)
+        except (OSError, ValueError):
             return failed
         return got if isinstance(got, dict) else failed
 
