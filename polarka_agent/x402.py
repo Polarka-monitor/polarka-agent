@@ -524,6 +524,37 @@ class RemoteFacilitator:
             return {"success": False, "errorReason": "unexpected_settle_error", "transaction": "", "network": self.network, "payer": None}
 
 
+USDC = {    # network -> the USDC contract there, and the name and version of its EIP-712 domain, as Circle deployed it
+    "eip155:8453": ("0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", "USD Coin", "2"),       # Base
+    "eip155:84532": ("0x036CbD53842c5426634e7929541eC2318f3dCF7e", "USDC", "2"),          # Base Sepolia, for tests
+}
+EVM_ADDRESS = re.compile(r"\A0x[0-9a-fA-F]{40}\Z")
+SETTLING = "settlement_pending"     # an EVM facilitator has sent the transfer and its block has not come yet
+
+
+class EvmFacilitator(RemoteFacilitator):
+    """A facilitator for USDC on an EVM network (x402 "exact" with EIP-3009), over HTTP on this machine or over https.
+    It takes the payer's signed authorization and has the coins go from the payer straight to the seller: this
+    program holds no USDC and signs nothing for it."""
+
+    def __init__(self, url, network, timeout=30):
+        if network not in USDC:
+            raise Refused("X402", "USDC is known here on %s" % ", ".join(sorted(USDC)))
+        self.url, self.network, self.timeout, self.chain = url.rstrip("/"), network, timeout, None
+        if not local_or_https(self.url):
+            raise Refused("X402", "a facilitator is reached over https (or on this machine)")
+        kinds = [k for k in self._call("/supported").get("kinds", []) if isinstance(k, dict) and k.get("scheme") == "exact"
+                 and k.get("network") == network and k.get("x402Version") == VERSION]
+        if not kinds:
+            raise Refused("X402", "the facilitator does not settle USDC on %s" % network)
+        self.asset, self.name, self.version = USDC[network]
+
+    def wanted(self, amount, pay_to, timeout=300):
+        """The requirements of x402 for `amount` millionths of a USDC to `pay_to`."""
+        return {"scheme": "exact", "network": self.network, "amount": str(int(amount)), "asset": self.asset, "payTo": pay_to,
+                "maxTimeoutSeconds": int(timeout), "extra": {"name": self.name, "version": self.version}}
+
+
 def caller(address):
     """Whom a request to a facilitator for sellers from outside counts against: its address, and for IPv6 the /64
     it is in, which one machine may hold whole."""
@@ -804,6 +835,16 @@ def _unpark(book, slot):
             return
 
 
+def _named_pending(book, origin, named, pay_to, most):
+    """Called under BOOK: (key, payment) of one in the book that waits for its block and buys what the seller names
+    `named` at `origin`, for `pay_to` and within `most`; or None (0.2.8, review of 0.2.8 L1)."""
+    for k, h in book["pending"].items():
+        if (isinstance(h, dict) and h.get("origin") == origin and h.get("named") == named and h.get("payTo") == pay_to
+                and isinstance(h.get("amount"), int) and 0 < h["amount"] <= most):
+            return k, h
+    return None
+
+
 def _lot_used(book, origin, claim, status, left):
     """Called under BOOK, after a call made with the lot `claim`: what the gate said of it goes to that lot, wherever
     it is now (the current one, or a spare), and to no other; another process of the same wallet may have moved on
@@ -827,7 +868,7 @@ def _lot_used(book, origin, claim, status, left):
 
 
 def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.sleep, clock=time.time, method="GET", body=None,
-          key=None):
+          key=None, _retried=False):
     """GET url; when it answers 402 and takes NORTH on the wallet's chain for at most `most` base units, pays
     within the owner's limits and asks again, while the seller waits for a block for up to `wait` seconds.
 
@@ -840,6 +881,7 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
     `method` and `body` (bytes of JSON) make the call a POST, the paying one included: a letter buys its own postage
     (review 11, L5). `key` names the payment kept in the book (the url unless said): calls to several urls that buy
     the same thing, such as letters to several inboxes, share one payment."""
+    asked = key                     # as the caller named it, for a call made once more (L3)
     network = network or NETWORKS.get(wallet.chain)
     if network is None:
         raise Refused("X402", "x402 in NORTH on %s needs the network's name (network=)" % wallet.chain)
@@ -933,32 +975,46 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
             # for it that still waits for its block is shown on this path too, and nothing more is paid (0.2.8).
             # Only a payment within this call's `most` (review of 0.2.8, L1).
             with BOOK(wallet):
-                for k, h in _book(wallet)["pending"].items():
-                    if (isinstance(h, dict) and h.get("origin") == origin and h.get("named") == named
-                            and h.get("payTo") == offer["payTo"] and isinstance(h.get("amount"), int)
-                            and 0 < h["amount"] <= most):
-                        shared = k, h
-                        break
+                shared = _named_pending(_book(wallet), origin, named, offer["payTo"], most)
+    fresh = False
     if held is None and shared is None:
         if not 0 < amount <= most:
             raise Refused("X402_TOO_MUCH", "the resource asks %s NORTH, more than the %s allowed for it" % (north(amount), north(most)))
-        made = wallet.pay([(offer["payTo"], amount)], "x402 " + url[:150], hand=False)
-        if not isinstance(made.get("raw"), str) or not isinstance(made.get("id"), str):
-            raise Refused("X402", "the wallet gave no signed payment to hand over")     # a signing service of another kind
-        claim = os.urandom(16).hex()
-        payment = {"x402Version": VERSION, "resource": needed.get("resource"), "accepted": offer,
-                   "payload": {"transaction": made["raw"], "claim": claim}}
-        ext = needed.get("extensions")
-        if isinstance(ext, dict) and len(json.dumps(ext)) <= 16384:
-            payment["extensions"] = ext                 # echoed, as x402 asks of a buyer (the bazaar catalogs from it)
-        held = {"header": b64json(payment), "txid": made["id"], "amount": amount, "claim": claim, "made": int(clock()),
-                "url": url}
-        if named is not None:
-            held.update(origin=origin, named=named, payTo=offer["payTo"])
-        with BOOK(wallet):                          # kept before the seller sees it: one payment for one resource
+        came = None
+        with BOOK(wallet):
+            # One payment at a time from this wallet. What another call of it paid since this one looked (another
+            # thread, or another process such as the command line beside an MCP server) is found now, and shown in place
+            # of a second payment: two calls at the same moment bought two lots, and under one key the later payment
+            # took the earlier one's place, its claim with it (L3 and R-L2 of the review of 0.2.8, from 0.2.4).
             book = _book(wallet)
-            book["pending"][key] = held
-            _keep_book(wallet, book)
+            if isinstance(book["pending"].get(key), dict):
+                held = book["pending"][key]
+            elif named is not None:
+                shared = _named_pending(book, origin, named, offer["payTo"], most)
+            came = book["lots"].get(origin)
+            if not isinstance(came, dict) or came.get("claim") == (lot or {}).get("claim") or _retried:
+                came = None
+            if held is None and shared is None and came is None:
+                made = wallet.pay([(offer["payTo"], amount)], "x402 " + url[:150], hand=False)
+                if not isinstance(made.get("raw"), str) or not isinstance(made.get("id"), str):
+                    raise Refused("X402", "the wallet gave no signed payment to hand over")     # a signing service of another kind
+                claim = os.urandom(16).hex()
+                payment = {"x402Version": VERSION, "resource": needed.get("resource"), "accepted": offer,
+                           "payload": {"transaction": made["raw"], "claim": claim}}
+                ext = needed.get("extensions")
+                if isinstance(ext, dict) and len(json.dumps(ext)) <= 16384:
+                    payment["extensions"] = ext         # echoed, as x402 asks of a buyer (the bazaar catalogs from it)
+                held = {"header": b64json(payment), "txid": made["id"], "amount": amount, "claim": claim, "made": int(clock()),
+                        "url": url}
+                if named is not None:
+                    held.update(origin=origin, named=named, payTo=offer["payTo"])
+                book["pending"][key] = held         # kept before the seller sees it: one payment for one resource
+                _keep_book(wallet, book)
+                fresh = True
+        if held is None and shared is None:
+            # a lot of this place came in the meantime: its calls come before anything is paid (once)
+            return fetch(url, wallet, most, timeout, network, wait, sleep, clock, method, body, asked, _retried=True)
+    if fresh:
         again = False
     elif held is None:
         key, held = shared                          # that payment's place in the book is the one settled below

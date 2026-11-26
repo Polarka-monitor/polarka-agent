@@ -26,7 +26,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .httpguard import OneRequestWithBody
+from .httpguard import LOOK, OneRequestWithBody
 
 from .wallet import STAMP, Refused
 
@@ -328,6 +328,17 @@ class Stamps:
                 self.waiting.add(digest)
             return self._status(digest)
 
+    def look(self, digest):
+        """Where a SHA-256 stands, when it is known here; None when it is not. Takes nothing: a proof of a SHA-256
+        that was paid for is fetched again for free."""
+        digest = digest.lower() if isinstance(digest, str) else ""
+        if not DIGEST.match(digest):
+            return None
+        with self.lock:
+            if digest in self.where or digest in self.waiting:
+                return self._status(digest)
+        return None
+
     def _status(self, digest):
         if digest in self.waiting:
             return {"digest": digest, "state": "waiting", "next_batch": self.next_batch(),
@@ -515,6 +526,12 @@ def make_handler(stamps):
                 path = self.path.split("?", 1)[0]
                 if path in ("/v1/stamp", "/v1/stamp/"):
                     return self.send(200, dict(ABOUT, every_seconds=stamps.every, next_batch=stamps.next_batch()))
+                if path.startswith("/v1/stamp/") and self.headers.get(LOOK) == "1":
+                    # the gate asks whether this is known, for a call nobody paid: only a look, nothing is taken
+                    seen = stamps.look(path[len("/v1/stamp/"):])
+                    if seen is None:
+                        return self.send(404, {"error": "UNKNOWN", "message": "this SHA-256 is not stamped here"})
+                    return self.send(200, seen)
                 if path.startswith("/v1/stamp/"):
                     return self.send(200, stamps.take(path[len("/v1/stamp/"):]))
                 self.send(404, {"error": "NOT_HERE", "message": "there is /v1/stamp/<sha256> here"})

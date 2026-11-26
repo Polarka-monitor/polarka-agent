@@ -17,6 +17,10 @@ import threading
 import time
 from http.server import ThreadingHTTPServer
 
+# The header with which the postage gate asks a service behind it only to look (a proof of a SHA-256 already paid
+# for, which costs nothing), never to take anything. The gate drops it from every request that comes from outside.
+LOOK = "X-Polarka-Look"
+
 
 class OneRequestWithBody:
     """Mix in before BaseHTTPRequestHandler: class H(OneRequestWithBody, BaseHTTPRequestHandler)."""

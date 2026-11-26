@@ -234,6 +234,16 @@ def run(argv=None, out=sys.stdout):
                    help="send paths that start with PREFIX to another service behind the gate (may be given more than once)")
     c.add_argument("--public-url", help="the https:// address the gate is seen at; the 402 then names its resources in full")
     c.add_argument("--offers", help="a JSON file of what the gate lets be found in an x402 bazaar (with --public-url)")
+    c.add_argument("--usdc-facilitator", help="also take USDC over x402, one payment for one call, settled by this facilitator "
+                   "(http://127.0.0.1:8402); with --usdc-pay-to and --usdc-path")
+    c.add_argument("--usdc-network", default="eip155:8453", help="the network of USDC (eip155:8453 is Base)")
+    c.add_argument("--usdc-pay-to", help="the address USDC goes to, straight from the payer; its key is not on this machine")
+    c.add_argument("--usdc-price", default="0.01", help="USDC for one call")
+    c.add_argument("--usdc-path", action="append", default=[], metavar="PREFIX",
+                   help="paths that may be paid in USDC (may be given more than once), for example /v1/stamp")
+    c.add_argument("--free-look", action="append", default=[], metavar="PREFIX",
+                   help="paths whose GET without payment is first only looked up behind the gate: what is known there, "
+                        "such as a proof paid for before, is given for nothing (for example /v1/stamp)")
     c = sub.add_parser("stamps-serve", help="stamps as a service: many SHA-256s in one transaction of this wallet, a proof for each")
     c.add_argument("--rpc-url", required=True, help="the node the blocks are read from, for example http://127.0.0.1:9554")
     c.add_argument("--rpc-cookie", required=True, help="the node's .cookie file")
@@ -545,8 +555,15 @@ def run(argv=None, out=sys.stdout):
             if a.offers:
                 from .postage import load_offers
                 offers = load_offers(a.offers)
+            usdc = None
+            if a.usdc_facilitator or a.usdc_pay_to or a.usdc_path:
+                if not (a.usdc_facilitator and a.usdc_pay_to and a.usdc_path):
+                    raise Refused("INPUT", "USDC needs --usdc-facilitator, --usdc-pay-to and --usdc-path, all three")
+                from .postage import Usdc, usdc_units
+                from .x402 import EvmFacilitator
+                usdc = Usdc(EvmFacilitator(a.usdc_facilitator, a.usdc_network), a.usdc_pay_to, usdc_units(a.usdc_price), a.usdc_path)
             return postage_serve(wallet, a.upstream, units(a.price) if a.price is not None else 0, a.calls, a.listen, a.free,
-                                 a.trust_proxy, a.price_hashes or 0, facilitator, routes, a.public_url, offers)
+                                 a.trust_proxy, a.price_hashes or 0, facilitator, routes, a.public_url, offers, usdc, a.free_look)
         if a.cmd == "stamps-serve":
             from .stamps import serve as stamps_serve
             from .walletd import Node as RpcNode

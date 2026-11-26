@@ -843,6 +843,57 @@ class X402Deep(X402OnRegtest):
         self.assertEqual(got["status"], 503)
         self.assertIn(wall, self.book()["pending"])
 
+    def test_two_calls_at_the_same_moment_pay_once(self):
+        """L3 and R-L2 (review of 0.2.8, from 0.2.4): two calls of one wallet to one gate at the same moment, neither
+        with a lot, each had their 402 and each paid a lot; under one key the later payment took the earlier one's place
+        and its claim. Now the one whose turn to pay comes second finds the first one's payment and shows it."""
+        class Up(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                said = self.path.encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(said)))
+                self.end_headers()
+                self.wfile.write(said)
+        up = self.start(ThreadingHTTPServer(("127.0.0.1", 0), Up))
+        for name, paths in (("gate-same-url", ("/v1/unit/a", "/v1/unit/a")), ("gate-two-urls", ("/v1/unit/a", "/v1/unit/b"))):
+            gate = postage.Gate(self.make(name), PRICE, 3, x402=self.patient)
+            plain = postage.make_handler(gate, up.split("//")[1], False)
+            both, holding = threading.Barrier(2, timeout=30), [True]
+
+            class Held(plain):
+                def held(self):
+                    # the gate answers 402 to neither until both have asked: each call learns the price before either pays
+                    if holding[0] and not self.headers.get("PAYMENT-SIGNATURE") and not self.headers.get("X-Postage"):
+                        try:
+                            both.wait()
+                        except threading.BrokenBarrierError:
+                            pass
+                    return plain.handle_one(self)
+                do_GET = held
+            base = self.start(ThreadingHTTPServer(("127.0.0.1", 0), Held))
+            made, got = len(self.buyer.payments()), []
+            calls = [threading.Thread(target=lambda p=p: got.append(x402.fetch(
+                base + p, self.buyer, units("1"), network=self.network, wait=0))) for p in paths]
+            for t in calls:
+                t.start()
+            for t in calls:
+                t.join(60)
+            holding[0] = False
+            self.assertEqual(len(self.buyer.payments()), made + 1, name)               # one payment, not two
+            self.assertEqual([g["status"] for g in got], [202, 202], name)             # and both calls came back
+            self.assertEqual(len({g["txid"] for g in got}), 1, name)                   # with the same payment
+            self.node.mine(1, SINK)
+            for p in paths:
+                done = x402.fetch(base + p, self.buyer, units("1"), network=self.network, wait=0)
+                self.assertEqual((done["status"], done["body"]), (200, p.encode()), name)
+            self.assertEqual(len(self.buyer.payments()), made + 1, name)
+            self.assertEqual([k for k in self.book()["pending"] if k.startswith(base)], [], name)
+
     # the tests of the seller that takes a payment at once are not repeated here
     test_paid_once_and_only_once = test_too_little_and_requirements_changed_on_the_way = None
     test_from_the_command_line_and_as_a_tool = test_what_the_buyer_does_not_pay = None
