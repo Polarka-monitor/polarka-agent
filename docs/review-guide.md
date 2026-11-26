@@ -253,10 +253,28 @@ these with a second look):
   apart (R-L3; our gate puts the resource right itself); where a facilitator ignores `extra.resource` and a payment
   is first seen at another url, its own url may refuse it (L4). A gate of 0.2.8 needs its facilitator at 0.2.8
   first, and taking the gate back refuses what waits under it. Tests: thirteen in `tests/test_x402.py`.
+- 0.2.9, USDC at the gate (`postage.py`, `stamps.py`, `x402.py`, `deploy/usdc/`). Before the gate took USDC,
+  independent AI reviewers that had not seen the code being written read the change (the gate, the free look of the
+  stamps service, the buyer's fix of two calls at the same moment, L3 and R-L2 above) and the facilitator for USDC
+  five times, on 26 November 2026 between 1:49 and 9:41 UTC+1. The first reading found four medium points (a late or
+  lost answer of the facilitator, a 202 that standard clients do not follow, the free look opening behind an old
+  stamps service, payers with code burning our gas) and seven low ones. The second, by another reviewer, found one
+  high point: one lock of the facilitator also held its RPC calls, so payments from keys without USDC, which cost
+  nothing, could hold a real payer past the gate's wait. The third found one high point: the facilitator took any
+  use of the authorization's nonce as the payment, though a payer can use the same nonce for an authorization to
+  itself; a payment now counts only by the transfer of the whole amount to the seller that follows the use of that
+  nonce. The fourth found nothing by which a payer pays without service or anybody gets a call free, and three low
+  points in how the facilitator fills a lost nonce of its gas key, all at our cost. The fifth found those mended and
+  one more weakness of the same kind (a second filler for the same nonce did not hold new payments back soon
+  enough). Tests: the package's suite (508), the facilitator's own (33), and 45 checks on a copy of Base with the
+  real USDC contract: settlement, late blocks, restarts and the standard x402 client through the gate
+  (`deploy/usdc/README.md`). Accepted rather than mended: when a transfer still waits after the gate's wait the call
+  passes, so a payer who then cancels the authorization gets one call for the gas of the cancellation; and the RPC
+  provider sees which payments the facilitator asks about.
 
 Review 9 read the fixes of review 8 and found them sound; review 10 found most of the fixes of the human review
 correct, and its reviewer read the fixes of its own findings again; review 11c and review 12 read the fixes of the
-looks before them. Nobody but their author has read the fixes of review 12, of the human review of 23 November, the waits of 0.2.7 and the fixes of the third reading of the review of 0.2.8. The facilitator for sellers from outside (item 2 above) opened with 0.2.3.
+looks before them. Nobody but their author has read the fixes of review 12, of the human review of 23 November, the waits of 0.2.7, the fixes of the third reading of the review of 0.2.8 and the fix of the fifth reading of the review of the USDC (0.2.9). The facilitator for sellers from outside (item 2 above) opened with 0.2.3.
 
 Their reports can be had on request. Low findings that are still open are listed in them. Earlier parts of the
 project (wallet, pool) went through four further AI reviews. No person outside has read the code since the
@@ -266,7 +284,9 @@ package that the first review by a person read.
 
     git clone https://github.com/Polarka-monitor/polarka-agent && cd polarka-agent   # or the copy you were given
     # a TrueNorth Core build (truenorthd, truenorth-cli) in a folder; tests start their own regtest node
-    TN_BIN=/path/to/bin python3 -m unittest discover -s tests -t .      # about 6 minutes, 384 tests
+    TN_BIN=/path/to/bin python3 -m unittest discover -s tests -t .      # about 8 minutes, 508 tests
+    # the facilitator for USDC, with x402[evm]==2.29.0; on a copy of Base: deploy/usdc/run_fork_tests.sh
+    (cd deploy/usdc && python3 -m unittest test_offline)                 # 33 tests, no chain
     # as root on Linux, the signing service with real users of the system (it makes and removes three):
     sudo POLARKA_TEST_USERS=1 python3 -m unittest tests.test_signer.ApartOnLinux
 
@@ -291,4 +311,7 @@ user of its own that cannot administer the machine.
 Miners are anybody: the pool is open and pays any address since 21 November 2026. NORTH has no market price
 today; the money at risk is the pool's reserve (5000 NORTH, at most 10,000 paid out a day), the faucet's and the
 stamps' small wallets, and every buyer's limit. The chain is a Bitcoin Core 30 fork: waiting transactions are
-replaced by fee. How the parts work together, and who sees what: `docs/how-it-works.md`.
+replaced by fee. From 0.2.9 the gate also takes USDC on Base for stamps, through a facilitator of its own
+on loopback with a gas key of a few dollars of ETH; the USDC goes from the payer straight to the seller's
+address, and the facilitator asks Base through a provider's node, which sees what it asks. How the parts work
+together, and who sees what: `docs/how-it-works.md`.

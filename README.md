@@ -234,7 +234,8 @@ service behind the gate answers 429, 503 or 507 (it did not serve). The gate nev
 holds nobody's coins. A place asks for three quotes a minute and holds two unpaid at a time, and the last five
 addresses of the gate's wallet are kept for places that hold none (review 11c, T4). Whoever runs a service for payment has the duties of one who does
 (saying who they are, among others); the gate is a tool and takes none of them away. Independent AI reviewers
-have read it (`docs/review-guide.md`), no person yet. Ours runs at gate.polarka.org since 20 November 2026.
+have read it, and on 22 November 2026 a security expert as a private person (`docs/review-guide.md`). Ours runs
+at gate.polarka.org since 20 November 2026.
 
 The asker's side is `postage URL --most 0.05` (for an agent the tool `north_postage`): it asks the gate for a
 quote, pays it from the wallet and shows the token. The owner's limits hold as for any payment, and nothing
@@ -252,7 +253,9 @@ scheme is written down in `docs/x402-scheme-exact-bip122.md` and proposed to the
 `fetch` (for an agent the tool `north_fetch`) asks the URL; when it answers 402 in NORTH it pays no more than
 `--most` and the owner's limits allow, and asks again. The payment is kept in the wallet's folder before
 anybody sees it, so a later `fetch` of the same URL shows the same payment again and pays nothing more. It
-follows no redirect, and talks x402 only over https or on the same machine.
+follows no redirect, and talks x402 only over https or on the same machine. From 0.2.9 two calls of the same
+wallet at the same moment pay once: the second finds the first one's payment and shows it, instead of paying
+a second lot.
 
 The seller gives the payment to the network itself and takes it as paid when it is in a block
 (`--confirmations`, one by default): a payment that only waits in the mempool can still be replaced, and
@@ -285,6 +288,30 @@ echoes the extension (`fetch` does); the gate puts back its own resource and ext
 sees the payment, so a buyer cannot write something else into the catalog. Ours is at
 https://gate.polarka.org/x402/discovery/resources (`docs/how-it-works.md`).
 
+**In USDC on Base (from 0.2.9).** A gate can also take USDC on Base (`eip155:8453`) for a call, as a second
+entry of `accepts` after NORTH:
+
+    postage-serve ... --usdc-facilitator http://127.0.0.1:8402 --usdc-pay-to 0xADDRESS --usdc-path /v1/stamp
+
+One USDC payment buys one call (`--usdc-price`, 0.01 by default), so any standard x402 client can pay it; lots
+of 100 calls stay a NORTH thing. The buyer signs an authorization of transfer (EIP-3009) to the seller's own
+address, and the gate's facilitator settles it on Base: the call passes once the network holds the transfer,
+which on Base is in a block within seconds. The gate never holds USDC; the money goes from the buyer's wallet
+straight to `--usdc-pay-to`. The same payment shown again for the same call within ten minutes passes again
+without paying, three times in all (a lost answer); for another call it is refused. The gate writes each settled
+payment to `usdc-paid.jsonl`: the time, the transaction, the payer, the amount, the network and the first part
+of the path, never the whole path. Polarka Agent itself pays in NORTH only.
+
+The facilitator for USDC is a small service of its own, `deploy/usdc/usdc_facilitator.py`, built on the official
+x402 SDK for Python (2.29.0). It listens on loopback only, settles only USDC to the one address it is given, at
+most 1 USDC a payment, and only from plain addresses, not from contracts or smart wallets. It pays Base's
+network fee from a gas key of its own that holds a few dollars of ETH, about a tenth of a cent a payment, and it
+writes every payment into a journal before anything goes to the chain, so a restart forgets nothing. It needs an
+RPC for Base that takes a key; ours is Coinbase's CDP Node. How to run one: `deploy/usdc/README.md`. Ours takes
+USDC at gate.polarka.org since 26 November 2026, for stamps only. On the main network it has not settled a
+payment yet; on a copy of Base with the real USDC contract it passed 45 checks of settlement, late blocks,
+restarts and a standard x402 client through the gate.
+
 An agent that pays for itself, from no coin to a stamped file: `examples/agent_that_pays_for_itself.py`.
 
 ## A service to pay for: stamps
@@ -294,7 +321,7 @@ in during ten minutes into one tree of hashes, and writes the tree's root into t
 transaction. Each SHA-256 then gets a proof: its path to the root, the transaction, the block, and the node's
 proof that the transaction is in that block. Only the SHA-256 is sent, never the file.
 
-    GET https://gate.polarka.org/v1/stamp/<sha256>    (behind the gate: pay with x402 or postage)
+    GET https://gate.polarka.org/v1/stamp/<sha256>    (behind the gate: pay with x402, in NORTH or USDC, or with postage)
     python3 -m polarka_agent stamp-verify PROOF.json [--rpc-url URL --rpc-cookie FILE]
 
 The answer is `waiting` (with the time of the next batch), `written` (the transaction waits for a block) or
@@ -302,6 +329,10 @@ The answer is `waiting` (with the time of the next batch), `written` (the transa
 the proof of the block holds the transaction; with a node it also checks that the block is in the chain.
 Without a node it says that the block was not checked: everything else in a proof can be made up together
 with a block that was never mined.
+
+A SHA-256 that was paid for once can be asked for again free (from 0.2.9). With `--free-look /v1/stamp` the gate
+first only looks behind it, and a SHA-256 the stamps service knows gets its state or its proof without payment,
+up to 60 looks a minute from one place. One it does not know is not taken and costs as before.
 
 The tree: leaf = SHA-256(0x00 || digest), node = SHA-256(0x01 || left || right), the leaves sorted, an odd one
 at the end of a level goes up as it is. The transaction carries `OP_RETURN` `POLARKA` 0x01 || root.
@@ -469,6 +500,7 @@ in the owner's rules. It covers those rules only, not the keys, the signing or t
 
 - The points of the security review of 22 November 2026 that `docs/review-guide.md` names as open.
 - Use by anybody but its author: the pool, the gate and the stamps service have served nobody else yet.
+- A payment in USDC on the main network: the gate takes USDC since 26 November 2026 and has not settled one yet.
 - More than two hundred addresses of a kind: beyond that the wallet hands out no new address, and change uses
   the keys of the window again in turn (from 0.2.3).
 - A way to replace a payment that was handed over and waits for a block without end.

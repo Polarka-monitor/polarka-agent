@@ -18,9 +18,10 @@ checked against the code in this repository and the deployment notes in `deploy/
 | Polarka Agent | your machine | a wallet as a command line, a Python library and an MCP server; pays services that speak x402, asks a faucet, mines for a pool | yours, within the `limits.json` you write |
 | Wallet server | `api.northboundwallet.org` (the Northbound project's, not ours) unless another is named; `node.polarka.org` is ours, a process apart from the one our pool pays through | tells the wallet what its addresses hold and passes its transactions to the network | no |
 | Faucet | `faucet.polarka.org` | 1 NORTH to an address once a day, after a few seconds of hashing | its own, at most 100 NORTH a day |
-| Gate | `gate.polarka.org` | stands before paid routes and sells lots of 100 calls, for x402 or for a quote of its own | receives payments; holds no buyer's coins |
+| Gate | `gate.polarka.org` | stands before paid routes and sells lots of 100 calls, for x402 or for a quote of its own; from 0.2.9 also one stamp for 0.01 USDC on Base | receives payments in NORTH (USDC goes to the author's address); holds no buyer's coins |
 | x402 facilitator | the server, on loopback | checks an x402 payment, hands it to the node, waits for a block | no keys, no coins |
 | x402 facilitator for other sellers | from 0.2.3: the server, on loopback, behind `gate.polarka.org/facilitator` | the same for sellers from outside, as a process apart under a user of the system and an RPC user of its own, with bounds on requests and on payments kept, and no catalog | no keys, no coins |
+| USDC facilitator | from 0.2.9: the server, on loopback | settles a payment in USDC for a stamp on Base: checks the signed authorization and sends the transfer, from the buyer straight to the author's address; asks Base through Coinbase's CDP Node | no USDC; a gas key with a few dollars of ETH for the network fee |
 | Stamps | the server, on loopback, behind the gate | writes SHA-256s into the chain every ten minutes and gives proofs | a small wallet for fees |
 | Pool | `pool.polarka.org` | pays for each share; open to everybody since 21 November 2026 | what it owes miners, from a reserve |
 | Node | the server, on loopback | TrueNorth Core; every service that talks to it (the facilitator, the stamps service, the pool and both wallet servers) has an RPC user allowed only the calls it makes | no wallet |
@@ -142,6 +143,11 @@ inbox that does not ask for its letters); it knows which inbox got how much and 
   down. For a caller that brought new payments it holds, also in memory, until the end of that day (UTC), its
   address or its IPv6 /48 and how many it brought, so that one sender cannot fill what is kept for all. It keeps
   the payments it settled, as the gate's own does.
+- **A payer in USDC** (from 0.2.9) shows its payment to everybody on Base, like any transfer of USDC. Coinbase,
+  whose node our facilitator asks, also sees which payments the facilitator looks at and the transfers it hands
+  over. Circle, which issues USDC, can freeze an address; our facilitator does not check payers against any list.
+  The gate writes each USDC payment it settled to a file: the time, the transaction, the payer, the amount and the
+  first part of the path.
 - **The faucet** keeps the addresses it paid, and no internet addresses on disk.
 - **The pool** keeps every share with the address it is for.
 - **The web server** in front of every name at polarka.org keeps no access log. Until 21 November 2026 its own

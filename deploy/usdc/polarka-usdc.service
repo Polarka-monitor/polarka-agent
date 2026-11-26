@@ -1,0 +1,48 @@
+# The USDC facilitator of the postage gate: x402 "exact" with EIP-3009 on Base, on 127.0.0.1:8402 only.
+# It settles only USDC to PAY_TO, at most 1 USDC a payment, with the gas key in /var/lib/polarka-usdc (made on the
+# server, 0600, user usdc; only a few dollars of ETH). The gate (polarka-gate.service) is its only caller.
+# PAY_TO=0x... is the seller's own address, in /etc/polarka-usdc/env; without that file the unit does not start.
+# --state-dir holds the journal of every payment (written before anything goes to the chain); one facilitator to a
+# folder. Never delete or empty that folder while the gate keeps its bindings (a day): a journal that lost a payment
+# cannot match it with its transfer any more.
+# The RPC is a provider's address with its key in it, in a file only user usdc may read (--rpc-file, 0600). The
+# public https://mainnet.base.org is rate limited and answered by many nodes behind a balancer: broadcasts refused
+# and reads from a node behind, which the facilitator survives but which cost payers their calls. See README.md.
+[Unit]
+Description=Polarka USDC facilitator (x402 exact, EIP-3009, Base)
+After=network-online.target
+Wants=network-online.target
+Before=polarka-gate.service
+
+[Service]
+User=usdc
+Group=usdc
+EnvironmentFile=/etc/polarka-usdc/env
+ExecStart=/opt/polarka-usdc/venv/bin/python /opt/polarka-usdc/usdc_facilitator.py --network eip155:8453 --rpc-file /var/lib/polarka-usdc/rpc-url --key-file /var/lib/polarka-usdc/gas.key --pay-to ${PAY_TO} --max-amount 1000000 --port 8402 --confirm-timeout 15 --state-dir /var/lib/polarka-usdc/state
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ReadWritePaths=/var/lib/polarka-usdc
+MemoryMax=300M
+TasksMax=64
+CapabilityBoundingSet=
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+SystemCallArchitectures=native
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
