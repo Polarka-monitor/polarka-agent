@@ -538,20 +538,40 @@ class EvmFacilitator(RemoteFacilitator):
     program holds no USDC and signs nothing for it."""
 
     def __init__(self, url, network, timeout=45):
+        """Nothing is asked of the facilitator here: whether it settles what the gate asks for is asked by Usdc, at
+        the gate's start and after, so that a facilitator not yet up does not keep the gate down (second reading, F4)."""
         if network not in USDC:
             raise Refused("X402", "USDC is known here on %s" % ", ".join(sorted(USDC)))
         self.url, self.network, self.timeout, self.chain = url.rstrip("/"), network, timeout, None
         if not local_or_https(self.url):
             raise Refused("X402", "a facilitator is reached over https (or on this machine)")
-        kinds = [k for k in self._call("/supported").get("kinds", []) if isinstance(k, dict) and k.get("scheme") == "exact"
-                 and k.get("network") == network and k.get("x402Version") == VERSION]
-        if not kinds:
-            raise Refused("X402", "the facilitator does not settle USDC on %s" % network)
         self.asset, self.name, self.version = USDC[network]
 
     def health(self):
-        """What the facilitator says of itself (its network, asset, payTo, largest amount, time it waits for a block)."""
+        """What the facilitator says of itself (its network, asset, payTo, largest amount, its times), and that it
+        settles USDC on this network over x402 (its /supported). Refused when it cannot be reached."""
+        kinds = [k for k in self._call("/supported").get("kinds", []) if isinstance(k, dict) and k.get("scheme") == "exact"
+                 and k.get("network") == self.network and k.get("x402Version") == VERSION]
+        if not kinds:
+            return {}
         return self._call("/health")
+
+    def settle(self, payment, wanted):
+        """As RemoteFacilitator.settle; a refusal of the HTTP kind (4xx: the request was not taken at all) is told as
+        "sent": false, so that the gate does not keep a binding for a payment that never reached the chain (F2)."""
+        data = json.dumps({"x402Version": VERSION, "paymentPayload": payment, "paymentRequirements": wanted}).encode()
+        req = urllib.request.Request(self.url + "/settle", data, {"Content-Type": "application/json", "User-Agent": "polarka-agent"})
+        failed = {"success": False, "errorReason": "unexpected_settle_error", "transaction": "", "network": self.network, "payer": None}
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+                got = json.loads(r.read(MAX_BODY).decode())
+        except urllib.error.HTTPError as e:
+            if 400 <= e.code < 500:
+                return dict(failed, errorReason="facilitator_refused", sent=False)
+            return failed
+        except (urllib.error.URLError, OSError, ValueError):
+            return failed
+        return got if isinstance(got, dict) else failed
 
     def wanted(self, amount, pay_to, timeout=300):
         """The requirements of x402 for `amount` millionths of a USDC to `pay_to`."""

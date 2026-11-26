@@ -73,9 +73,18 @@ USDC_AGAIN_MOST = 3             # and how many times it passes in all
 USDC_KEEP = 86400               # a USDC payment is remembered this long
 USDC_WAIT_KEEP = 3600           # one that failed, this long (shown again, it is told why)
 SETTLING_NOW = "settling_now"   # the same payment is being settled for another request this moment
-USDC_FINAL = ("transaction_failed", "authorization_conflict", "payment_already_used", "authorization_expired")
+USDC_FINAL = ("transaction_failed", "authorization_conflict", "payment_already_used", "authorization_expired",
+              "authorization_canceled")
 USDC_ASK_EVERY = 15             # seconds: a payment whose outcome is not known yet goes to the facilitator at most this often
 USDC_POLL = (4, 4)              # seconds to wait before asking again within the request, while the chain does not hold it
+USDC_AT_ONCE = 8                # USDC payments asked of the facilitator at once; more wait a few seconds (second reading, F3)
+USDC_OPEN_PER_PLACE = 8         # payments of one place whose outcome is not known, bound at once (F2)
+USDC_PATH_MOST = 512            # longer paths are not paid in USDC (F2)
+USDC_RECHECK = 60               # seconds between looks at whether the facilitator settles what the gate asks for (F4)
+USDC_PROTOCOL = "polarka-usdc/2"    # how the facilitator must say it answers (its /health)
+USDC_NOT_NOW = ("facilitator_busy", "usdc_not_available")     # nothing paid, nothing bound: try again later (503)
+EVM_SIGNATURE = re.compile(r"\A0x[0-9a-fA-F]{130}\Z")
+DIGITS30 = re.compile(r"\A[0-9]{1,30}\Z")
 NONCE = re.compile(r"\A0x[0-9a-fA-F]{64}\Z")
 REASON = re.compile(r"\A[a-z0-9_]{1,80}\Z")
 
@@ -91,6 +100,29 @@ def plain(path):
     where = path.split("?", 1)[0]
     return not ("%" in where or "\\" in where or "//" in where or "/./" in where or "/../" in where
                 or where.endswith("/.") or where.endswith("/.."))
+
+
+def usdc_shape(body, pay_to, price):
+    """(payer, nonce) of a payload in the shape the facilitator takes (its canonical(), the cheap part: exactly a
+    signature of 65 bytes with v 27 or 28 and the six fields of the authorization, to `pay_to`, of `price`), else
+    None. What can never be paid is neither bound to a call nor sent on (second reading, F2)."""
+    if not isinstance(body, dict) or set(body) != {"signature", "authorization"}:
+        return None
+    a, sig = body["authorization"], body["signature"]
+    if not isinstance(sig, str) or not EVM_SIGNATURE.match(sig) or int(sig[-2:], 16) not in (27, 28):
+        return None
+    if not isinstance(a, dict) or set(a) != {"from", "to", "value", "validAfter", "validBefore", "nonce"}:
+        return None
+    if not all(isinstance(a[k], str) for k in ("from", "to", "nonce")) or not EVM_ADDRESS.match(a["from"]) \
+            or a["to"].lower() != pay_to.lower() or not NONCE.match(a["nonce"]):
+        return None
+    for k in ("value", "validAfter", "validBefore"):
+        v = a[k]
+        if not (isinstance(v, str) and DIGITS30.match(v)) and not (isinstance(v, int) and not isinstance(v, bool) and 0 <= v < 10 ** 30):
+            return None
+    if int(a["value"]) != price:
+        return None
+    return a["from"], a["nonce"]
 
 
 def usdc_units(text):
@@ -117,24 +149,63 @@ class Usdc:
         if not self.prefixes or len(self.prefixes) != len(prefixes):
             raise Refused("INPUT", "name the paths that take USDC, each starting with / (--usdc-path /v1/stamp)")
         self.facilitator, self.pay_to, self.price, self.network = facilitator, pay_to, price, facilitator.network
-        health = getattr(facilitator, "health", None)
-        if health is not None:
-            # the facilitator settles what this gate asks for, or the gate does not start (review of the USDC, N5)
-            h = health()
-            said = (h.get("network"), str(h.get("asset", "")).lower(), str(h.get("payTo", "")).lower())
-            if said != (self.network, facilitator.asset.lower(), pay_to.lower()):
-                raise Refused("USDC", "the facilitator settles %s of %s to %s, not what this gate asks for" % said)
-            most, waits = h.get("maxAmount"), h.get("confirmTimeout")
-            if not isinstance(most, str) or not most.isdigit() or int(most) < price:
-                raise Refused("USDC", "the facilitator takes at most %s, less than the price" % most)
-            if not isinstance(waits, (int, float)) or waits + 10 > getattr(facilitator, "timeout", 45):
-                raise Refused("USDC", "the facilitator waits %s seconds for a block; the gate must wait longer" % waits)
+        self.ready = getattr(facilitator, "health", None) is None      # a stand-in without /health, in tests
+        self.stopped = threading.Event()
+        if not self.ready and not self.check():
+            # not reached: the gate starts without USDC and asks again in the background (second reading, F4); a
+            # facilitator that answers and settles something else keeps the gate from starting (check raises)
+            sys.stderr.write("%s ALARM the USDC facilitator cannot be reached; the gate starts without USDC and asks "
+                             "again every %d seconds\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), USDC_RECHECK))
+        if getattr(facilitator, "health", None) is not None:
+            threading.Thread(target=self.watch, daemon=True).start()
+
+    def check(self, starting=True):
+        """True when the facilitator settles what this gate asks for: USDC of this network to this address, at least the
+        price, its protocol, and times within the gate's own wait (review of the USDC, N5; second reading, N6). False
+        when it cannot be reached. When it answers otherwise: Refused at the start, an ALARM and no USDC after."""
+        try:
+            h = self.facilitator.health()
+        except Refused:
+            return False
+        f, why = self.facilitator, None
+        said = (h.get("network"), str(h.get("asset", "")).lower(), str(h.get("payTo", "")).lower())
+        most, waits, within = h.get("maxAmount"), h.get("confirmTimeout"), h.get("sendWithin")
+        if h.get("protocol") != USDC_PROTOCOL:
+            why = "the facilitator does not answer as %s (it says %r)" % (USDC_PROTOCOL, str(h.get("protocol"))[:40])
+        elif said != (self.network, f.asset.lower(), self.pay_to.lower()):
+            why = "the facilitator settles %s of %s to %s, not what this gate asks for" % said
+        elif not isinstance(most, str) or not most.isdigit() or int(most) < self.price:
+            why = "the facilitator takes at most %s, less than the price" % most
+        elif not all(isinstance(t, (int, float)) and not isinstance(t, bool) for t in (waits, within)) \
+                or waits + within + 5 > getattr(f, "timeout", 45):
+            why = "the facilitator may take %s + %s seconds; the gate must wait longer" % (waits, within)
+        if why is None:
+            self.ready = True
+            return True
+        self.ready = False
+        if starting:
+            raise Refused("USDC", why)
+        sys.stderr.write("%s ALARM %s; USDC is not taken until it does\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), why[:200]))
+        return False
+
+    def watch(self):
+        """Asks the facilitator again every USDC_RECHECK seconds: USDC is taken once it settles what this gate asks
+        for, and no longer if it starts to settle something else. One that cannot be reached for a moment changes
+        nothing (its payments then wait, bound to their calls)."""
+        while not self.stopped.wait(USDC_RECHECK):     # real seconds, whatever clock the gate is given
+            was = self.ready
+            try:
+                self.check(starting=False)
+            except Exception:           # whatever it said: no USDC until it says what it should
+                self.ready = False
+            if self.ready and not was:
+                sys.stderr.write("%s USDC facilitator reached; USDC is taken\n" % time.strftime("%Y-%m-%d %H:%M:%S"))
 
     def here(self, path):
         return self.prefix_of(path) is not None
 
     def prefix_of(self, path):
-        if not plain(path):
+        if not plain(path) or len(path) > USDC_PATH_MOST:
             return None
         for p in self.prefixes:
             if path == p or path.startswith(p.rstrip("/") + "/") or path.startswith(p + "?"):
@@ -156,6 +227,7 @@ class Gate:
         self.x402 = x402            # a facilitator: the lot may then be bought with x402 too
         self.usdc = usdc            # a Usdc: calls on some paths may then be paid in USDC too, one payment for one call
         self.usdc_busy = set()      # marks of USDC payments being settled this moment
+        self.usdc_asking = threading.BoundedSemaphore(USDC_AT_ONCE)
         self.usdc_pruned = 0
         # paths whose GET without a payment is first only looked up behind the gate (LOOK): what is known there, such
         # as the proof of a SHA-256 paid for before, is given for nothing; anything else costs as always
@@ -228,6 +300,14 @@ class Gate:
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, self.book)
+        try:            # the new name too is on the disk (second reading, N5), where the folder can be opened so
+            d = os.open(os.path.dirname(self.book) or ".", os.O_RDONLY)
+            try:
+                os.fsync(d)
+            finally:
+                os.close(d)
+        except OSError:
+            pass
         self.saved, self.dirty = now, False
 
     def _prune(self, now):
@@ -441,7 +521,7 @@ class Gate:
         NORTH comes first: a buyer that can pay both is asked for the cheaper."""
         resource, ext = self.described(path)
         accepts = [self.x402_wanted()] if self.x402 is not None else []
-        if self.usdc is not None and self.usdc.here(path):
+        if self.usdc is not None and self.usdc.ready and self.usdc.here(path):
             accepts.append(self.usdc.wanted())
         needed = {"x402Version": X402_VERSION, "error": "PAYMENT-SIGNATURE header is required", "resource": resource,
                   "accepts": accepts}
@@ -459,11 +539,15 @@ class Gate:
         needed = self.x402_needed(path)
         return b64json(needed) if needed["accepts"] else None
 
-    def _log_usdc(self, now, said, prefix):
+    def _log_usdc(self, now, said, prefix, unconfirmed=False):
         """One line in usdc-paid.jsonl. A line that cannot be written does not stop the call that was paid: it is
-        told in the log of the gate instead."""
-        line = json.dumps({"t": now, "tx": said["transaction"], "payer": said["payer"], "amount": str(self.usdc.price),
-                           "network": self.usdc.network, "for": prefix}, separators=(",", ":")) + "\n"
+        told in the log of the gate instead. A call let pass while its transfer waited for its block says so
+        ("unconfirmed"), for whoever counts (second reading, N2)."""
+        got = {"t": now, "tx": said["transaction"], "payer": said["payer"], "amount": str(self.usdc.price),
+               "network": self.usdc.network, "for": prefix}
+        if unconfirmed:
+            got["unconfirmed"] = True
+        line = json.dumps(got, separators=(",", ":")) + "\n"
         try:
             fd = os.open(self.usdc_log, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
             try:
@@ -504,8 +588,8 @@ class Gate:
     def usdc_pay(self, payment, method, path, source=None):
         """A payment in USDC for one call, `method` on `path`: (what came of it, True when this call may pass, the
         payment's mark). The payment is bound to its call before the facilitator sees it, and stays bound whatever
-        comes back, unless the facilitator says nothing went to the chain: nobody else can take it for a call of
-        theirs while it may be in flight (review of the USDC, L1).
+        comes back, unless the facilitator says that it did not and will not move any money: nobody else can take it
+        for a call of theirs while it may be in flight (review of the USDC, L1).
 
         Paid: shown again for the same call within USDC_AGAIN_FOR it passes again without being paid again,
         USDC_AGAIN_MOST times in all (an answer lost on the way, or a service behind that could not take the call);
@@ -513,26 +597,32 @@ class Gate:
         block): asked again, at most once every USDC_ASK_EVERY seconds and each time within the bound of payments a
         place may make (L2). The facilitator answers the same payment the same way however often it is asked (M1).
         A transfer that the chain holds lets the call pass before its block (M2): standard buyers of x402 do not come
-        back with the same payment, they would pay again."""
+        back with the same payment, they would pay again.
+
+        What can never be paid is neither bound nor sent on: a payload not in the facilitator's shape, a path over
+        USDC_PATH_MOST. At most USDC_AT_ONCE payments are asked of the facilitator at once, and at most
+        USDC_OPEN_PER_PLACE of one place wait bound with an outcome not known (second reading, F2 and F3)."""
         u = self.usdc
 
         def no(reason, key=None):
             return {"success": False, "errorReason": reason, "transaction": "", "network": u.network, "payer": None}, False, key
         if not u.here(path):
             return no("usdc_is_not_taken_here")
-        body = payment.get("payload")
-        auth = body.get("authorization") if isinstance(body, dict) else None
-        who, nonce = (auth.get("from"), auth.get("nonce")) if isinstance(auth, dict) else (None, None)
-        if not isinstance(who, str) or not EVM_ADDRESS.match(who) or not isinstance(nonce, str) or not NONCE.match(nonce):
+        body, accepted = payment.get("payload"), payment.get("accepted")
+        shaped = usdc_shape(body, u.pay_to, u.price)
+        if shaped is None or not isinstance(accepted, dict) or len(json.dumps(accepted)) > 2048:
             return no("invalid_payload")
+        who, nonce = shaped
         # an authorization is told apart by its payer and nonce, which the token contract takes only once; the binding
         # holds the payment itself too ("of"), so that another authorization under the same payer and nonce, shown for
-        # the same call, neither passes as the one paid nor makes the facilitator turn the one bound into a failure
-        key, call, now = mark(who.lower() + ":" + nonce.lower()), "%s %s" % (method, path), int(self.clock())
+        # the same call, neither passes as the one paid nor makes the facilitator turn the one bound into a failure;
+        # and the call only as its mark, so that a binding is small whatever the path was (F2)
+        key, call, now = mark(who.lower() + ":" + nonce.lower()), mark("%s %s" % (method, path)), int(self.clock())
         whole = mark(json.dumps(body, sort_keys=True, separators=(",", ":")))
+        by = mark(place(source))[:16] if source is not None else None
         resource, _ = self.described(path)
-        payment = dict(payment, resource=resource)
-        payment.pop("extensions", None)
+        payment = {"x402Version": payment.get("x402Version"), "accepted": accepted, "payload": body, "resource": resource}
+        asking = False
         with self.lock:
             self._prune_usdc(now)
             seen = self.state["usdc"].get(key)
@@ -553,12 +643,27 @@ class Gate:
                 return no(SETTLING_NOW, key)
             if seen is not None and now - seen.get("asked", 0) < USDC_ASK_EVERY:
                 return no(SETTLING if seen.get("tx") else SETTLING_NOW, key)
+            if not u.ready:
+                return no("usdc_not_available", key)
+            if seen is None and by is not None and sum(
+                    1 for s in self.state["usdc"].values() if isinstance(s, dict) and s.get("by") == by
+                    and s.get("state") == "settling" and not s.get("tx")) >= USDC_OPEN_PER_PLACE:
+                return no(TOO_MANY, key)
             if source is not None and self.x402_limiter is not None and not self.x402_limiter.take(place(source)):
                 return no(TOO_MANY, key)
+            if not self.usdc_asking.acquire(blocking=False):
+                return no("facilitator_busy", key)
+            asking = True
             if seen is None:
                 seen = self.state["usdc"][key] = {"call": call, "of": whole, "state": "settling", "at": now, "uses": 0}
+                if by is not None:
+                    seen["by"] = by
             seen["asked"] = now
-            self._save()            # bound to its call before the facilitator sees it (L1)
+            try:
+                self._save()        # bound to its call before the facilitator sees it (L1)
+            except BaseException:
+                self.usdc_asking.release()
+                raise
             self.usdc_busy.add(key)
         try:
             done = u.facilitator.settle(payment, u.wanted())
@@ -568,6 +673,8 @@ class Gate:
                 time.sleep(pause)
                 done = u.facilitator.settle(payment, u.wanted())
         finally:
+            if asking:
+                self.usdc_asking.release()
             with self.lock:
                 self.usdc_busy.discard(key)
         ok = done.get("success") is True
@@ -586,11 +693,15 @@ class Gate:
                 seen.update(state="paid", tx=said["transaction"], at=int(self.clock()), uses=1)
                 if in_flight:
                     seen["unconfirmed"] = True
-                self._log_usdc(now, said, u.prefix_of(path))
+                self._log_usdc(now, said, u.prefix_of(path), unconfirmed=in_flight)
             elif done.get("sent") is False:
-                self.state["usdc"].pop(key, None)       # nothing went to the chain: the payment is nobody's yet
+                if seen.get("tx"):
+                    # a transfer was sent for it, and the facilitator says no money moved nor will: over, not set free
+                    seen.update(state="failed", reason=reason)
+                else:
+                    self.state["usdc"].pop(key, None)       # nothing went to the chain: the payment is nobody's yet
             elif reason in USDC_FINAL:
-                seen.update(state="failed", reason=reason, tx=said["transaction"])
+                seen.update(state="failed", reason=reason, tx=said["transaction"] or seen.get("tx", ""))
             elif said["transaction"]:
                 seen["tx"] = said["transaction"]        # not known yet: bound to its call, asked again later
             self._keep()
@@ -794,7 +905,7 @@ def make_handler(gate, upstream, trust_proxy, routes=()):
                             outcome = "settling now"
                             return self.send(503, {"error": "NOT_NOW", "message": "the same payment is being settled for another "
                                                    "request; send it again in a few seconds"}, dict(more, **{"Retry-After": "5"}))
-                        if done.get("errorReason") in X402_AGAIN:
+                        if done.get("errorReason") in X402_AGAIN or (what == "usdc" and done.get("errorReason") in USDC_NOT_NOW):
                             outcome = "%s not now" % what
                             return self.send(503, {"error": "NOT_NOW", "message": "the payment could not be settled just now; send the "
                                                    "same PAYMENT-SIGNATURE again"},

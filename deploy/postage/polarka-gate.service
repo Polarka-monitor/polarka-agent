@@ -4,7 +4,7 @@
 # No IPAddressDeny: for --price-hashes the gate asks api.northboundwallet.org how hard the network is to mine.
 [Unit]
 Description=Polarka postage gate (polarka-agent postage-serve)
-After=network-online.target polarka-facts.service polarka-x402.service polarka-stamps.service
+After=network-online.target polarka-facts.service polarka-x402.service polarka-stamps.service polarka-usdc.service
 Wants=network-online.target
 
 [Service]

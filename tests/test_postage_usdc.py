@@ -48,7 +48,7 @@ def paid(n=1, network="eip155:8453", payer=PAYER):
     return {"x402Version": 2,
             "accepted": {"scheme": "exact", "network": network, "amount": "10000", "asset": Evm.asset, "payTo": TO,
                          "maxTimeoutSeconds": 300},
-            "payload": {"signature": "0x" + "22" * 65,
+            "payload": {"signature": "0x" + "22" * 64 + "1b",
                         "authorization": {"from": payer, "to": TO, "value": "10000", "validAfter": "0",
                                           "validBefore": "9999999999", "nonce": "0x%064x" % n}}}
 
@@ -110,7 +110,7 @@ class UsdcGateTest(unittest.TestCase):
         does not pass as the one paid, the facilitator is not asked, and what is bound stays as it was."""
         def other():
             p = paid()
-            p["payload"]["signature"] = "0x" + "33" * 65
+            p["payload"]["signature"] = "0x" + "33" * 64 + "1c"
             return p
         self.evm.answers = [{"success": False, "errorReason": "unexpected_settle_error"}]
         self.assertFalse(self.g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "s")[1])         # outcome not known yet
@@ -211,17 +211,113 @@ class UsdcGateTest(unittest.TestCase):
         class Says(Evm):
             def __init__(self, **h):
                 super().__init__()
-                self.said = dict({"network": "eip155:8453", "asset": Evm.asset, "payTo": TO, "maxAmount": "1000000",
-                                  "confirmTimeout": 15}, **h)
+                self.said = dict({"protocol": postage.USDC_PROTOCOL, "network": "eip155:8453", "asset": Evm.asset, "payTo": TO,
+                                  "maxAmount": "1000000", "confirmTimeout": 15, "sendWithin": 20}, **h)
                 self.timeout = 45
 
             def health(self):
                 return self.said
-        postage.Usdc(Says(), TO, 10000, ["/v1/stamp"])
+        self.assertTrue(postage.Usdc(Says(), TO, 10000, ["/v1/stamp"]).ready)
         for wrong in ({"payTo": PAYER}, {"network": "eip155:84532"}, {"asset": PAYER}, {"maxAmount": "5000"},
-                      {"confirmTimeout": 40}, {"confirmTimeout": None}):
+                      {"confirmTimeout": 40}, {"confirmTimeout": None}, {"sendWithin": 30}, {"protocol": "polarka-usdc/1"},
+                      {"protocol": None}):
             with self.assertRaises(Refused):
                 postage.Usdc(Says(**wrong), TO, 10000, ["/v1/stamp"])
+
+    def test_the_gate_starts_without_usdc_while_its_facilitator_cannot_be_reached(self):
+        """Second reading, F4: a facilitator not up yet (a restart, a reboot) does not keep the gate down, NORTH with
+        it; USDC is neither offered nor taken until the facilitator says it settles what the gate asks for."""
+        class Away(Evm):
+            up = False
+            timeout = 45
+
+            def health(self):
+                if not self.up:
+                    raise Refused("X402", "the facilitator cannot be reached (URLError)")
+                return {"protocol": postage.USDC_PROTOCOL, "network": "eip155:8453", "asset": Evm.asset, "payTo": TO,
+                        "maxAmount": "1000000", "confirmTimeout": 15, "sendWithin": 20}
+        away = Away()
+        u = postage.Usdc(away, TO, 10000, ["/v1/stamp"])
+        g = postage.Gate(self.w, N // 100, 100, clock=lambda: self.now[0], look_every=0, usdc=u)
+        self.assertFalse(u.ready)
+        self.assertEqual([a["network"] for a in g.x402_needed("/v1/stamp/aa")["accepts"]], [])
+        said, may, _ = g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "s")
+        self.assertEqual((may, said["errorReason"], g.state["usdc"], away.calls), (False, "usdc_not_available", {}, []))
+        away.up = True
+        self.assertTrue(u.check(starting=False))
+        self.assertEqual([a["network"] for a in g.x402_needed("/v1/stamp/aa")["accepts"]], ["eip155:8453"])
+        self.assertTrue(g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "s")[1])
+
+    def test_what_can_never_be_paid_is_neither_bound_nor_sent_on(self):
+        """Second reading, F2: a payload the facilitator would refuse for its shape is refused at the gate."""
+        def bent(**change):
+            p = paid()
+            for k, v in change.items():
+                if k == "signature":
+                    p["payload"]["signature"] = v
+                elif k == "extra":
+                    p["payload"]["anything"] = v
+                else:
+                    p["payload"]["authorization"][k] = v
+            return p
+        for p in (bent(signature="0x" + "22" * 65), bent(signature="0x" + "22" * 64), bent(signature="0X" + "22" * 64 + "1b"),
+                  bent(to=PAYER), bent(value="20000"), bent(value="1e4"), bent(validBefore="9" * 31), bent(extra="x" * 1000),
+                  bent(nonce="0x" + "ab" * 31)):
+            said, may, _ = self.g.usdc_pay(p, "GET", "/v1/stamp/aa", "s")
+            self.assertEqual((may, said["errorReason"]), (False, "invalid_payload"), p["payload"])
+        odd = paid()
+        odd["accepted"] = {"x": "y" * 3000}
+        self.assertEqual(self.g.usdc_pay(odd, "GET", "/v1/stamp/aa", "s")[0]["errorReason"], "invalid_payload")
+        self.assertEqual((self.g.state["usdc"], self.evm.calls), ({}, []))
+
+    def test_a_binding_is_small_and_a_long_path_is_not_paid(self):
+        """F2: the call is kept as its mark; a path over USDC_PATH_MOST is not paid in USDC at all."""
+        self.assertTrue(self.g.usdc_pay(paid(), "GET", "/v1/stamp/aa?x=1", "s")[1])
+        (b,) = self.g.state["usdc"].values()
+        self.assertEqual(b["call"], postage.mark("GET /v1/stamp/aa?x=1"))
+        long = "/v1/stamp/" + "a" * postage.USDC_PATH_MOST
+        self.assertEqual(self.g.usdc_pay(paid(2), "GET", long, "s")[0]["errorReason"], "usdc_is_not_taken_here")
+        self.assertEqual(len(self.evm.calls), 1)
+
+    def test_one_place_holds_few_payments_whose_outcome_is_not_known(self):
+        """F2: a place whose payments are never answered binds at most USDC_OPEN_PER_PLACE of them at once."""
+        self.evm.answers = [{"success": False, "errorReason": "unexpected_settle_error"}] * (postage.USDC_OPEN_PER_PLACE + 2)
+        for n in range(postage.USDC_OPEN_PER_PLACE):
+            self.assertEqual(self.g.usdc_pay(paid(10 + n), "GET", "/v1/stamp/%02x" % n, "9.9.9.9")[0]["errorReason"],
+                             "unexpected_settle_error")
+        said, may, _ = self.g.usdc_pay(paid(99), "GET", "/v1/stamp/99", "9.9.9.9")
+        self.assertEqual((may, said["errorReason"], len(self.g.state["usdc"])), (False, postage.TOO_MANY, postage.USDC_OPEN_PER_PLACE))
+        self.assertEqual(self.g.usdc_pay(paid(98), "GET", "/v1/stamp/98", "8.8.8.8")[0]["errorReason"], "unexpected_settle_error")
+
+    def test_few_payments_are_asked_of_the_facilitator_at_once(self):
+        """F3: USDC_AT_ONCE payments at the facilitator; one more is told to try again, with nothing bound."""
+        self.evm.hold = threading.Event()
+        threads = [threading.Thread(target=self.g.usdc_pay, args=(paid(20 + n), "GET", "/v1/stamp/%02x" % n, "p%d" % n))
+                   for n in range(postage.USDC_AT_ONCE)]
+        for t in threads:
+            t.start()
+        for _ in range(200):
+            if len(self.evm.calls) == postage.USDC_AT_ONCE:
+                break
+            threading.Event().wait(0.01)
+        said, may, _ = self.g.usdc_pay(paid(77), "GET", "/v1/stamp/77", "q")
+        self.assertEqual((may, said["errorReason"], len(self.g.state["usdc"])), (False, "facilitator_busy", postage.USDC_AT_ONCE))
+        self.evm.hold.set()
+        for t in threads:
+            t.join(10)
+        self.assertTrue(self.g.usdc_pay(paid(77), "GET", "/v1/stamp/77", "q")[1])
+
+    def test_a_payment_whose_transfer_went_out_is_ended_not_set_free(self):
+        """F1, at the gate: "sent": false for a payment that holds a transfer ends it (failed); it stays bound."""
+        late = {"success": False, "errorReason": "settlement_pending", "transaction": TX, "sent": True, "known": False}
+        self.evm.answers = [dict(late) for _ in range(1 + len(postage.USDC_POLL))] + [
+            {"success": False, "errorReason": "authorization_expired", "transaction": TX, "sent": False}]
+        self.assertFalse(self.g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "s")[1])
+        self.now[0] += postage.USDC_ASK_EVERY
+        self.assertEqual(self.g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "s")[0]["errorReason"], "authorization_expired")
+        self.assertEqual(self.g.usdc_pay(paid(), "GET", "/v1/stamp/bb", "s")[0]["errorReason"], "payment_is_for_another_call")
+        self.assertEqual(self.g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "s")[0]["errorReason"], "authorization_expired")
+        self.assertEqual(len(self.evm.calls), 2 + len(postage.USDC_POLL))
 
     def test_what_the_facilitator_says_goes_out_only_as_a_short_reason(self):
         self.evm.answers = [{"success": False, "errorReason": "invalid_exact_evm_insufficient_balance", "errorMessage": "0x08c3..."},
@@ -357,12 +453,31 @@ class EvmFacilitatorTest(unittest.TestCase):
                                                "extra": {"name": "USD Coin", "version": "2"}})
         got = f.settle(paid(), f.wanted(10000, TO))
         self.assertEqual((got["seen"]["x402Version"], got["seen"]["paymentRequirements"]["payTo"]), (2, TO))
-        with self.assertRaises(Refused):
-            x402.EvmFacilitator(url, "eip155:84532")                    # it does not settle there
+        self.assertEqual(x402.EvmFacilitator(url, "eip155:84532").health(), {})    # it does not settle there
+        with self.assertRaises(Refused):                                # and the gate does not start with it
+            postage.Usdc(x402.EvmFacilitator(url, "eip155:84532"), TO, 10000, ["/v1/stamp"])
         with self.assertRaises(Refused):
             x402.EvmFacilitator(url, "eip155:1")                        # USDC is not known there here
         with self.assertRaises(Refused):
             x402.EvmFacilitator("http://example.com:8402", "eip155:8453")   # https, or this machine
+
+    def test_a_refusal_of_the_http_kind_is_told_as_nothing_sent(self):
+        """Second reading, F2: a facilitator that refuses the request itself (4xx) took nothing to the chain."""
+        class No(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.send_response(413)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), No)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        f = x402.EvmFacilitator("http://127.0.0.1:%d" % srv.server_address[1], "eip155:8453")
+        got = f.settle(paid(), f.wanted(10000, TO))
+        self.assertEqual((got["success"], got["errorReason"], got["sent"]), (False, "facilitator_refused", False))
 
 
 if __name__ == "__main__":
