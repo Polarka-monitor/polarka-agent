@@ -537,7 +537,7 @@ class EvmFacilitator(RemoteFacilitator):
     It takes the payer's signed authorization and has the coins go from the payer straight to the seller: this
     program holds no USDC and signs nothing for it."""
 
-    def __init__(self, url, network, timeout=30):
+    def __init__(self, url, network, timeout=45):
         if network not in USDC:
             raise Refused("X402", "USDC is known here on %s" % ", ".join(sorted(USDC)))
         self.url, self.network, self.timeout, self.chain = url.rstrip("/"), network, timeout, None
@@ -548,6 +548,10 @@ class EvmFacilitator(RemoteFacilitator):
         if not kinds:
             raise Refused("X402", "the facilitator does not settle USDC on %s" % network)
         self.asset, self.name, self.version = USDC[network]
+
+    def health(self):
+        """What the facilitator says of itself (its network, asset, payTo, largest amount, time it waits for a block)."""
+        return self._call("/health")
 
     def wanted(self, amount, pay_to, timeout=300):
         """The requirements of x402 for `amount` millionths of a USDC to `pay_to`."""
@@ -740,18 +744,20 @@ def paywall(facilitator, price, pay_to, content, content_type="text/plain; chars
 # ------------------------------------------------------------------------------------------------ the buyer
 
 _BOOK_LOCK = threading.Lock()
+_PAYING_LOCK = threading.Lock()
 
 
 class BOOK:
     """with BOOK(wallet): the buyer's book is changed by one at a time: one thread of this process (a lock) and one
     process (a lock on a file beside the book), so that the command line and an MCP server of the same wallet never
     write over each other's lots (human review, 22 November). Where there is no fcntl, the lock of this process only."""
+    held, suffix = _BOOK_LOCK, ".lock"
 
     def __init__(self, wallet):
-        self.path, self.fd = os.path.join(wallet.folder, PENDING + ".lock"), None
+        self.path, self.fd = os.path.join(wallet.folder, PENDING + self.suffix), None
 
     def __enter__(self):
-        _BOOK_LOCK.acquire()
+        self.held.acquire()
         try:
             import fcntl
             self.fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
@@ -762,7 +768,7 @@ class BOOK:
             if self.fd is not None:
                 os.close(self.fd)
                 self.fd = None
-            _BOOK_LOCK.release()
+            self.held.release()
             raise
         return self
 
@@ -772,7 +778,15 @@ class BOOK:
                 os.close(self.fd)               # closing lets the lock go
                 self.fd = None
         finally:
-            _BOOK_LOCK.release()
+            self.held.release()
+
+
+class PAYING(BOOK):
+    """with PAYING(wallet): one payment of x402 at a time from this wallet, in this process and in any other (a lock on
+    a file of its own beside the book). The book itself is held (BOOK) only while it is read or written, so that a
+    payment that takes minutes keeps no other call of the wallet waiting (review of the USDC, L6). PAYING comes
+    before BOOK, never after."""
+    held, suffix = _PAYING_LOCK, ".paying.lock"
 
 
 def _book(wallet):
@@ -981,19 +995,20 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
         if not 0 < amount <= most:
             raise Refused("X402_TOO_MUCH", "the resource asks %s NORTH, more than the %s allowed for it" % (north(amount), north(most)))
         came = None
-        with BOOK(wallet):
+        with PAYING(wallet):
             # One payment at a time from this wallet. What another call of it paid since this one looked (another
             # thread, or another process such as the command line beside an MCP server) is found now, and shown in place
             # of a second payment: two calls at the same moment bought two lots, and under one key the later payment
             # took the earlier one's place, its claim with it (L3 and R-L2 of the review of 0.2.8, from 0.2.4).
-            book = _book(wallet)
-            if isinstance(book["pending"].get(key), dict):
-                held = book["pending"][key]
-            elif named is not None:
-                shared = _named_pending(book, origin, named, offer["payTo"], most)
-            came = book["lots"].get(origin)
-            if not isinstance(came, dict) or came.get("claim") == (lot or {}).get("claim") or _retried:
-                came = None
+            with BOOK(wallet):
+                book = _book(wallet)
+                if isinstance(book["pending"].get(key), dict):
+                    held = book["pending"][key]
+                elif named is not None:
+                    shared = _named_pending(book, origin, named, offer["payTo"], most)
+                came = book["lots"].get(origin)
+                if not isinstance(came, dict) or came.get("claim") == (lot or {}).get("claim") or _retried:
+                    came = None
             if held is None and shared is None and came is None:
                 made = wallet.pay([(offer["payTo"], amount)], "x402 " + url[:150], hand=False)
                 if not isinstance(made.get("raw"), str) or not isinstance(made.get("id"), str):
@@ -1008,8 +1023,15 @@ def fetch(url, wallet, most, timeout=60, network=None, wait=600, sleep=time.slee
                         "url": url}
                 if named is not None:
                     held.update(origin=origin, named=named, payTo=offer["payTo"])
-                book["pending"][key] = held         # kept before the seller sees it: one payment for one resource
-                _keep_book(wallet, book)
+                with BOOK(wallet):                  # kept before the seller sees it: one payment for one resource
+                    book = _book(wallet)
+                    there = book["pending"].get(key)
+                    if isinstance(there, dict) and there.get("txid") != held["txid"]:
+                        # one refused at another url and kept for this one came meanwhile: it waits aside and comes
+                        # back when this place is free, its claim with it
+                        book.setdefault("kept", []).append(dict(there, url=there.get("url") or key))
+                    book["pending"][key] = held
+                    _keep_book(wallet, book)
                 fresh = True
         if held is None and shared is None:
             # a lot of this place came in the meantime: its calls come before anything is paid (once)

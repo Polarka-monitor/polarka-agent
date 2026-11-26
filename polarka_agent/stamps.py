@@ -26,7 +26,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from .httpguard import LOOK, OneRequestWithBody
+from .httpguard import LOOK, LOOK_PATH, OneRequestWithBody
 
 from .wallet import STAMP, Refused
 
@@ -506,10 +506,12 @@ def make_handler(stamps):
         def log_message(self, *a):
             pass
 
-        def send(self, code, obj):
+        def send(self, code, obj, more=None):
             body = json.dumps(obj).encode()
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
+            for k, v in (more or {}).items():
+                self.send_header(k, v)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
@@ -524,14 +526,18 @@ def make_handler(stamps):
                 if n:
                     self.rfile.read(n)
                 path = self.path.split("?", 1)[0]
-                if path in ("/v1/stamp", "/v1/stamp/"):
-                    return self.send(200, dict(ABOUT, every_seconds=stamps.every, next_batch=stamps.next_batch()))
-                if path.startswith("/v1/stamp/") and self.headers.get(LOOK) == "1":
+                looking = path == LOOK_PATH + "/v1/stamp" or path.startswith(LOOK_PATH + "/v1/stamp/")
+                if looking:
                     # the gate asks whether this is known, for a call nobody paid: only a look, nothing is taken
+                    path = path[len(LOOK_PATH):]
+                if path in ("/v1/stamp", "/v1/stamp/"):
+                    about = dict(ABOUT, every_seconds=stamps.every, next_batch=stamps.next_batch())
+                    return self.send(200, about, {LOOK: "known"} if looking else None)
+                if looking:
                     seen = stamps.look(path[len("/v1/stamp/"):])
                     if seen is None:
                         return self.send(404, {"error": "UNKNOWN", "message": "this SHA-256 is not stamped here"})
-                    return self.send(200, seen)
+                    return self.send(200, seen, {LOOK: "known"})
                 if path.startswith("/v1/stamp/"):
                     return self.send(200, stamps.take(path[len("/v1/stamp/"):]))
                 self.send(404, {"error": "NOT_HERE", "message": "there is /v1/stamp/<sha256> here"})

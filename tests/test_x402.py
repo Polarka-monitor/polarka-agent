@@ -899,5 +899,40 @@ class X402Deep(X402OnRegtest):
     test_from_the_command_line_and_as_a_tool = test_what_the_buyer_does_not_pay = None
 
 
+class PayingApartFromTheBook(unittest.TestCase):
+    """L6 (review of the USDC): the book is held only while it is read or written. A payment under way holds a lock of
+    its own, so that a call of the wallet that uses a lot or a payment made before does not wait for it, while two
+    payments still come one after the other."""
+
+    def test_a_payment_under_way_keeps_no_one_from_the_book_and_the_next_payment_waits(self):
+        with tempfile.TemporaryDirectory() as d:
+            wallet = type("Folder", (), {"folder": d})()
+            paying, release, second, waited = threading.Event(), threading.Event(), threading.Event(), []
+
+            def pay():
+                with x402.PAYING(wallet):
+                    paying.set()
+                    release.wait(10)
+
+            def pay_too():
+                with x402.PAYING(wallet):
+                    second.set()
+            first = threading.Thread(target=pay)
+            first.start()
+            self.assertTrue(paying.wait(5))
+            t0 = time.time()
+            with x402.BOOK(wallet):
+                waited.append(time.time() - t0)
+            other = threading.Thread(target=pay_too)
+            other.start()
+            self.assertFalse(second.wait(0.5))      # one payment at a time
+            release.set()
+            first.join(10)
+            self.assertTrue(second.wait(5))
+            other.join(10)
+            self.assertLess(waited[0], 1.0)
+            self.assertNotEqual(x402.BOOK(wallet).path, x402.PAYING(wallet).path)     # and between processes too
+
+
 if __name__ == "__main__":
     unittest.main()

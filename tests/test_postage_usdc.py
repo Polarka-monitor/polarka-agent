@@ -61,6 +61,7 @@ class UsdcGateTest(unittest.TestCase):
         Wallet.create(self.folder, "regtest", self.m.fake.url, WORDS)
         self.w = Wallet(self.folder, clock=lambda: self.now[0])
         self.evm = Evm()
+        self.poll, postage.USDC_POLL = postage.USDC_POLL, (0, 0)
         self.g = self.gate()
 
     def gate(self):
@@ -68,11 +69,12 @@ class UsdcGateTest(unittest.TestCase):
                             usdc=postage.Usdc(self.evm, TO, 10000, ["/v1/stamp"]))
 
     def tearDown(self):
+        postage.USDC_POLL = self.poll
         self.w.server.close()
         self.m.fake.stop()
 
     def test_a_payment_passes_one_call_and_is_settled_with_the_gates_own_terms(self):
-        said, may = self.g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "1.2.3.4")
+        said, may, _ = self.g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "1.2.3.4")
         self.assertEqual((may, said["success"], said["transaction"]), (True, True, TX))
         payment, wanted = self.evm.calls[0]
         self.assertEqual((wanted["amount"], wanted["payTo"], wanted["asset"]), ("10000", TO, Evm.asset))
@@ -81,7 +83,7 @@ class UsdcGateTest(unittest.TestCase):
     def test_shown_again_for_the_same_call_it_passes_a_few_times_and_is_never_paid_again(self):
         for _ in range(postage.USDC_AGAIN_MOST):
             self.assertTrue(self.g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "s")[1])
-        said, may = self.g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "s")
+        said, may, _ = self.g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "s")
         self.assertEqual((may, said["errorReason"]), (False, "payment_already_used"))
         self.assertEqual(len(self.evm.calls), 1)
 
@@ -102,6 +104,25 @@ class UsdcGateTest(unittest.TestCase):
         self.assertEqual(self.g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "s")[0]["errorReason"], "payment_already_used")
         self.assertEqual(len(self.evm.calls), 1)
 
+    def test_another_authorization_under_the_same_payer_and_nonce_changes_nothing(self):
+        """Round 2 of the review: a payment bound to its call is the payment itself. Another authorization of the same
+        payer and nonce (rebuilt from the chain, or signed anew), shown for the same call, is refused at the gate: it
+        does not pass as the one paid, the facilitator is not asked, and what is bound stays as it was."""
+        def other():
+            p = paid()
+            p["payload"]["signature"] = "0x" + "33" * 65
+            return p
+        self.evm.answers = [{"success": False, "errorReason": "unexpected_settle_error"}]
+        self.assertFalse(self.g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "s")[1])         # outcome not known yet
+        self.now[0] += postage.USDC_ASK_EVERY
+        said, may, _ = self.g.usdc_pay(other(), "GET", "/v1/stamp/aa", "t")
+        self.assertEqual((may, said["errorReason"], len(self.evm.calls)), (False, "authorization_conflict", 1))
+        self.assertTrue(self.g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "s")[1])           # the one bound is settled
+        self.assertEqual(len(self.evm.calls), 2)
+        self.assertEqual(self.g.usdc_pay(other(), "GET", "/v1/stamp/aa", "t")[0]["errorReason"], "authorization_conflict")
+        self.assertTrue(self.g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "s")[1])           # and passes again as before
+        self.assertEqual(len(self.evm.calls), 2)
+
     def test_only_on_the_paths_that_take_it_and_only_a_payment_that_can_be_read(self):
         self.assertEqual(self.g.usdc_pay(paid(), "GET", "/v1/mail/x", "s")[0]["errorReason"], "usdc_is_not_taken_here")
         broken = paid()
@@ -113,15 +134,94 @@ class UsdcGateTest(unittest.TestCase):
         self.assertEqual(self.evm.calls, [])
 
     def test_a_payment_whose_block_has_not_come_waits_and_is_then_matched(self):
-        self.evm.answers = [{"success": False, "errorReason": "settlement_pending", "transaction": TX, "errorMessage": "late"}]
-        said, may = self.g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "s")
+        late = {"success": False, "errorReason": "settlement_pending", "transaction": TX, "errorMessage": "late"}
+        self.evm.answers = [dict(late) for _ in postage.USDC_POLL] + [dict(late)]
+        said, may, _ = self.g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "s")
         self.assertEqual((may, said["errorReason"], said["transaction"]), (False, x402.SETTLING, TX))
         self.assertNotIn("errorMessage", said)
+        # asked again within the request, as long as the facilitator does not say that the chain holds the transfer
+        self.assertEqual(len(self.evm.calls), 1 + len(postage.USDC_POLL))
         self.assertEqual(self.g.usdc_pay(paid(), "GET", "/v1/stamp/bb", "s")[0]["errorReason"], "payment_is_for_another_call")
+        self.assertEqual(self.g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "s")[0]["errorReason"], x402.SETTLING)
+        self.assertEqual(len(self.evm.calls), 1 + len(postage.USDC_POLL))    # asked again at once: from the gate's record (L2)
         restarted = self.gate()                 # the gate's book keeps it over a restart
-        said, may = restarted.usdc_pay(paid(), "GET", "/v1/stamp/aa", "s")
+        self.now[0] += postage.USDC_ASK_EVERY
+        said, may, _ = restarted.usdc_pay(paid(), "GET", "/v1/stamp/aa", "s")
         self.assertEqual((may, said["transaction"]), (True, TX))
-        self.assertEqual(len(self.evm.calls), 2)    # the second time the facilitator matched it with the transfer it sent
+        self.assertEqual(len(self.evm.calls), 2 + len(postage.USDC_POLL))    # the facilitator matched it with its transfer
+
+    def test_bound_to_its_call_before_the_facilitator_answers(self):
+        """L1: the facilitator did not answer (or not in time): the payment stays bound to its call, nobody can take
+        it for another, and shown again it is asked once more, at most every USDC_ASK_EVERY seconds."""
+        self.evm.answers = [{"success": False, "errorReason": "unexpected_settle_error", "transaction": "", "network": "x"}]
+        said, may, _ = self.g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "s")
+        self.assertEqual((may, said["errorReason"]), (False, "unexpected_settle_error"))
+        self.assertEqual(self.g.usdc_pay(paid(), "GET", "/v1/stamp/bb", "t")[0]["errorReason"], "payment_is_for_another_call")
+        self.assertEqual(self.g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "s")[0]["errorReason"], postage.SETTLING_NOW)
+        self.assertEqual(len(self.evm.calls), 1)
+        self.now[0] += postage.USDC_ASK_EVERY
+        self.assertEqual(self.g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "s")[0]["success"], True)   # the same answer now
+        self.assertEqual(len(self.evm.calls), 2)
+
+    def test_what_never_went_to_the_chain_binds_nothing_and_a_failure_stays_failed(self):
+        self.evm.answers = [{"success": False, "errorReason": "invalid_exact_evm_insufficient_balance", "sent": False},
+                            {"success": False, "errorReason": "transaction_failed", "transaction": TX, "sent": True}]
+        self.assertEqual(self.g.usdc_pay(paid(1), "GET", "/v1/stamp/aa", "s")[0]["errorReason"], "invalid_exact_evm_insufficient_balance")
+        self.assertNotIn(postage.mark(PAYER.lower() + ":" + "0x%064x" % 1), self.g.state["usdc"])
+        self.assertEqual(self.g.usdc_pay(paid(2), "GET", "/v1/stamp/aa", "s")[0]["errorReason"], "transaction_failed")
+        self.now[0] += postage.USDC_ASK_EVERY
+        self.assertEqual(self.g.usdc_pay(paid(2), "GET", "/v1/stamp/aa", "s")[0]["errorReason"], "transaction_failed")
+        self.assertEqual(len(self.evm.calls), 2)        # a payment that failed in the chain is not asked about again
+
+    def test_a_transfer_the_chain_holds_lets_the_call_pass_before_its_block(self):
+        """M2: standard buyers do not come back with the same payment after a 202; a transfer the chain holds passes."""
+        self.evm.answers = [{"success": False, "errorReason": "settlement_pending", "transaction": TX, "known": False, "sent": True},
+                            {"success": False, "errorReason": "settlement_pending", "transaction": TX, "known": True, "sent": True}]
+        said, may, _ = self.g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "s")
+        self.assertEqual((may, said["success"], said["transaction"]), (True, True, TX))
+        self.assertEqual(len(self.evm.calls), 2)        # asked again within the request while the chain did not hold it
+        self.assertTrue(self.g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "s")[1])      # and shown again it passes again
+
+    def test_asking_again_counts_against_the_place(self):
+        """L2: a payment shown again while its outcome is not known goes to the facilitator within the bound of the place."""
+        self.evm.answers = [{"success": False, "errorReason": "unexpected_settle_error"}] * (postage.X402_PER_MINUTE + 5)
+        for n in range(postage.X402_PER_MINUTE):
+            self.now[0] += postage.USDC_ASK_EVERY
+            self.g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "9.9.9.9")
+        self.now[0] += postage.USDC_ASK_EVERY
+        self.assertEqual(self.g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "9.9.9.9")[0]["errorReason"], postage.TOO_MANY)
+
+    def test_a_call_the_service_could_not_take_does_not_count(self):
+        """N6: 429, 503 or 507 from behind gives the showing back."""
+        said, may, key = self.g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "s")
+        self.g.usdc_give_back(key)
+        for _ in range(postage.USDC_AGAIN_MOST):
+            self.assertTrue(self.g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "s")[1])
+        self.assertEqual(self.g.usdc_pay(paid(), "GET", "/v1/stamp/aa", "s")[0]["errorReason"], "payment_already_used")
+
+    def test_paths_that_name_more_than_one_thing_are_not_paid_in_usdc(self):
+        """N10."""
+        for path in ("/v1/stamp/../mail/x", "/v1/stamp/%2e%2e/x", "/v1/stamp//x", "/v1/stamp/./x", "/v1/stamp/x/..",
+                     "/v1/stamp\\x"):
+            self.assertEqual(self.g.usdc_pay(paid(), "GET", path, "s")[0]["errorReason"], "usdc_is_not_taken_here", path)
+        self.assertFalse(postage.Gate(self.w, N // 100, 100, looks=["/v1/stamp"]).looks_at("/v1/stamp/../x"))
+
+    def test_the_gate_does_not_start_with_a_facilitator_that_settles_something_else(self):
+        """N5."""
+        class Says(Evm):
+            def __init__(self, **h):
+                super().__init__()
+                self.said = dict({"network": "eip155:8453", "asset": Evm.asset, "payTo": TO, "maxAmount": "1000000",
+                                  "confirmTimeout": 15}, **h)
+                self.timeout = 45
+
+            def health(self):
+                return self.said
+        postage.Usdc(Says(), TO, 10000, ["/v1/stamp"])
+        for wrong in ({"payTo": PAYER}, {"network": "eip155:84532"}, {"asset": PAYER}, {"maxAmount": "5000"},
+                      {"confirmTimeout": 40}, {"confirmTimeout": None}):
+            with self.assertRaises(Refused):
+                postage.Usdc(Says(**wrong), TO, 10000, ["/v1/stamp"])
 
     def test_what_the_facilitator_says_goes_out_only_as_a_short_reason(self):
         self.evm.answers = [{"success": False, "errorReason": "invalid_exact_evm_insufficient_balance", "errorMessage": "0x08c3..."},
@@ -190,10 +290,13 @@ class UsdcGateTest(unittest.TestCase):
         self.assertEqual(x402.from_b64json(ask("/v1/stamp/cc", north)[1]["PAYMENT-RESPONSE"])["errorReason"], "unsupported_network")
 
     def test_over_http_a_payment_whose_block_has_not_come_is_answered_202(self):
-        self.evm.answers = [{"success": False, "errorReason": "settlement_pending", "transaction": TX}]
+        self.evm.answers = [{"success": False, "errorReason": "settlement_pending", "transaction": TX}
+                            for _ in range(1 + len(postage.USDC_POLL))]
         ask = self.serve(self.g)
         status, headers, said = ask("/v1/stamp/aa", paid())
         self.assertEqual((status, headers.get("Retry-After")), (202, "5"))
+        self.assertEqual(ask("/v1/stamp/aa", paid())[0], 202)          # at once: from the gate's record
+        self.now[0] += postage.USDC_ASK_EVERY
         self.assertEqual(ask("/v1/stamp/aa", paid())[0], 200)
 
     def test_with_north_too_north_comes_first_and_alone_where_usdc_is_not_taken(self):

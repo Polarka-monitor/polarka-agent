@@ -11,11 +11,12 @@ import threading
 import unittest
 import urllib.error
 import urllib.request
-from http.server import ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from polarka_agent import postage, stamps, x402
 from polarka_agent.httpguard import LOOK
+from tests.test_postage import Behind
 from tests.test_postage_usdc import Evm, TO, paid
 from tests.test_stamps_storage import Down, Payer
 
@@ -92,6 +93,47 @@ class FreeLook(unittest.TestCase):
         got = [self.ask("/v1/stamp/" + d(4))[0] for _ in range(postage.LOOKS_PER_MINUTE + 1)]
         self.assertEqual(got[:postage.LOOKS_PER_MINUTE], [200] * postage.LOOKS_PER_MINUTE)
         self.assertEqual(got[-1], 402)                                      # past the bound it costs as any call
+
+    def test_a_service_that_knows_no_looks_gives_nothing_away(self):
+        """M3: an older stamps service behind a newer gate (only the gate restarted after the upgrade), or a prefix
+        given to --free-look that goes to a service with no looks: nothing is free and nothing is taken for free."""
+        class Old(BaseHTTPRequestHandler):      # stamps as 0.2.8 had them: /v1/stamp/<sha256> takes, anything else 404
+            service = self.service
+
+            def do_GET(self):
+                if self.path.startswith("/v1/stamp/"):
+                    body, code = json.dumps(Old.service.take(self.path[len("/v1/stamp/"):])).encode(), 200
+                else:
+                    body, code = b'{"error": "NOT_HERE"}', 404
+                self.send_response(code)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *a):
+                pass
+        old = ThreadingHTTPServer(("127.0.0.1", 0), Old)
+        anything = ThreadingHTTPServer(("127.0.0.1", 0), Behind)    # answers 200 to every GET, knows no looks either
+        gate = postage.Gate(Folder(os.path.join(self.tmp, "gate")), 10 ** 6, 100, looks=["/v1/stamp", "/v1/api"],
+                            usdc=postage.Usdc(self.evm, TO, 10000, ["/v1/stamp"]))
+        front = ThreadingHTTPServer(("127.0.0.1", 0), postage.make_handler(
+            gate, "127.0.0.1:%d" % anything.server_address[1], False, [("/v1/stamp", "127.0.0.1:%d" % old.server_address[1])]))
+        for s in (old, anything, front):
+            threading.Thread(target=s.serve_forever, daemon=True).start()
+            self.addCleanup(s.server_close)
+            self.addCleanup(s.shutdown)
+        url = "http://127.0.0.1:%d" % front.server_address[1]
+        for path in ("/v1/stamp/" + d(6), "/v1/api/anything"):
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                urllib.request.urlopen(url + path, timeout=10)
+            self.assertEqual(caught.exception.code, 402, path)
+            caught.exception.close()
+        self.assertEqual(self.service.waiting, set())                       # and nothing was taken for free
+
+    def test_the_old_header_and_the_look_path_from_outside_are_nothing(self):
+        self.assertEqual(self.ask("/v1/stamp/" + d(7), paid(7))[0], 200)
+        for path in ("/_look/v1/stamp/" + d(7), "/_look", "/_look/v1/stamp"):
+            self.assertEqual(self.ask(path)[0], 404, path)                  # only the gate looks behind itself
 
     def test_the_service_looks_without_taking(self):
         self.assertIsNone(self.service.look(d(5)))

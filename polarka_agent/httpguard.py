@@ -17,9 +17,12 @@ import threading
 import time
 from http.server import ThreadingHTTPServer
 
-# The header with which the postage gate asks a service behind it only to look (a proof of a SHA-256 already paid
-# for, which costs nothing), never to take anything. The gate drops it from every request that comes from outside.
+# How the postage gate asks a service behind it only to look (a proof of a SHA-256 already paid for, which costs
+# nothing), never to take anything: GET LOOK_PATH + the path. A service that can look answers with LOOK: known; the
+# gate gives nothing for free without it, and drops LOOK from every request that comes from outside and from what it
+# passes back. A path that starts with LOOK_PATH is refused when it comes from outside.
 LOOK = "X-Polarka-Look"
+LOOK_PATH = "/_look"
 
 
 class OneRequestWithBody:
