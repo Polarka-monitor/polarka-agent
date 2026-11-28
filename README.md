@@ -23,8 +23,8 @@ waiting do not, OpenTimestamps is free and the better choice.
 **State: 0.2.9.** Any part of this package and of the services at polarka.org may change, and nothing is
 promised.
 `docs/how-it-works.md` (also at https://polarka.org/how/) says what each part does, who holds what and who sees
-what. Faults: an issue at github.com/Polarka-monitor/polarka-agent, or @Polarka_monitor on X; if one puts coins
-at risk, say only that you found something.
+what. Faults: an issue at github.com/Polarka-monitor/polarka-agent; if one puts coins at risk, say only that you
+found something.
 
 It was written with AI models under its author's direction, and its author read it. Independent AI reviewers
 that had not seen it being written read each part and found faults. Every High finding is mended, with tests. Of

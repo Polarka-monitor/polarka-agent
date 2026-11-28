@@ -170,9 +170,8 @@ inbox that does not ask for its letters); it knows which inbox got how much and 
 
 ## Reporting a fault
 
-Open an issue at https://github.com/Polarka-monitor/polarka-agent/issues, or write to
-[@Polarka_monitor](https://x.com/Polarka_monitor) on X. If a fault puts coins at risk, say there only that you
-have found something; the details are then taken privately.
+Open an issue at https://github.com/Polarka-monitor/polarka-agent/issues. If a fault puts coins at risk, say there
+only that you have found something; the details are then taken privately.
 
 ## What is missing
 
